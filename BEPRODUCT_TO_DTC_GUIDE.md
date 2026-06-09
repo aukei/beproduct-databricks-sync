@@ -455,9 +455,43 @@ INSERT INTO lft.beproduct.dtc_season_code_mapping VALUES
 ```
 
 3. **Upload Notebooks:**
+
+**Option A: Using Python Script (Recommended)**
 ```bash
-# Upload all notebooks to Databricks
-python scripts/upload_to_databricks.py
+# Install Databricks SDK
+pip install databricks-sdk
+
+# Configure environment variables in .env
+export DATABRICKS_HOST="https://adb-XXXXXXXX.azuredatabricks.net"
+export DATABRICKS_PAT="dapi..."
+
+# Preview uploads (dry run)
+python scripts/upload_notebooks.py --dry-run
+
+# Upload all notebooks
+python scripts/upload_notebooks.py
+
+# Upload specific directory only
+python scripts/upload_notebooks.py --dir beproduct
+```
+
+**Option B: Using Databricks CLI**
+```bash
+# Install and configure CLI
+pip install databricks-cli
+databricks configure --token
+
+# Upload BeProduct notebooks
+databricks workspace import_dir \
+  ./beproduct \
+  /Workspace/Repos/beproduct-sync/beproduct \
+  --overwrite
+
+# Upload DTC notebooks
+databricks workspace import_dir \
+  ./dtc/notebooks \
+  /Workspace/Repos/beproduct-sync/DTC/notebooks \
+  --overwrite
 ```
 
 ### Job Configuration

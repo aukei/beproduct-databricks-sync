@@ -63,7 +63,8 @@ beproduct-databricks-sync/
 │   └── beproduct_to_dtc_push.py            # Push to DTC with change detection
 │
 ├── scripts/
-│   └── upload_to_databricks.py      # Upload helper
+│   ├── upload_notebooks.py          # Upload notebooks to workspace
+│   └── upload_to_databricks.py      # Upload data (SQLite → Delta)
 │
 ├── .github/
 │   └── workflows/                    # CI/CD pipelines
@@ -114,8 +115,9 @@ cd beproduct-databricks-sync
 # Copy .env.example to .env and fill in values
 cp .env.example .env
 
-# Upload to Databricks
-python scripts/upload_to_databricks.py
+# Upload notebooks to Databricks workspace
+pip install databricks-sdk
+python scripts/upload_notebooks.py
 ```
 
 ### 3. Run Notebooks
@@ -352,9 +354,22 @@ pytest dtc/tests/
 ### Upload Notebooks
 
 ```bash
-# Upload all notebooks to Databricks
-python scripts/upload_to_databricks.py
+# Install Databricks SDK
+pip install databricks-sdk
+
+# Configure .env with DATABRICKS_HOST and DATABRICKS_PAT
+
+# Preview uploads (dry run)
+python scripts/upload_notebooks.py --dry-run
+
+# Upload all notebooks
+python scripts/upload_notebooks.py
+
+# Upload specific directory
+python scripts/upload_notebooks.py --dir beproduct
 ```
+
+**Note:** `scripts/upload_to_databricks.py` is for uploading DATA (SQLite → Delta tables), while `scripts/upload_notebooks.py` is for uploading NOTEBOOKS to workspace.
 
 ## 🔐 Security
 
