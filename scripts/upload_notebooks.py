@@ -28,6 +28,7 @@ Usage
 
 from __future__ import annotations
 
+import base64
 import os
 import sys
 from pathlib import Path
@@ -123,7 +124,7 @@ def upload_notebooks_to_databricks(
     """
     try:
         from databricks.sdk import WorkspaceClient
-        from databricks.sdk.service.workspace import ImportFormat
+        from databricks.sdk.service.workspace import ImportFormat, Language
     except ImportError:
         print(ERR("✗ 'databricks-sdk' is not installed."))
         print("  Run:  pip install databricks-sdk")
@@ -168,16 +169,19 @@ def upload_notebooks_to_databricks(
     for local_path, remote_path in notebooks:
         try:
             with open(local_path, "rb") as f:
-                content = f.read()
+                content_bytes = f.read()
+
+            # Encode content as base64 string (required by SDK)
+            content = base64.b64encode(content_bytes).decode("utf-8")
 
             # Determine language from extension
             ext = local_path.suffix.lower()
             if ext == ".py":
-                language = "PYTHON"
+                language = Language.PYTHON
             elif ext == ".sql":
-                language = "SQL"
+                language = Language.SQL
             else:
-                language = "PYTHON"  # default
+                language = Language.PYTHON  # default
 
             w.workspace.import_(
                 path=remote_path,
