@@ -1,0 +1,2588 @@
+{
+  "info": {
+    "_postman_id": "720a5845-4407-4abb-9f4b-7ce41a9a8905",
+    "name": "DTC (2026-05-08)",
+    "description": "This is API for Data Collaboration Application.\n\n# Authentication\n\nAPI Key is used which is a secure credential that is tied to user account. This key should be included in the header of the request for example as below:\n\nx-api-key:D99213612XXXXXXXXXXXF4ABD62D2\n\n# Assumption\n\nThis API is intended and should be called by server-side application instead of user client directly. For security, It will result in Cross-Origin Resource Sharing (CORS) errors if using in a client-side application.\n\n# API Endpoints\n\nThe base URL under different environments as below:\n\n#### _UAT_\n\n[https://dtc-api.lfuat.net/api](https://dtc-sit.lfuat.net/api)\n\n#### _PRD_\n\n[https://dtc-api.lfapps.net/api](https://dtc-sit.lfuat.net/api)",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_exporter_id": "1720768"
+  },
+  "item": [
+    {
+      "name": "Requests",
+      "item": [
+        {
+          "name": "Create Request",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\r\n    \"requestReference\" : \"string\",\r\n    \"requestDescription\" : \"string\",\r\n    \"documentId\" : \"{{documentId}}\",\r\n    \"workspaceId\" : \"{{workspaceId}}\"\r\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/requests",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "requests"
+              ],
+              "query": [
+                {
+                  "key": null,
+                  "value": "",
+                  "type": "text",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "_Create a request record_\n\n- mandatory checking for requestReference, requestDescription, documentIdand workspaceId\n    \n- validation of documentId and workspaceId\n    \n- user authorization checking of workspaceId"
+          },
+          "response": []
+        },
+        {
+          "name": "Share Request (by user email)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\r\n    \"viewNames\": [\r\n        \"{{viewName1}}\",\r\n        \"{{viewName2}}\"\r\n    ],\r\n    \"message\": \"Testing message\",\r\n    \"sendEmail\" : \"Y\"\r\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/requests/{{requestId}}/shares/{{userEmail}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "requests",
+                "{{requestId}}",
+                "shares",
+                "{{userEmail}}"
+              ],
+              "query": [
+                {
+                  "key": null,
+                  "value": "",
+                  "type": "text",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "_Share a request to a user by user email address_\n\n- validation (duplication, existence) of {userEmail}\n    \n- user authorization checking of request\n\n- message (optional): customized text in email content\n\n- sendEmail (optional): email sending (Y / N), default is Y if not specified"
+          },
+          "response": []
+        },
+        {
+          "name": "Share Request (by user id)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\r\n    \"viewNames\": [\r\n        \"{{viewName1}}\",\r\n        \"{{viewName2}}\"\r\n    ],\r\n    \"message\": \"Testing message\",\r\n    \"sendEmail\" : \"Y\"\r\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/requests/{{requestId}}/shares/{{userId}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "requests",
+                "{{requestId}}",
+                "shares",
+                "{{userId}}"
+              ]
+            },
+            "description": "_Share a request to a user by user id_\n\n- validation (duplication, id existence) of {userId}\n    \n- user authorization checking of request\n    \n- message (optional): customized text in email content\n    \n- sendEmail (optional): email sending (Y / N), default is Y if not specified"
+          },
+          "response": []
+        },
+        {
+          "name": "Share Request (by user group name)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\r\n    \"viewNames\": [\r\n        \"{{viewName1}}\"\r\n    ],\r\n    \"message\": \"Testing Message\",\r\n    \"sendEmail\" : \"Y\"\r\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/requests/{{requestId}}/shares/usergroups/{{userGroupName}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "requests",
+                "{{requestId}}",
+                "shares",
+                "usergroups",
+                "{{userGroupName}}"
+              ],
+              "query": [
+                {
+                  "key": null,
+                  "value": "",
+                  "type": "text",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "_Share a request to a user group by user group name_\n\n- validation (duplication, existence) of {userGroupName}\n    \n- user authorization checking of request\n    \n- message (optional): customized text in email content\n    \n- sendEmail (optional): email sending (Y / N), default is Y if not specified"
+          },
+          "response": []
+        },
+        {
+          "name": "Share Request (by user group id)",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\r\n    \"viewNames\": [\r\n        \"{{viewName1}}\"\r\n    ],\r\n    \"message\": \"Testing Message\",\r\n    \"sendEmail\" : \"Y\"\r\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/requests/{{requestId}}/shares/usergroups/{{userGroupId}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "requests",
+                "{{requestId}}",
+                "shares",
+                "usergroups",
+                "{{userGroupId}}"
+              ],
+              "query": [
+                {
+                  "key": null,
+                  "value": "",
+                  "type": "text",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Share a request to a user group by user group id\n\n- validation (duplication,  id existence) of {userGroupId}\n\n- user authorization checking of request\n\n- message (optional): customized text in email content\n\n- sendEmail (optional): email sending (Y / N), default is Y if not specified"
+          },
+          "response": []
+        },
+        {
+          "name": "Copy Request",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\r\n    \"requestReference\" : \"{{requestReference}}\",\r\n    \"requestDescription\" : \"{{requestDescription}}\",\r\n    \"documentId\" : \"{{documentId}}\",\r\n    \"copySheet\": \"Y\"\r\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/requests/{{requestId}}/copy",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "requests",
+                "{{requestId}}",
+                "copy"
+              ],
+              "query": [
+                {
+                  "key": null,
+                  "value": "",
+                  "type": "text",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "_Copy a request and sheet data_\n\n- copySheet: “Y“ - include sheet data"
+          },
+          "response": []
+        },
+        {
+          "name": "Group Requests",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/requests/{{requestId}}/groups/{{requestIdForGroup}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "requests",
+                "{{requestId}}",
+                "groups",
+                "{{requestIdForGroup}}"
+              ],
+              "query": [
+                {
+                  "key": null,
+                  "value": "",
+                  "type": "text",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "- check id existence of {requestId} and {requestIdToBeGrouped} from collection Requests\n    \n- {requestIdToBeGrouped} cannot be existed in collection RequestGroups\n    \n- user authorization"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Request (by request id)",
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/requests/{{requestId}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "requests",
+                "{{requestId}}"
+              ],
+              "query": [
+                {
+                  "key": null,
+                  "value": "",
+                  "type": "text",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Get a single request record by {requestId}\n\n- exact match\n    \n- return error if more than one record returned\n    \n- return active record only"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Request (by request ref)",
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/requests?requestreference={{requestReference}}&workspacename={{workspaceName}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "requests"
+              ],
+              "query": [
+                {
+                  "key": "requestreference",
+                  "value": "{{requestReference}}"
+                },
+                {
+                  "key": "workspacename",
+                  "value": "{{workspaceName}}"
+                }
+              ]
+            },
+            "description": "get a single request record by request ref. under workspace\n\n- exact match\n\n- return error if more than one record returned\n\n- return active record only"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Requests",
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\r\n    \"pendingOnly\": \"N\",\r\n    \"requestOnly\": \"N\",\r\n    \"workspaceName\": \"{{workspaceName}}\",\r\n    \"filters\": {\r\n        \"ownerEmail\": \"{{userEmail}}\",\r\n        \"requestReference\" : \"{{requestReference}}\",\r\n        \"requestIsActive\" : \"Y\"\r\n    }\r\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/requests",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "requests"
+              ],
+              "query": [
+                {
+                  "key": null,
+                  "value": "",
+                  "type": "text",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "_Search and list request record(s) with criteria_\n\n- workspaceName - workspace\n    \n- pending : (Y/N) - filter with pending records only\n    \n- request : (Y/N) - filter with request records only\n    \n- filters - filtering criteria - AND followings:\n    \n    - requestReference- Request Reference\n\n    - requestDescription - Request Description\n\n    - documentName - Document Name\n\n    - collectionName - Collection Name\n\n    - ownerEmail - Owner’s email address\n\n    - assigneeEmail- Assignee’s email address\n\n    - requestStatusName - Request’s status\n\n    - requestIsActive - Request Active or not (return all records if not specified)"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Request's shared users",
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/requests/{{requestId}}/shares",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "requests",
+                "{{requestId}}",
+                "shares"
+              ],
+              "query": [
+                {
+                  "key": null,
+                  "value": "",
+                  "type": "text",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "_List shared users of a single request record_"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Request’s shared user groups",
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/requests/{{requestId}}/shares/usergroups",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "requests",
+                "{{requestId}}",
+                "shares",
+                "usergroups"
+              ],
+              "query": [
+                {
+                  "key": null,
+                  "value": "",
+                  "type": "text",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "_List shared user groups of a single request record_"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Request's views",
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/requests/{{requestId}}/views",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "requests",
+                "{{requestId}}",
+                "views"
+              ],
+              "query": [
+                {
+                  "key": null,
+                  "value": "",
+                  "type": "text",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "_List available views of a single request record_"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Request’s group",
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/requests/{{requestId}}/groups",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "requests",
+                "{{requestId}}",
+                "groups"
+              ],
+              "query": [
+                {
+                  "key": null,
+                  "value": "",
+                  "type": "text",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "_List grouped requests_"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Request's amendment log",
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\r\n    \"filters\": {\r\n        \"viewId\": \"{{viewId}}\",\r\n        \"logDatStart\": \"2026-01-01T00:00:00.000Z\",\r\n        \"logDatEnd\": \"2026-05-05T00:00:00.000Z\"\r\n    }\r\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/requests/{{requestId}}/amendmentlogs",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "requests",
+                "{{requestId}}",
+                "amendmentlogs"
+              ]
+            },
+            "description": "_list amendment logs of a single request record_  \n  \nviewId - (mandatory except workspace admin) filter fields under the specified view  \nlogDatStart - (optional) filter logs from this date (ISO 8601, UTC)  \nlogDatEnd - (optional) filter logs up to this date (ISO 8601, UTC)  \nlogByEmail - (optional) filter by the user who made changes (exact match)"
+          },
+          "response": []
+        },
+        {
+          "name": "Update Request",
+          "request": {
+            "method": "PUT",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\r\n   \"requestReference\" : \"{{requestReference}}\",\r\n   \"requestDescription\" : \"{{requestDescription}}\",\r\n   \"collectionId\" : \"{{collectionId}}\",\r\n   \"isActive\" : \"Y\"\r\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/requests/{{requestId}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "requests",
+                "{{requestId}}"
+              ],
+              "query": [
+                {
+                  "key": null,
+                  "value": "",
+                  "type": "text",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "_Update a request record_\n\n- mandatory checking for requestReference and requestDescription\n    \n- validation of collectionId (id existence if any)"
+          },
+          "response": []
+        },
+        {
+          "name": "Update Request Status (by status name)",
+          "request": {
+            "method": "PUT",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/requests/{{requestId}}/statuses/{{statusName}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "requests",
+                "{{requestId}}",
+                "statuses",
+                "{{statusName}}"
+              ]
+            },
+            "description": "_Update status by status name_\n\n- validation of requestId and statusName\n    \n- return error if more than one Status ID found\n    \n- user authorization"
+          },
+          "response": []
+        },
+        {
+          "name": "Update Request Status (by status id)",
+          "request": {
+            "method": "PUT",
+            "header": [],
+            "url": {
+              "raw": "{{baseURL}}/v1/requests/{{requestId}}/statuses/{{statusId}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "requests",
+                "{{requestId}}",
+                "statuses",
+                "{{statusId}}"
+              ]
+            },
+            "description": "_Update status by status ID_\n\n- validation of {requestId} and {statusId}\n    \n- user authorization\n\n- ccEmailToAssigner (optional): cc email to Assginer (follow user preference by default)"
+          },
+          "response": []
+        },
+        {
+          "name": "Update Request Assignee (by user email)",
+          "request": {
+            "method": "PUT",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\r\n   \"ccEmailToAssigner\" : \"Y\"\r\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/requests/{{requestId}}/assignees/{{userEmail}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "requests",
+                "{{requestId}}",
+                "assignees",
+                "{{userEmail}}"
+              ]
+            },
+            "description": "_Update assignee by email address_\n\n- validation of {requestId} and {userEmail}\n    \n- user authorization\n\n- ccEmailToAssigner (optional): cc email to Assginer (follow user preference by default)"
+          },
+          "response": []
+        },
+        {
+          "name": "Update Request Assignee (by user id)",
+          "request": {
+            "method": "PUT",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\r\n   \"ccEmailToAssigner\" : \"Y\"\r\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/requests/{{requestId}}/assignees/{{userId}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "requests",
+                "{{requestId}}",
+                "assignees",
+                "{{userId}}"
+              ]
+            },
+            "description": "_Update assignee by User ID_\n\n- validation of {requestId} and {userId}\n    \n- user authorization\n    \n- ccEmailToAssigner (optional): cc email to Assginer (follow user preference by default)"
+          },
+          "response": []
+        },
+        {
+          "name": "Un-share Request (by user email)",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseURL}}/v1/requests/{{requestId}}/shares/{{userEmail}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "requests",
+                "{{requestId}}",
+                "shares",
+                "{{userEmail}}"
+              ]
+            },
+            "description": "_Un-share request of a user by email address_\n\n- validation of {requestId} and {userEmail}\n    \n- user authorization"
+          },
+          "response": []
+        },
+        {
+          "name": "Un-share Request (by user id)",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseURL}}/v1/requests/{{requestId}}/shares/{{userId}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "requests",
+                "{{requestId}}",
+                "shares",
+                "{{userId}}"
+              ]
+            },
+            "description": "_Un-share request of a user by User ID_\n\n- validation of {requestId} and {userId}\n    \n- user authorization"
+          },
+          "response": []
+        },
+        {
+          "name": "Un-share Request (by user group name)",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseURL}}/v1/requests/{{requestId}}/shares/usergroups/{{userGroupName}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "requests",
+                "{{requestId}}",
+                "shares",
+                "usergroups",
+                "{{userGroupName}}"
+              ]
+            },
+            "description": "_Un-share request of a user group by user group name_"
+          },
+          "response": []
+        },
+        {
+          "name": "Un-share Request (by user group id)",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "url": {
+              "raw": "{{baseURL}}/v1/requests/{{requestId}}/shares/usergroups/{{userGroupId}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "requests",
+                "{{requestId}}",
+                "shares",
+                "usergroups",
+                "{{userGroupId}}"
+              ]
+            },
+            "description": "_Un-share request of a user group by user group ID_"
+          },
+          "response": []
+        },
+        {
+          "name": "Un-group Request",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/requests/{{requestId}}/groups/{{requestIdForGroup}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "requests",
+                "{{requestId}}",
+                "groups",
+                "{{requestIdForGroup}}"
+              ],
+              "query": [
+                {
+                  "key": null,
+                  "value": "",
+                  "type": "text",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "- check id existence of {requestId} and{requestIdToBeUngrouped} from collection RequestGroups"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Sheets",
+      "item": [
+        {
+          "name": "Create Sheet",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\r\n    \"requestReference\": \"{{requestReference}}\",\r\n    \"requestDescription\": \"{{requestDescription}}\",\r\n    \"requestAssigneeEmail\": \"{{requestAssigneeEmail}}\",\r\n    \"requestAssigneeSharingViewNames\": [\r\n        \"{{viewName1}}\",\r\n        \"{{viewName2}}\"\r\n    ],\r\n    \"viewName\" : \"{{viewName1}}\",\r\n    \"requestStatusName\": \"{{statusName}}\",\r\n    \"documentName\": \"{{documentName}}\",\r\n    \"workspaceName\": \"{{workspaceName}}\",\r\n    \"sheetData\": [\r\n        {\r\n            \"rowIndex\": 1,\r\n            \"Item No.\": \"I00001\",\r\n            \"Item Description\": \"Marvel Avengers Titan Hero Series Blast Gear Captain America Action Figure\",\r\n            \"Country of Origin\": \"China\",\r\n            \"Harmonized System (HS) Code (10 digits)\": \"906200000\",\r\n            \"Minimum Order Quantity\": 1000,\r\n            \"Production Lead Time (week)\": 8,\r\n            \"Unit Price (USD)\": 5,\r\n            \"Quotation Validity Until\": \"01-JUL-2025\"\r\n        },\r\n        {\r\n            \"rowIndex\": 2,\r\n            \"Item No.\": \"I00202\",\r\n            \"Item Description\": \"Marvel Titan Hero Series Spider-Man 12-Inch Action Figure with Fx Port\",\r\n            \"Country of Origin\": \"China\",\r\n            \"Harmonized System (HS) Code (10 digits)\": \"907\",\r\n            \"Minimum Order Quantity\": 2000,\r\n            \"Production Lead Time (week)\": 5,\r\n            \"Unit Price (USD)\": 4,\r\n            \"Quotation Validity Until\": \"01-JUL-2025\"\r\n        },\r\n        {\r\n            \"rowIndex\": 3,\r\n            \"Item No.\": \"I00023\",\r\n            \"Item Description\": \"Totoro Umbrella LED Night Light Kid's Character Lamp USB Charge (White Belly) Bonus Totoro Tumbler\",\r\n            \"Country of Origin\": \"China\",\r\n            \"Harmonized System (HS) Code (10 digits)\": \"907100000\",\r\n            \"Minimum Order Quantity\": 500,\r\n            \"Production Lead Time (week)\": 20,\r\n            \"Unit Price (USD)\": 6,\r\n            \"Quotation Validity Until\": \"01-JUL-2025\"\r\n        },\r\n        {\r\n            \"rowIndex\": 4,\r\n            \"Item No.\": \"I01004\",\r\n            \"Item Description\": \"Studio Ghibli - My Neighbor Totoro - 9\\\" Grey Fluffy Medium Totoro Plush\",\r\n            \"Country of Origin\": \"China\",\r\n            \"Harmonized System (HS) Code (10 digits)\": \"908110000\",\r\n            \"Minimum Order Quantity\": 1000,\r\n            \"Production Lead Time (week)\": 4,\r\n            \"Unit Price (USD)\": 5,\r\n            \"Quotation Validity Until\": \"01-JUL-2025\"\r\n        },\r\n        {\r\n            \"rowIndex\": 5,\r\n            \"Item No.\": \"I00132\",\r\n            \"Item Description\": \"Studio Ghibli - My Neighbor Totoro - 5\\\" Totoro with Leaf Beanbag, Studio Ghibli Plush\",\r\n            \"Country of Origin\": \"Vietnam\",\r\n            \"Harmonized System (HS) Code (10 digits)\": \"908110000\",\r\n            \"Minimum Order Quantity\": 300,\r\n            \"Production Lead Time (week)\": 4,\r\n            \"Unit Price (USD)\": 100,\r\n            \"Quotation Validity Until\": \"01-JUL-2000\"\r\n        },\r\n        {\r\n            \"rowIndex\": 6,\r\n            \"Item No.\": \"I00326\",\r\n            \"Country of Origin\": \"Vietnam\",\r\n            \"Harmonized System (HS) Code (10 digits)\": \"908110000\",\r\n            \"Minimum Order Quantity\": 500,\r\n            \"Unit Price (USD)\": 7\r\n        },\r\n        {\r\n            \"rowIndex\": 7,\r\n            \"Item No.\": \"I00054\",\r\n            \"Item Description\": \"Disney Classics Lil Friends Tigger and Eeyore Plushie Stuffed Animal, Kids Toys for Ages 2 Up by Just Play\",\r\n            \"Country of Origin\": \"Vietnam\",\r\n            \"Harmonized System (HS) Code (10 digits)\": \"908110000\",\r\n            \"Minimum Order Quantity\": 1000,\r\n            \"Production Lead Time (week)\": 10,\r\n            \"Unit Price (USD)\": 5,\r\n            \"Quotation Validity Until\": \"01-JUL-2025\"\r\n        }\r\n    ]\r\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/sheets",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "sheets"
+              ]
+            },
+            "description": "_Create a request record and a sheet record_\n\n- Workspace Name, View Name and Document Name will be used in JSON\n    \n- View validation - column exists, mandatory, readOnly\n    \n- Check user have view permission\n    \n- Request will be shared to requestAssigneeEmail as well\n    \n- requestAssigneeSharingViewNames is list of views access for the shared user requestAssigneeEmail\n    \n- view control validation (i.e. field mandatory and editable)"
+          },
+          "response": []
+        },
+        {
+          "name": "Add Sheet Image",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "uuid": "545a768c-72fb-4475-bd45-41ac458f9fa8",
+                  "src": "/C:/Users/TommyWong/OneDrive - Li & Fung/Pictures/Flower_jtca001.jpg"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/sheets/{{sheetId}}/views/{{viewId}}/images?rowindex={{rowIndex}}&columnname={{columnName}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "sheets",
+                "{{sheetId}}",
+                "views",
+                "{{viewId}}",
+                "images"
+              ],
+              "query": [
+                {
+                  "key": "rowindex",
+                  "value": "{{rowIndex}}"
+                },
+                {
+                  "key": "columnname",
+                  "value": "{{columnName}}"
+                }
+              ]
+            },
+            "description": "_Add image to a sheet_\n\nParameters:\n\nrowindex - Row index in the sheet\n\ncolumnname - Column name in the sheet\n\n- mandatory checking for rowindex and columnname\n    \n- validation of rowindex and columnname\n    \n- upload image to Azure blob storage and update collection Sheets\n    \n- view control validation (i.e. field editable)"
+          },
+          "response": []
+        },
+        {
+          "name": "Add Sheet Attachments",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "uuid": "545a768c-72fb-4475-bd45-41ac458f9fa8",
+                  "value": null
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/sheets/{{sheetId}}/views/{{viewId}}/attachments?rowindex={{rowIndex}}&columnname={{columnName}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "sheets",
+                "{{sheetId}}",
+                "views",
+                "{{viewId}}",
+                "attachments"
+              ],
+              "query": [
+                {
+                  "key": "rowindex",
+                  "value": "{{rowIndex}}"
+                },
+                {
+                  "key": "columnname",
+                  "value": "{{columnName}}"
+                }
+              ]
+            },
+            "description": "_Add attachment to a sheet\n\nMax file size: 50Mb\n\nParameters:\n\n- rowindex - Row index in the sheet\n    \n- columnname - Column name in the sheet\n    \n- mandatory checking for rowindex and columnname\n    \n- validation of rowindex and columnname\n    \n- system will upload attachment to Azure blob storage and update collection Sheets\n    \n- view control validation (i.e. field editable)\n    \n- supported file extension: PDF, JPG, JPEG, GIF, TIF, TIFF, XLS, XLSX, DOC, DOCX, TXT, MSG, ZIP"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Sheet",
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\r\n    \"filters\": {\r\n        \"TextField\": {\r\n        \"operator\" : \"=\",\r\n        \"values\": \"TW\"\r\n        },\r\n        \"TextField2\": {\r\n        \"operator\" : \"!=\",\r\n        \"values\": \"\"\r\n        },\r\n        \"NumerField\": {\r\n        \"operator\" : \">\",\r\n        \"values\": 10\r\n        },\r\n        \"TextField3\": {\r\n        \"operator\" : \"~\",\r\n        \"values\": \"TW\"\r\n        },\r\n        \"TextField4\": {\r\n        \"operator\" : \"in\",\r\n        \"values\": [\"A\", \"B\", \"C\"]\r\n        }\r\n    }\r\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/sheets/{{sheetId}}/views/{{viewId}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "sheets",
+                "{{sheetId}}",
+                "views",
+                "{{viewId}}"
+              ]
+            },
+            "description": "_Get a single sheet record_\n\nfilters:\n\n- retrieve a subset of data based on specified criteria\n    \n- AND will be used between the field\n    \n- Date format will follow the user preference\n    \n\noperator\n\n- Equality: (case-insensitive) = (equal to), != (not equal to)\n    \n- Comparison: (case-sensitive) > (greater than), < (less than), >= (greater than or equal to), <= (less than or equal to)\n    \n- Containment: (case-insensitive) \\~ (contains), !\\~ (does not contain), in (included in an array), not in (not included in an array)\n    \n\nAvailable operators for field type:\n\n- Text: equality, comparison, containment\n    \n- Number: equality, comparison, containment\n    \n- Date: equality, comparison, containment(in, not in)\n    \n- Checkbox: (YES, NO, Empty String) equality, containment(in, not in)\n    \n- Dropdown list: equality, comparison (compare by string only), containment\n    \n- Dynamic Dropdown: equality, comparison (compare by string only), containment\n    \n- Multiple Dropdown list: containment(in, not in)\n    \n- URL: equality, comparison, containment\n    \n- LOOKUP: equality, comparison, containment\n    \n- Attachment: (meta data) equality, comparison, containment\n    \n- Image: (meta data) equality, comparison, containment"
+          },
+          "response": []
+        },
+        {
+          "name": "Update Sheet (partial update)",
+          "request": {
+            "method": "PATCH",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\r\n    \"sheetData\": [\r\n      {\r\n        \"rowIndex\": 1,\r\n        \"Text Field\": \"ABC\"\r\n      }\r\n    ]\r\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/sheets/{{sheetId}}/views/{{viewId}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "sheets",
+                "{{sheetId}}",
+                "views",
+                "{{viewId}}"
+              ]
+            },
+            "description": "_Partial_ _update of sheet record_\n\n- view control validation (i.e. field editable)"
+          },
+          "response": []
+        },
+        {
+          "name": "Update Sheet (total replacement)",
+          "request": {
+            "method": "PUT",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\r\n    \"sheetData\": [\r\n      {\r\n        \"rowIndex\": 1,\r\n        \"Mill Article#\": \"111\",\r\n        \"Is Fabric Exclusive for Customer\": \"Yes\",\r\n        \"Coloration Process\": \"Cross Dyed\",\r\n      },\r\n      {\r\n        \"rowIndex\": 2,\r\n        \"Mill Article#\": \"222\"\r\n      },\r\n      {\r\n        \"rowIndex\": 3,\r\n        \"Mill Article#\": \"333\",\r\n        \"Is Fabric Exclusive for Customer\": \"No\"\r\n      },\r\n      {\r\n        \"rowIndex\": 4,\r\n        \"Mill Article#\": \"def\",\r\n        \"Coloration Process\": \"Fiber Heather) Dyed\"\r\n      },\r\n      {\r\n        \"rowIndex\": 6,\r\n        \"Mill Article#\": \"zxc\",\r\n        \"Is Fabric Exclusive for Customer\": \"Yes\",\r\n        \"Coloration Process\": \"Print\"\r\n      }\r\n    ]\r\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/sheets/{{sheetId}}/views/{{viewId}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "sheets",
+                "{{sheetId}}",
+                "views",
+                "{{viewId}}"
+              ]
+            },
+            "description": "_Update the sheet and replace all the data_\n\n- view control validation (i.e. field editable)\n\n- the view must include all fields of corresponding document"
+          },
+          "response": []
+        },
+        {
+          "name": "Delete Sheet Image",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "uuid": "545a768c-72fb-4475-bd45-41ac458f9fa8",
+                  "src": "/C:/Users/TommyWong/OneDrive - Li & Fung/Pictures/Flower_jtca001.jpg"
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/sheets/{{sheetId}}/views/{{viewId}}/images?rowindex={{rowIndex}}&columnname={{columnName}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "sheets",
+                "{{sheetId}}",
+                "views",
+                "{{viewId}}",
+                "images"
+              ],
+              "query": [
+                {
+                  "key": "rowindex",
+                  "value": "{{rowIndex}}"
+                },
+                {
+                  "key": "columnname",
+                  "value": "{{columnName}}"
+                }
+              ]
+            },
+            "description": "_Delete image from a sheet_\n\nParameters:\n\nrowindex - Row index in the sheet\n\ncolumnname- Column name in the sheet\n\n- mandatory checking for rowindex\n    \n- validation of rowindex and columnname\n    \n- view control validation (i.e. field editable)"
+          },
+          "response": []
+        },
+        {
+          "name": "Delete Sheet Attachment",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "uuid": "545a768c-72fb-4475-bd45-41ac458f9fa8",
+                  "value": null
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/sheets/{{sheetId}}/views/{{viewId}}/images?rowindex={{rowIndex}}&columnname={{columnName}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "sheets",
+                "{{sheetId}}",
+                "views",
+                "{{viewId}}",
+                "images"
+              ],
+              "query": [
+                {
+                  "key": "rowindex",
+                  "value": "{{rowIndex}}"
+                },
+                {
+                  "key": "columnname",
+                  "value": "{{columnName}}"
+                }
+              ]
+            },
+            "description": "_Delete attachment from a sheet_\n\nParameters:\n\nrowindex - Row index in the sheet\n\ncolumnname- Column name in the sheet\n\nmandatory checking for rowindex\n\nvalidation of rowindex and columnname\n\nview control validation (i.e. field editable)"
+          },
+          "response": []
+        },
+        {
+          "name": "Delete Sheet Rows",
+          "request": {
+            "method": "DELETE",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\r\n    \"rowIndexes\" : [1,3,5]\r\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/sheets/{{sheetId}}/views/{{viewId}}/rows",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "sheets",
+                "{{sheetId}}",
+                "views",
+                "{{viewId}}",
+                "rows"
+              ]
+            },
+            "description": "Delete multiple rows from a sheet\n\n- validation - user permission\n\n- view control validation\n\n- update row indexes of the sheet\n"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Collections",
+      "item": [
+        {
+          "name": "Create Collection",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\r\n    \"collectionName\" : \"{{collectionName}}\",\r\n    \"documentId\" : \"{{documentId}}\",\r\n    \"viewId\" : \"{{viewId}}\",\r\n    \"workspaceId\" : \"{{workspaceId}}\",\r\n    \"requests\": [\r\n        {\r\n            \"requestId\": \"{{requestId}}\"\r\n        }\r\n    ]\r\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/collections",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "collections"
+              ]
+            },
+            "description": "_Create a collection record_\n\n- mandatory checking for collectionName, documentId, viewId, workspaceId\n    \n- validation of requestId and workspaceId"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Collection",
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/collections/{{collectionId}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "collections",
+                "{{collectionId}}"
+              ]
+            },
+            "description": "_Get a single collection record_"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Collections",
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/collections?workspacename={{workspaceName}}&collectionname={{collectionName}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "collections"
+              ],
+              "query": [
+                {
+                  "key": "workspacename",
+                  "value": "{{workspaceName}}"
+                },
+                {
+                  "key": "collectionname",
+                  "value": "{{collectionName}}"
+                }
+              ]
+            },
+            "description": "_Search and list record(s) with criteria_\n\nRequest parameter:  \nworkspacename={string} (whole word match)  \ncollectionname={string} (partial word match)"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Collection Sheet (by default view)",
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/collections/{{collectionId}}/sheets",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "collections",
+                "{{collectionId}}",
+                "sheets"
+              ]
+            },
+            "description": "_Get a single collection sheet record_\n\nRequest Parameter  \nviewid = {string} (optional)\n\n** follow defined view if viewid not specified"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Collection Sheet (by different view)",
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/collections/{{collectionId}}/sheets?viewid={{viewId}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "collections",
+                "{{collectionId}}",
+                "sheets"
+              ],
+              "query": [
+                {
+                  "key": "viewid",
+                  "value": "{{viewId}}"
+                }
+              ]
+            },
+            "description": "_Get a single collection sheet record by different view_\n\nRequest Parameter:  \nviewid = {string} optional"
+          },
+          "response": []
+        },
+        {
+          "name": "Update Collection",
+          "request": {
+            "method": "PUT",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\r\n    \"collectionName\" : \"{{collectionName}}\",\r\n    \"documentId\" : \"{{documentId}}\",\r\n    \"viewId\" : \"{{viewId}}\",\r\n    \"requests\": [\r\n        {\r\n            \"requestId\": \"{{requestId}}\"\r\n        }\r\n    ]\r\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/collections/{{collectionId}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "collections",
+                "{{collectionId}}"
+              ]
+            },
+            "description": "_Update collection record_\n\n- mandatory checking for collectionName, documentId, viewId\n    \n- validation of requestId"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Documents",
+      "item": [
+        {
+          "name": "Create Document",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\r\n    \"documentName\" : \"{{documentName}}\",\r\n    \"workspaceId\" : \"{{workspaceId}}\",\r\n    \"maximumLines\": 1000\r\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/documents",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "documents"
+              ]
+            },
+            "description": "_Create document record and fields_\n\n- mandatory checking for documentName and workspaceId\n    \n- validation of documentName and workspaceId"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Document",
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/documents/{{documentId}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "documents",
+                "{{documentId}}"
+              ]
+            },
+            "description": "_Get a single document record_"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Documents",
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/documents?workspacename={{workspaceName}}&documentname={{documentName}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "documents"
+              ],
+              "query": [
+                {
+                  "key": "workspacename",
+                  "value": "{{workspaceName}}"
+                },
+                {
+                  "key": "documentname",
+                  "value": "{{documentName}}"
+                }
+              ]
+            },
+            "description": "_Search and list document record(s) with criteria_\n\n- mandatory checking for workspacename\n    \n\nRequest parameter:  \nworkspacename={string} (whole word match)  \ndocumentname={string} (partial word match)"
+          },
+          "response": []
+        },
+        {
+          "name": "Update Document",
+          "request": {
+            "method": "PUT",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\r\n    \"documentName\" : \"{{documentName}}\",\r\n    \"dynamicFields\": [\r\n        {\r\n            \"fieldName\": \"Text Field\",\r\n            \"fieldDescription\": \"\",\r\n            \"type\": \"string\"\r\n        },\r\n        {\r\n            \"fieldName\": \"Number Field\",\r\n            \"fieldDescription\": \"\",\r\n            \"type\": \"number\",\r\n            \"format\": {},\r\n            \"formatString\": \"\"\r\n        },\r\n        {\r\n            \"fieldName\": \"Date Field\",\r\n            \"fieldDescription\": \"\",\r\n            \"type\": \"date\"\r\n        },\r\n        {\r\n            \"fieldName\": \"Check Box Field\",\r\n            \"fieldDescription\": \"\",\r\n            \"type\": \"checkbox\"\r\n        },\r\n        {\r\n            \"fieldName\": \"Drop Down List Field\",\r\n            \"fieldDescription\": \"\",\r\n            \"type\": \"array\",\r\n            \"values\": [\r\n                \"Apple\",\r\n                \"Orange\"\r\n            ]\r\n        },\r\n        {\r\n            \"fieldName\": \"Image Field\",\r\n            \"fieldDescription\": \"\",\r\n            \"type\": \"contact\"\r\n        },\r\n        {            \r\n            \"fieldName\": \"Lookup Field\",\r\n            \"fieldDescription\": \"\",\r\n            \"type\": \"lookup\",\r\n            \"dataSource\": {\r\n                \"requestId\": \"{{requestId}}\",\r\n                \"lookUpViewId\": \"{{lookUpViewId}}\",\r\n                \"lookUpTargetFieldName\": \"{{lookUpTargetFieldName}}\",\r\n                \"sourceFieldName\": \"{{sourceFieldName}}\"\r\n            }\r\n        }\r\n     ]\r\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/documents/{{documentId}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "documents",
+                "{{documentId}}"
+              ]
+            },
+            "description": "_Update document and fields_\n\n- mandatory checking for fieldName and type"
+          },
+          "response": []
+        },
+        {
+          "name": "Update Document Name",
+          "request": {
+            "method": "PATCH",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\r\n    \"documentName\" : \"{{documentName}}\",\r\n    \"maximumLines\": 1000\r\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/documents/{{documentId}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "documents",
+                "{{documentId}}"
+              ]
+            },
+            "description": "_Update document name_\n\n- mandatory checking for documentName"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Views",
+      "item": [
+        {
+          "name": "Create View",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\r\n    \"viewName\" : \"View 4 by API\",\r\n    \"documentId\" : \"67a2fdc0a4346e82a2509696\",\r\n    \"workspaceId\" : \"66d7c3fc61bcd115bd56bf2f\",\r\n    \"allowInsertRow\": \"Y\",\r\n    \"allowRemoveRow\": \"Y\", \r\n    \"order\": 4,\r\n    \"dynamicFields\": [\r\n      {\r\n        \"fieldName\": \"Text Field\",\r\n        \"mandatory\": \"N\",\r\n        \"readOnly\": \"N\"\r\n      },\r\n      {\r\n        \"fieldName\": \"Number Field\",\r\n        \"mandatory\": \"N\",\r\n        \"readOnly\": \"N\"\r\n      },\r\n      {\r\n        \"fieldName\": \"Date Field\",\r\n        \"mandatory\": \"N\",\r\n        \"readOnly\": \"N\"\r\n      },\r\n      {\r\n        \"fieldName\": \"Check Box Field\",\r\n        \"mandatory\": \"N\",\r\n        \"readOnly\": \"N\"\r\n      },\r\n      {\r\n        \"fieldName\": \"Drop Down List Field\",\r\n        \"mandatory\": \"N\",\r\n        \"readOnly\": \"N\"\r\n      },\r\n      {\r\n        \"fieldName\": \"Image Field\",\r\n        \"mandatory\": \"N\",\r\n        \"readOnly\": \"N\"\r\n      }\r\n    ]\r\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/views",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "views"
+              ]
+            },
+            "description": "_Create a view_\n\n- mandatory checking for viewName, documentId, workspaceId, order\n    \n- validation of order, fieldName,mandatory, readOnly"
+          },
+          "response": []
+        },
+        {
+          "name": "Get View",
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/views/{{viewId}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "views",
+                "{{viewId}}"
+              ]
+            },
+            "description": "_Get a single view record_"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Views",
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/views?workspacename={{workspaceName}}&documentname={{documentName}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "views"
+              ],
+              "query": [
+                {
+                  "key": "workspacename",
+                  "value": "{{workspaceName}}"
+                },
+                {
+                  "key": "documentname",
+                  "value": "{{documentName}}"
+                }
+              ]
+            },
+            "description": "_Search and list view record(s) with criteria_\n\n- mandatory checking for workspacename\n    \n\nRequest parameter:  \nworkspacename={string} (whole word match)  \ndocumentname={string} (whole word match)  \nviewname={string} (partial word match)"
+          },
+          "response": []
+        },
+        {
+          "name": "Update View",
+          "request": {
+            "method": "PUT",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\r\n    \"viewName\" : \"View 1 20250228\",\r\n    \"order\": 1,\r\n    \"allowInsertRow\": \"Y\",\r\n    \"allowRemoveRow\": \"Y\", \r\n    \"dynamicFields\": [\r\n      {\r\n        \"fieldName\": \"Text Field\",\r\n        \"isMandatory\": true,\r\n        \"isReadOnly\": false\r\n      },\r\n      {\r\n        \"fieldName\": \"Number Field\",\r\n        \"isMandatory\": false,\r\n        \"isReadOnly\": false\r\n      },\r\n      {\r\n        \"fieldName\": \"Date Field\",\r\n        \"isMandatory\": false,\r\n        \"isReadOnly\": false\r\n      },\r\n      {\r\n        \"fieldName\": \"Check Box Field\",\r\n        \"isMandatory\": false,\r\n        \"isReadOnly\": false\r\n      },\r\n      {\r\n        \"fieldName\": \"Drop Down List Field\",\r\n        \"isMandatory\": false,\r\n        \"isReadOnly\": false\r\n      },\r\n      {\r\n        \"fieldName\": \"Image Field\",\r\n        \"isMandatory\": false,\r\n        \"isReadOnly\": true\r\n      }\r\n    ]\r\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/views/{{viewId}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "views",
+                "{{viewId}}"
+              ]
+            },
+            "description": "_Update a view record_\n\n- mandatory checking for viewName, order, {viewId}\n    \n- checking - the field can either mandatory or read-only"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Statuses",
+      "item": [
+        {
+          "name": "Create Status",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\r\n    \"statusName\": \"{{statusName}}\",\r\n    \"documentId\": \"{{documentId}}\",\r\n    \"order\": 3,\r\n    \"defaultViewId\": \"67a2fe3ba4346e82a250969d\",\r\n    \"statusCategoryId\": \"670dd41dd3bc14b6e8c284ae\",\r\n    \"workspaceId\" : \"66d7c3fc61bcd115bd56bf2f\",\r\n    \"views\": [\r\n        {\r\n            \"viewId\": \"67a2fe3ba4346e82a250969d\"\r\n        },\r\n        {\r\n            \"viewId\": \"67a2fe57a4346e82a25096a0\"\r\n        }\r\n    ]\r\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/statuses",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "statuses"
+              ]
+            },
+            "description": "_Create status record for request_\n\n- mandatory checking for name\n    \n- validation of document and workspace"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Status",
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/statuses/{{statusId}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "statuses",
+                "{{statusId}}"
+              ]
+            },
+            "description": "_Get a single status record_"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Statuses",
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/statuses/{{statusId}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "statuses",
+                "{{statusId}}"
+              ]
+            },
+            "description": "_Search and list status record(s) with criteria_\n\n  \nRequest parameter:  \nworkspacename={string} (whole word match)  \ndocumentname={string} (whole word match)  \nstatusname={string} (partial word match)  \nstatuscategoryname={string} (partial word match)"
+          },
+          "response": []
+        },
+        {
+          "name": "Update Status",
+          "request": {
+            "method": "PUT",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\r\n    \"statusName\": \"Done\",\r\n    \"documentId\": \"67a2fdc0a4346e82a2509696\",\r\n    \"order\": 3,\r\n    \"defaultViewId\": \"67a2fe3ba4346e82a250969d\",\r\n    \"statusCategoryId\": \"670dd41dd3bc14b6e8c284ae\",\r\n    \"workspaceId\" : \"66d7c3fc61bcd115bd56bf2f\",\r\n    \"views\": [\r\n        {\r\n            \"viewId\": \"67a2fe3ba4346e82a250969d\"\r\n        },\r\n        {\r\n            \"viewId\": \"67a2fe57a4346e82a25096a0\"\r\n        }\r\n    ]\r\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/statuses/{{statusId}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "statuses",
+                "{{statusId}}"
+              ]
+            },
+            "description": "_Update a status record for a request_"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Workspaces",
+      "item": [
+        {
+          "name": "Add Workspace User",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/workspaces/{{workspaceId}}/users/{{userEmail}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "workspaces",
+                "{{workspaceId}}",
+                "users",
+                "{{userEmail}}"
+              ]
+            },
+            "description": "_add a user to workspace_\n\n- mandatory checking for {workSpaceId} and {email}"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Workspace",
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/workspaces/{{workspaceId}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "workspaces",
+                "{{workspaceId}}"
+              ]
+            },
+            "description": "_Get a single workspace record_"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Workspace User by email",
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/workspaces/{{workspaceId}}/users/{{userEmail}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "workspaces",
+                "{{workspaceId}}",
+                "users",
+                "{{userEmail}}"
+              ]
+            },
+            "description": "_Get users of a workspace by email_\n\n- user authorization - workspace admin"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Workspace User by user id",
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/workspaces/{{workspaceId}}/users/{{userId}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "workspaces",
+                "{{workspaceId}}",
+                "users",
+                "{{userId}}"
+              ]
+            },
+            "description": "_Get users of a workspace by user id_\n\n- user authorization - workspace admin"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Workspace Users",
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/workspaces/{{workspaceId}}/users?username={{userName}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "workspaces",
+                "{{workspaceId}}",
+                "users"
+              ],
+              "query": [
+                {
+                  "key": "username",
+                  "value": "{{userName}}"
+                }
+              ]
+            },
+            "description": "Get all users of a workspace\n\n- user authorization - workspace admin\n    \n\nRequest parameter:  \nusername={string} (partial word match & case insensitive)"
+          },
+          "response": []
+        },
+        {
+          "name": "Update Workspace User's authorizations",
+          "request": {
+            "method": "PUT",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\r\n   \"admin\": \"Y\",\r\n   \"documentSetupBasic\": \"Y\",\r\n   \"documentSetupAdvanced\": \"Y\",\r\n   \"requestCreate\": \"Y\",\r\n   \"requestUpdate\": \"Y\",\r\n   \"requestRead\": \"Y\",\r\n   \"requestShare\": \"Y\",\r\n   \"requestLink\": \"Y\",\r\n   \"requestChangeStatus\": \"Y\",\r\n   \"requestDataUpdate\": \"Y\",\r\n   \"collectionCreate\": \"Y\",\r\n   \"collectionUpdate\": \"Y\",\r\n   \"collectionRead\": \"Y\"\r\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/workspaces/{{workspaceId}}/users/{{userEmail}}/authorizations",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "workspaces",
+                "{{workspaceId}}",
+                "users",
+                "{{userEmail}}",
+                "authorizations"
+              ]
+            },
+            "description": "- mandatory checking for {workspaceId} and {email}\n    \n- user authorization checking\n    \n- validation"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Status Categories",
+      "item": [
+        {
+          "name": "Get Status Categories",
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/statuscategories",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "statuscategories"
+              ]
+            },
+            "description": "_List all records of status categories_"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Images",
+      "item": [
+        {
+          "name": "Get Images",
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": ""
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/images/{{imageFileName}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "images",
+                "{{imageFileName}}"
+              ],
+              "query": [
+                {
+                  "key": null,
+                  "value": "",
+                  "type": "text",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "_Get a image by physical file name_"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Attachments",
+      "item": [
+        {
+          "name": "Get Attachment",
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": ""
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/attachments/{{attachmentFileName}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "attachments",
+                "{{attachmentFileName}}"
+              ],
+              "query": [
+                {
+                  "key": null,
+                  "value": "",
+                  "type": "text",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "_Get an attachment_"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "User Groups",
+      "item": [
+        {
+          "name": "Create User Group",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\r\n    \"userGroupName\" : \"{{userGroupName}}\",\r\n    \"workspaceId\" : \"{{workspaceId}}\",\r\n    \"users\": [\r\n        {\r\n            \"userId\": \"{{userId}}\"\r\n        }\r\n    ]\r\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/usergroups",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "usergroups"
+              ]
+            },
+            "description": "_Create a user group record_\n\n- mandatory checking for userGroupName, workspaceId\n\n- validation of userId and workspaceId"
+          },
+          "response": []
+        },
+        {
+          "name": "Update User Group",
+          "request": {
+            "method": "PUT",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\r\n    \"userGroupName\" : \"{{userGroupName}}\",\r\n    \"users\": [\r\n        {\r\n            \"userId\": \"{{userId}}\"\r\n        }\r\n    ]\r\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/usergroups/{{userGroupId}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "usergroups",
+                "{{userGroupId}}"
+              ]
+            },
+            "description": "_Update user group record_\n\n- mandatory checking for userGroupName\n    \n- validation of requestId"
+          },
+          "response": []
+        },
+        {
+          "name": "Get User Group",
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/usergroups/{{userGroupId}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "usergroups",
+                "{{userGroupId}}"
+              ]
+            },
+            "description": "_Get a single user group record_"
+          },
+          "response": []
+        },
+        {
+          "name": "Get User Groups",
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/usergroups?workspacename={{workspaceName}}&usergroupname={{userGroupName}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "usergroups"
+              ],
+              "query": [
+                {
+                  "key": "workspacename",
+                  "value": "{{workspaceName}}"
+                },
+                {
+                  "key": "usergroupname",
+                  "value": "{{userGroupName}}"
+                }
+              ]
+            },
+            "description": "_Search and list groups with criteria_\n\nRequest parameter:  \nworkspacename={string} (whole word match)  \nusergroupname={string} (partial word match)"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Users",
+      "item": [
+        {
+          "name": "Create User",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "{\r\n    \"email\" : \"{{userEmail}}\",\r\n    \"userName\" : \"{{userName}}\",\r\n    \"partnerCompany\" : \"{{partnerCompany}}\",\r\n    \"referrerEmail\" : \"{{referrerEmail}}\",\r\n    \"administrator\" : \"N\",\r\n    \"activeUser\" : \"Y\",\r\n    \"internalRemark\" : \"\"\r\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/users",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "users"
+              ]
+            },
+            "description": "- mandatory checking for `email` and `userName`\n    \n- validation of `email`\n    \n- `administrator` (Y/N) will be “N“ by default if not specified\n    \n- `activeUser` (Y/N) will be “Y“ by default if not specified\n    \n- user authorization checking of user creation"
+          },
+          "response": []
+        },
+        {
+          "name": "Get User (by user id)",
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/users/{{userId}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "users",
+                "{{userId}}"
+              ]
+            },
+            "description": "_Get user by id_"
+          },
+          "response": []
+        },
+        {
+          "name": "Get User (by user email)",
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/users/{{userEmail}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "users",
+                "{{userEmail}}"
+              ]
+            },
+            "description": "_Get user by email_"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Users (by workspace id)",
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/users?workspaceid={{workspaceId}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "users"
+              ],
+              "query": [
+                {
+                  "key": "workspaceid",
+                  "value": "{{workspaceId}}"
+                }
+              ]
+            },
+            "description": "_Get all users of a workspace_"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Users (by workspace id and username)",
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/users?workspaceid={{workspaceId}}&username={{userName}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "users"
+              ],
+              "query": [
+                {
+                  "key": "workspaceid",
+                  "value": "{{workspaceId}}"
+                },
+                {
+                  "key": "username",
+                  "value": "{{userName}}"
+                }
+              ]
+            },
+            "description": "_Get all users and filtered by parameters_\n\nRequest parameter:\nworkspaceid={string}\nusername={string} (partial word match & case insensitive)\n"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Users (by username)",
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/users?username={{userName}}",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "users"
+              ],
+              "query": [
+                {
+                  "key": "username",
+                  "value": "{{userName}}"
+                }
+              ]
+            },
+            "description": "_Get all users and filtered by parameters_\n\nRequest parameter:  \nusername={string} (partial word match & case insensitive)"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Me",
+          "protocolProfileBehavior": {
+            "disableBodyPruning": true
+          },
+          "request": {
+            "method": "GET",
+            "header": [],
+            "body": {
+              "mode": "raw",
+              "raw": "",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseURL}}/v1/users/me",
+              "host": [
+                "{{baseURL}}"
+              ],
+              "path": [
+                "v1",
+                "users",
+                "me"
+              ]
+            },
+            "description": "_Get current user info_"
+          },
+          "response": []
+        }
+      ]
+    }
+  ],
+  "auth": {
+    "type": "apikey",
+    "apikey": [
+      {
+        "key": "value",
+        "value": "{{x-api-key}}",
+        "type": "string"
+      },
+      {
+        "key": "key",
+        "value": "x-api-key",
+        "type": "string"
+      }
+    ]
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "packages": {},
+        "requests": {},
+        "exec": [
+          ""
+        ]
+      }
+    },
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "packages": {},
+        "requests": {},
+        "exec": [
+          ""
+        ]
+      }
+    }
+  ]
+}

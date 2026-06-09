@@ -354,6 +354,145 @@ class DTCConnector:
         """
         logger.info(f"Deleting row {row_id} from sheet {sheet_id}")
         return self.client.delete(f"/v1/sheets/{sheet_id}/rows/{row_id}")
+    
+    def create_sheet(
+        self,
+        workspace_name: str,
+        document_name: str,
+        request_name: str,
+        request_description: str = "",
+        **kwargs
+    ) -> Dict[str, str]:
+        """
+        Create new DTC Request and Sheet.
+        
+        POST /v1/sheets
+        
+        Args:
+            workspace_name: DTC workspace name (e.g., "Kontoor", "KTB")
+            document_name: Document name (e.g., "KTB WIP")
+            request_name: Request name (e.g., "KON SS26 Wrangler")
+            request_description: Optional description
+            **kwargs: Additional fields for the request
+        
+        Returns:
+            {
+                "requestId": "...",
+                "sheetId": "...",
+                ...
+            }
+        """
+        logger.info(f"Creating sheet: workspace={workspace_name}, document={document_name}, name={request_name}")
+        
+        payload = {
+            "workspaceName": workspace_name,
+            "documentName": document_name,
+            "requestName": request_name,
+            "requestDescription": request_description,
+            **kwargs
+        }
+        
+        response = self.client.post("/v1/sheets", json=payload)
+        logger.info(f"Created sheet: requestId={response.get('requestId')}, sheetId={response.get('sheetId')}")
+        return response
+    
+    def search_requests(
+        self,
+        workspace_name: str,
+        document_name: str = None
+    ) -> List[Dict]:
+        """
+        Search for requests in a workspace.
+        
+        GET /v1/requests?workspace={name}&document={name}
+        
+        Args:
+            workspace_name: DTC workspace name
+            document_name: Optional document name to filter
+        
+        Returns:
+            List of request dicts with requestId, requestReference, etc.
+        """
+        logger.info(f"Searching requests: workspace={workspace_name}, document={document_name}")
+        
+        params = {"workspace": workspace_name}
+        if document_name:
+            params["document"] = document_name
+        
+        response = self.client.get("/v1/requests", params=params)
+        requests = response.get("data", [])
+        
+        logger.info(f"Found {len(requests)} requests")
+        return requests
+    
+    def get_max_row_index(self, sheet_id: str, view_id: str) -> int:
+        """
+        Get maximum rowIndex for a sheet.
+        
+        Args:
+            sheet_id: DTC sheet ID
+            view_id: DTC view ID
+        
+        Returns:
+            Max rowIndex (int), or 0 if sheet is empty
+        """
+        logger.info(f"Getting max row index for sheet {sheet_id}")
+        
+        sheet = self.get_sheet(sheet_id, view_id)
+        rows = sheet.get("sheetData", [])
+        
+        if not rows:
+            return 0
+        
+        max_index = max(row.get("rowIndex", 0) for row in rows)
+        logger.info(f"Max row index: {max_index}")
+        return max_index
+    
+    def patch_row(
+        self,
+        sheet_id: str,
+        view_id: str,
+        column_values: Dict[str, Any],
+        row_id: str = None,
+        row_index: int = None
+    ) -> Dict:
+        """
+        Update existing row or create new row using PATCH API.
+        
+        PATCH /v1/sheets/{sheetId}/views/{viewId}
+        
+        Per requirements (lines 80-85):
+        - For existing rows: use rowId
+        - For new rows: use rowIndex (max + 1)
+        
+        Args:
+            sheet_id: DTC sheet ID
+            view_id: DTC view ID
+            column_values: Dict of {columnName: value}
+            row_id: For updating existing row
+            row_index: For creating new row (if row_id not provided)
+        
+        Returns:
+            Response dict from DTC API
+        """
+        if not row_id and not row_index:
+            raise ValueError("Must provide either row_id or row_index")
+        
+        payload = {"columnValues": column_values}
+        
+        if row_id:
+            payload["rowId"] = row_id
+            logger.info(f"Patching existing row {row_id} in sheet {sheet_id}")
+        elif row_index:
+            payload["rowIndex"] = row_index
+            logger.info(f"Creating new row at index {row_index} in sheet {sheet_id}")
+        
+        response = self.client.patch(
+            f"/v1/sheets/{sheet_id}/views/{view_id}",
+            json=payload
+        )
+        
+        return response
 
     def close(self):
         """Close the connector."""
