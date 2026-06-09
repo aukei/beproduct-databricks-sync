@@ -61,10 +61,10 @@ if count == 0:
     # Insert sample mappings
     # IMPORTANT: Update these with actual mappings from your environment
     sample_mappings = [
-        ("KON", "SS28", "Spring", 2028, "Spring 2028"),
-        ("KON", "SS26", "Spring", 2026, "Spring 2026"),
-        ("KON", "FW27", "Fall", 2027, "Fall 2027"),
-        ("KON", "FW26", "Fall", 2026, "Fall 2026"),
+        ("KTB", "SS28", "Spring", 2028, "Spring 2028"),
+        ("KTB", "SS26", "Spring", 2026, "Spring 2026"),
+        ("KTB", "FW27", "Fall", 2027, "Fall 2027"),
+        ("KTB", "FW26", "Fall", 2026, "Fall 2026"),
     ]
     
     for dtc_cust, season_code, bp_season, bp_year, desc in sample_mappings:
@@ -99,19 +99,19 @@ print(f"\nTo add new mappings:")
 print(f"""
 INSERT INTO {mapping_table}
 (dtc_customer, season_code, beproduct_season, beproduct_year, description)
-VALUES ('KON', 'SS25', 'Spring', 2025, 'Spring 2025');
+VALUES ('KTB', 'SS25', 'Spring', 2025, 'Spring 2025');
 """)
 
 print(f"\nTo update existing mapping:")
 print(f"""
 UPDATE {mapping_table}
 SET beproduct_season = 'Summer', beproduct_year = 2028
-WHERE dtc_customer = 'KON' AND season_code = 'SS28';
+WHERE dtc_customer = 'KTB' AND season_code = 'SS28';
 """)
 
 print(f"\nTo view mappings for a customer:")
 print(f"""
 SELECT * FROM {mapping_table}
-WHERE dtc_customer = 'KON'
+WHERE dtc_customer = 'KTB'
 ORDER BY beproduct_year DESC, beproduct_season;
 """)

@@ -156,7 +156,7 @@ schema = "beproduct"
 source_table = "ktb_styles_extended"
 staging_table = "beproduct_to_dtc_staging"
 folder_name = "KTB"
-customer_code = "KON"           # DTC customer code
+customer_code = "KTB"           # DTC customer code
 ```
 
 **Input:** `lft.beproduct.ktb_styles_extended`  
@@ -181,7 +181,7 @@ OUTPUT (4 rows):
 ```sql
 CREATE TABLE lft.beproduct.beproduct_to_dtc_staging (
     -- Composite key
-    dtc_request_name STRING,           -- "KON SS26 Wrangler"
+    dtc_request_name STRING,           -- "KTB SS26 Wrangler"
     lf_style_number STRING,
     color_name STRING,
     fabric_group STRING,               -- "Main Fabric" or "Fabric"
@@ -226,9 +226,9 @@ Uses table: `lft.beproduct.dtc_season_code_mapping`
 ```sql
 dtc_customer | season_code | beproduct_season | beproduct_year
 -------------|-------------|------------------|---------------
-KON          | SS26        | Spring           | 2026
-KON          | FW27        | Fall             | 2027
-KON          | SS28        | Spring           | 2028
+KTB          | SS26        | Spring           | 2026
+KTB          | FW27        | Fall             | 2027
+KTB          | SS28        | Spring           | 2028
 ```
 
 Created by: `dtc/notebooks/00_init_season_mapping.py`
@@ -238,9 +238,9 @@ Created by: `dtc/notebooks/00_init_season_mapping.py`
 "<Customer> <SeasonCode> <Brand>"
 
 Examples:
-  - "KON SS26 Wrangler"
-  - "KON FW27 Lee"
-  - "KON SS28 Wrangler Western"
+  - "KTB SS26 Wrangler"
+  - "KTB FW27 Lee"
+  - "KTB SS28 Wrangler Western"
 ```
 
 ---
@@ -265,7 +265,7 @@ catalog = "lft"
 schema = "beproduct"
 staging_table = "beproduct_to_dtc_staging"
 dtc_environment = "uat"
-dtc_workspace = "Kontoor"
+dtc_workspace = "KTB"
 dtc_document = "KTB WIP"
 dry_run = "false"
 ```
@@ -275,7 +275,7 @@ dry_run = "false"
 **Schema:**
 ```sql
 CREATE TABLE lft.beproduct.dtc_request_mapping (
-    dtc_request_name STRING PRIMARY KEY,  -- "KON SS26 Wrangler"
+    dtc_request_name STRING PRIMARY KEY,  -- "KTB SS26 Wrangler"
     request_id STRING,
     sheet_id STRING,
     workspace_name STRING,
@@ -449,9 +449,9 @@ databricks secrets put --scope beproduct --key company_domain
 
 # Then update with actual mappings
 INSERT INTO lft.beproduct.dtc_season_code_mapping VALUES
-  ('KON', 'SS26', 'Spring', 2026, 'Spring 2026'),
-  ('KON', 'FW27', 'Fall', 2027, 'Fall 2027'),
-  ('KON', 'SS28', 'Spring', 2028, 'Spring 2028');
+  ('KTB', 'SS26', 'Spring', 2026, 'Spring 2026'),
+  ('KTB', 'FW27', 'Fall', 2027, 'Fall 2027'),
+  ('KTB', 'SS28', 'Spring', 2028, 'Spring 2028');
 ```
 
 3. **Upload Notebooks:**
@@ -475,7 +475,7 @@ python scripts/upload_to_databricks.py
 - **Schedule:** Daily at 12pm UTC (depends on Job 1)
 - **Cluster:** Single-node
 - **Parameters:**
-  - `customer_code`: KON
+  - `customer_code`: KTB
 
 **Job 3: DTC Request Manager**
 - **Notebook:** `/Workspace/Repos/beproduct-sync/beproduct/dtc_request_manager`
@@ -593,7 +593,7 @@ Fix:
 
 **2. DTC request not found**
 ```
-Error: Request "KON SS26 Wrangler" not found
+Error: Request "KTB SS26 Wrangler" not found
 
 Fix:
 - Run dtc_request_manager.py to create missing requests

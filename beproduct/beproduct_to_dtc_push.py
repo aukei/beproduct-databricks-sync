@@ -106,7 +106,7 @@ try:
     connector = DTCConnector(
         api_key=dtc_api_key,
         environment=dtc_environment,
-        workspace_name="Kontoor"
+        workspace_name="KTB"
     )
     print(f"✅ DTCConnector initialized")
     

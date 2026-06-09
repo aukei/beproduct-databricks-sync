@@ -18,7 +18,7 @@ Parameters:
   - schema: Databricks schema (default: "beproduct")
   - staging_table: Staging table (default: "beproduct_to_dtc_staging")
   - dtc_environment: DTC environment (default: "uat")
-  - dtc_workspace: DTC workspace name (default: "Kontoor")
+  - dtc_workspace: DTC workspace name (default: "KTB")
   - dtc_document: DTC document name (default: "KTB WIP")
   - dry_run: Test mode without creating requests (default: "false")
 """
@@ -48,7 +48,7 @@ dbutils.widgets.text("catalog", "lft", "Catalog Name")
 dbutils.widgets.text("schema", "beproduct", "Schema Name")
 dbutils.widgets.text("staging_table", "beproduct_to_dtc_staging", "Staging Table")
 dbutils.widgets.text("dtc_environment", "uat", "DTC Environment")
-dbutils.widgets.text("dtc_workspace", "Kontoor", "DTC Workspace Name")
+dbutils.widgets.text("dtc_workspace", "KTB", "DTC Workspace Name")
 dbutils.widgets.text("dtc_document", "KTB WIP", "DTC Document Name")
 dbutils.widgets.text("dry_run", "false", "Dry Run (true/false)")
 

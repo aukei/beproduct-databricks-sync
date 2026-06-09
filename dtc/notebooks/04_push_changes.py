@@ -22,7 +22,7 @@ from sync.snapshot import SnapshotManager
 
 # Define widgets with defaults
 try:
-    dbutils.widgets.text("dtc_workspace_name", "Kontoor", "DTC Workspace Name")
+    dbutils.widgets.text("dtc_workspace_name", "KTB", "DTC Workspace Name")
     dbutils.widgets.text("dtc_request_id", "69f076f0b7247a661226be9a", "DTC Request ID")
     dbutils.widgets.text("dtc_environment", "uat", "DTC Environment (uat/prod)")
     dbutils.widgets.text("target_catalog", "lft", "Target Catalog")

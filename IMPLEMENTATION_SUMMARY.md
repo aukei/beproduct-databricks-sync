@@ -218,9 +218,9 @@ beproduct/company_domain        # BeProduct domain
 ### Season Code Mapping Table
 ```sql
 INSERT INTO lft.beproduct.dtc_season_code_mapping VALUES
-  ('KON', 'SS26', 'Spring', 2026, 'Spring 2026'),
-  ('KON', 'FW27', 'Fall', 2027, 'Fall 2027'),
-  ('KON', 'SS28', 'Spring', 2028, 'Spring 2028');
+  ('KTB', 'SS26', 'Spring', 2026, 'Spring 2026'),
+  ('KTB', 'FW27', 'Fall', 2027, 'Fall 2027'),
+  ('KTB', 'SS28', 'Spring', 2028, 'Spring 2028');
 ```
 
 ---

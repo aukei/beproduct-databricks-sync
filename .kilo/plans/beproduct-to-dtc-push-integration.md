@@ -158,11 +158,11 @@ Per requirements (lines 73-79):
 ```
 Format: "<Customer> <SeasonCode> <Brand>"
 Examples:
-  - "KON SS26 Wrangler"
-  - "KON FW27 Lee"
+  - "KTB SS26 Wrangler"
+  - "KTB FW27 Lee"
 
 Where:
-  - Customer = BeProduct Folder Name (e.g., "KON" for KTB)
+  - Customer = BeProduct Folder Name (e.g., "KTB" for KTB)
   - SeasonCode = SSYY format (e.g., SS26, FW27)
     - Mapped via lft.beproduct.dtc_season_code_mapping table
     - BeProduct Season="Spring" + Year=2026 → DTC SeasonCode="SS26"
@@ -298,7 +298,7 @@ Change Detection:
      - lf_style_number (unique key within request)
      - color_name (part of composite key)
      - fabric_group (part of composite key)
-     - dtc_request_name (derived: "KON SS26 Wrangler")
+     - dtc_request_name (derived: "KTB SS26 Wrangler")
      - season_code (DTC format: "SS26")
      - [all mapped DTC columns]
      - beproduct_modified_at (UTC timestamp)
@@ -324,13 +324,13 @@ Change Detection:
 2. **Check if DTC Request exists:**
    ```python
    # Use DTCConnector to search by workspace + document + request name
-   # Workspace: "KON" (customer)
-   # Document: "KON WIP"
-   # Request Name: "KON SS26 Wrangler"
+   # Workspace: "KTB" (customer)
+   # Document: "KTB WIP"
+   # Request Name: "KTB SS26 Wrangler"
    
    existing_requests = connector.search_requests(
-       workspace_name="KON",
-       document_name="KON WIP"
+       workspace_name="KTB",
+       document_name="KTB WIP"
    )
    
    request_map = {
@@ -347,8 +347,8 @@ Change Detection:
    
    for request_name in new_request_names:
        response = connector.create_sheet(
-           workspace_name="KON",
-           document_name="KON WIP",
+           workspace_name="KTB",
+           document_name="KTB WIP",
            request_name=request_name,
            # ... other metadata
        )
@@ -682,7 +682,7 @@ WHERE lf_style_number = 'TEST001';
 -- Verify request name format
 SELECT DISTINCT dtc_request_name
 FROM lft.beproduct.beproduct_to_dtc_staging;
--- Expected: "KON SS26 Wrangler", "KON FW27 Lee", etc.
+-- Expected: "KTB SS26 Wrangler", "KTB FW27 Lee", etc.
 ```
 
 ### Step 3: Implement Request Manager (2-3 days)
@@ -1250,12 +1250,12 @@ def test_season_code_mapping():
 
 def test_request_name_format():
     """Test DTC request name format."""
-    name = build_request_name("KON", "SS26", "Wrangler")
-    assert name == "KON SS26 Wrangler"
+    name = build_request_name("KTB", "SS26", "Wrangler")
+    assert name == "KTB SS26 Wrangler"
     
     # Multi-word brand
-    name = build_request_name("KON", "FW27", "Lee Western")
-    assert name == "KON FW27 Lee Western"
+    name = build_request_name("KTB", "FW27", "Lee Western")
+    assert name == "KTB FW27 Lee Western"
 ```
 
 ### Integration Tests

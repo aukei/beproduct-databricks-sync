@@ -52,7 +52,7 @@ dbutils.widgets.text("schema", "beproduct", "Schema Name")
 dbutils.widgets.text("source_table", "ktb_styles_extended", "Source Table")
 dbutils.widgets.text("staging_table", "beproduct_to_dtc_staging", "Staging Table")
 dbutils.widgets.text("folder_name", "KTB", "Folder Name")
-dbutils.widgets.text("customer_code", "KON", "DTC Customer Code (e.g., KON for KTB)")
+dbutils.widgets.text("customer_code", "KTB", "DTC Customer Code (e.g., KTB)")
 
 catalog = dbutils.widgets.get("catalog")
 schema = dbutils.widgets.get("schema")
@@ -257,7 +257,7 @@ print("=" * 80)
 try:
     print(f"🔄 Building DTC request names...")
     print(f"   Format: '<Customer> <SeasonCode> <Brand>'")
-    print(f"   Example: 'KON SS26 Wrangler'")
+    print(f"   Example: 'KTB SS26 Wrangler'")
     
     # Derive DTC request name: "<Customer> <SeasonCode> <Brand>"
     df_with_request_name = df_with_season.withColumn(

@@ -83,7 +83,7 @@ try:
     dbutils.widgets.text("dtc_workspace_name", "KTB", "DTC Workspace Name")
     dbutils.widgets.text("dtc_request_id", "6a26581854e92e7acd8fa71b", "DTC Request ID")
     dbutils.widgets.text("dtc_environment", "uat", "DTC Environment (uat/prod)")
-    dbutils.widgets.text("dtc_customer", "KTB", "Customer code in DTC (e.g., KON)")
+    dbutils.widgets.text("dtc_customer", "KTB", "Customer code in DTC (e.g., KTB)")
     dbutils.widgets.text("beproduct_customer", "KTB", "Customer code in BeProduct (e.g., KTB)")
     dbutils.widgets.text("target_catalog", "lft", "Target Catalog")
     dbutils.widgets.text("target_schema", "beproduct", "Target Schema")

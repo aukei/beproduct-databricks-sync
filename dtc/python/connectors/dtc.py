@@ -26,7 +26,7 @@ class DTCConnector:
         self,
         api_key: str,
         environment: str = "uat",
-        workspace_name: str = "Kontoor",
+        workspace_name: str = "KTB",
     ):
         """
         Initialize DTC connector.
@@ -102,11 +102,11 @@ class DTCConnector:
         Parse request name to extract customer, seasonCode, and brand.
         
         Format: <customer> <seasonCode> <brand>
-        Example: "KON SS28 Wrangler Western" → 
-                 {dtc_customer: "KON", season_code: "SS28", brand: "Wrangler Western"}
+        Example: "KTB SS28 Wrangler Western" → 
+                 {dtc_customer: "KTB", season_code: "SS28", brand: "Wrangler Western"}
         
         Args:
-            request_reference: Request name from DTC (e.g., "KON SS28 Wrangler Western")
+            request_reference: Request name from DTC (e.g., "KTB SS28 Wrangler Western")
             
         Returns:
             Dict with keys: dtc_customer, season_code, brand
@@ -369,9 +369,9 @@ class DTCConnector:
         POST /v1/sheets
         
         Args:
-            workspace_name: DTC workspace name (e.g., "Kontoor", "KTB")
+            workspace_name: DTC workspace name (e.g., "KTB", "KTB")
             document_name: Document name (e.g., "KTB WIP")
-            request_name: Request name (e.g., "KON SS26 Wrangler")
+            request_name: Request name (e.g., "KTB SS26 Wrangler")
             request_description: Optional description
             **kwargs: Additional fields for the request
         

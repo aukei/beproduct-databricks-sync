@@ -209,7 +209,7 @@ See [QUICK_START.md](QUICK_START.md) for detailed setup instructions.
 ✅ **DTC Request Management**
 - Auto-create missing DTC requests/sheets
 - Format: "<Customer> <SeasonCode> <Brand>"
-- Example: "KON SS26 Wrangler"
+- Example: "KTB SS26 Wrangler"
 
 ✅ **Change Detection & Push**
 - Compare staging with current DTC data
@@ -295,7 +295,7 @@ Extended styles → lft.beproduct.beproduct_to_dtc_staging
 - Explode colorways: 1 style → N rows
 - Explode BOM: each color → 2 material rows
 - Map season codes: Spring 2026 → SS26
-- Derive DTC request name: "KON SS26 Wrangler"
+- Derive DTC request name: "KTB SS26 Wrangler"
 - Result: N×2 rows per style
 ```
 
