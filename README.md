@@ -1,367 +1,240 @@
 # BeProduct Databricks Sync
 
-Enterprise data synchronization platform for syncing BeProduct and DTC data to Databricks Delta Lake with bi-directional change tracking and cross-platform integration.
+Enterprise data synchronization platform for syncing BeProduct and DTC data to Databricks Delta Lake with universal change tracking and cross-platform integration.
 
 ## 🎯 Overview
 
-This repository contains Databricks notebooks and Python connectors for:
+Unified data platform with three core capabilities:
 
-- **DTC (Data Collaboration Tool)** - Pull DTC worksheets to Delta Lake with change tracking
-- **BeProduct** - Bi-directional sync of STYLE master data and reference data
-- **BeProduct → DTC** - ✨ **NEW:** Cross-platform sync with denormalization
+1. **BeProduct Sync** - STYLE master data and reference data (Materials, Colors, Blocks)
+2. **DTC Sync** - Pull DTC WIP Request worksheets with change tracking
+3. **Cross-Platform** - Automated BeProduct → DTC data flow with denormalization
 
-### Architecture
+### Key Features
 
-```
-┌─────────────────┐
-│   DTC API       │ ──Pull──> Delta Lake ──Push──> DTC API
-│   (Worksheets)  │            (Change Log)         (Updates)
-└─────────────────┘
+✨ **Single Source of Truth** - One table per entity, serves all use cases  
+📊 **Universal Change Tracking** - `last_modified` + `extracted` on all tables  
+🔄 **Bi-Directional Sync** - BeProduct ↔ Delta Lake ↔ DTC  
+🎨 **Colorways & BOM** - Extended STYLE data with arrays and materials  
+🚀 **Auto-Denormalization** - Style × Color × BOM → Flat DTC rows  
+⚡ **PATCH API** - Efficient change detection and push to DTC
 
-┌─────────────────┐
-│  BeProduct API  │ <──Pull/Push──> Delta Lake ──Transform──> DTC API
-│  (STYLE, Refs)  │    (Extended)     (Denormalize)  (PATCH)
-└─────────────────┘
-     1 Style                N×M Rows              Flat Rows
-  + N Colors              (Staging)              (WIP Requests)
-  + M Materials
-```
-
-**NEW: BeProduct → DTC Integration**
-- Extracts colorways and BOM materials from BeProduct
-- Denormalizes to flat DTC structure (Style × Color × BOM)
-- Maps season codes and field names
-- Pushes to DTC WIP Requests via PATCH API
+---
 
 ## 📁 Repository Structure
 
 ```
 beproduct-databricks-sync/
-├── dtc/                              # DTC sync platform
-│   ├── notebooks/
-│   │   ├── pull_dtc_to_delta.py     # Main sync notebook
-│   │   └── 00_init_season_mapping.py
-│   ├── python/
-│   │   ├── connectors/
-│   │   │   └── dtc.py               # DTC API connector
-│   │   └── client/
-│   │       └── rest_client.py
-│   ├── tests/
-│   ├── README.md                     # DTC documentation
-│   ├── DATA_MODEL.md
-│   └── CHANGE_TRACKING_DESIGN.md
+├── beproduct/                        # BeProduct sync notebooks
+│   ├── beproduct_style_sync.py      # STYLE sync (enhanced)
+│   ├── beproduct_style_push.py      # Push changes back
+│   ├── beproduct_master_data_sync.py # Reference data
+│   │
+│   └── BeProduct → DTC Integration:
+│       ├── beproduct_to_dtc_transform.py    # Denormalize
+│       ├── dtc_request_manager.py           # Auto-create requests
+│       └── beproduct_to_dtc_push.py         # Push via PATCH API
 │
-├── beproduct/                        # BeProduct sync platform
-│   ├── beproduct_style_sync.py      # Pull STYLE records
-│   ├── beproduct_style_push.py      # Push STYLE changes
-│   ├── beproduct_master_data_sync.py # Pull reference data
-│   │
-│   │ ✨ ENHANCED: BeProduct STYLE Sync
-│   ├── beproduct_style_sync.py             # Enhanced: +colorways, BOM, change tracking
-│   │
-│   │ ✨ NEW: BeProduct → DTC Integration
-│   ├── beproduct_to_dtc_transform.py       # Denormalization transform
-│   ├── dtc_request_manager.py              # DTC request/sheet manager
-│   └── beproduct_to_dtc_push.py            # Push to DTC with change detection
+├── dtc/                              # DTC sync notebooks
+│   ├── notebooks/
+│   │   ├── pull_dtc_to_delta.py     # Pull DTC data
+│   │   └── 00_init_season_mapping.py # Season mapping setup
+│   ├── python/
+│   │   └── connectors/
+│   │       └── dtc.py               # DTC API connector
+│   ├── CHANGE_TRACKING_DESIGN.md    # Change tracking design
+│   └── PHASE2_WORKFLOW.md           # Future workflow
 │
 ├── scripts/
-│   ├── upload_notebooks.py          # Upload notebooks to workspace
+│   ├── upload_notebooks.py          # Deploy notebooks to workspace
 │   └── upload_to_databricks.py      # Upload data (SQLite → Delta)
 │
-├── .github/
-│   └── workflows/                    # CI/CD pipelines
+├── docs/                             # Comprehensive documentation
+│   ├── BEPRODUCT_TO_DTC_GUIDE.md    # Cross-platform integration
+│   ├── BEPRODUCT_GUIDE.md           # BeProduct sync guide
+│   ├── DTC_GUIDE.md                 # DTC sync guide
+│   ├── ARCHITECTURE.md              # Architecture details
+│   └── requirements.md              # Original requirements
 │
 ├── README.md                         # This file
-├── QUICK_START.md
-├── QUICK_REFERENCE.md
-└── .env.example
+├── QUICK_START.md                   # Get started in 5 minutes
+└── .env.example                     # Environment template
 ```
+
+---
 
 ## 🚀 Quick Start
 
-### Prerequisites
-
-1. **Databricks workspace** with Unity Catalog
-2. **DTC API credentials** (UAT or Production)
-3. **BeProduct API credentials** (OAuth tokens)
-
-### 1. Configure Secrets
-
-Create a Databricks secret scope:
+### 1. Configure Databricks Secrets (2 min)
 
 ```bash
+# Create secret scope
 databricks secrets create-scope --scope beproduct
-```
 
-Add credentials:
-
-```bash
-# DTC
-databricks secrets put --scope beproduct --key dtc_api_key_uat
-databricks secrets put --scope beproduct --key dtc_api_key_prod
-
-# BeProduct
+# BeProduct OAuth
 databricks secrets put --scope beproduct --key client_id
 databricks secrets put --scope beproduct --key client_secret
 databricks secrets put --scope beproduct --key refresh_token
 databricks secrets put --scope beproduct --key company_domain
+
+# DTC API keys
+databricks secrets put --scope beproduct --key dtc_api_key_uat
+databricks secrets put --scope beproduct --key dtc_api_key_prod
 ```
 
-### 2. Upload Notebooks
+### 2. Deploy Notebooks (2 min)
 
 ```bash
-# Clone the repo
-git clone https://github.com/your-org/beproduct-databricks-sync.git
-cd beproduct-databricks-sync
-
-# Copy .env.example to .env and fill in values
-cp .env.example .env
-
-# Upload notebooks to Databricks workspace
+# Install SDK
 pip install databricks-sdk
+
+# Configure environment
+export DATABRICKS_HOST="https://adb-XXXXXXXX.azuredatabricks.net"
+export DATABRICKS_PAT="dapi..."
+
+# Upload all notebooks
 python scripts/upload_notebooks.py
 ```
 
-### 3. Run Notebooks
+### 3. Run First Sync (1 min)
 
-#### DTC Sync
-- **Notebook:** `/Workspace/Repos/beproduct-sync/DTC/notebooks/pull_dtc_to_delta`
-- **Schedule:** Daily at 2:00 AM UTC
-- **Parameters:**
-  - `dtc_request_id`: DTC request to sync
-  - `dtc_environment`: uat or prod
-  - `beproduct_customer`: KTB, WMT, etc.
+**BeProduct STYLE Sync:**
+- Notebook: `/Workspace/Repos/beproduct-sync/beproduct/beproduct_style_sync`
+- Parameters: `folder_name=KTB`, `refresh_mode=FULL`
 
-#### BeProduct STYLE Sync
-- **Notebook:** `/Workspace/Repos/beproduct-sync/STYLE/beproduct_style_sync`
-- **Schedule:** Daily at 7pm HKT (11am UTC)
-- **Parameters:**
-  - `folder_name`: KTB, WMT, WALMART
-  - `refresh_mode`: FULL or INCREMENTAL
+**DTC Sync:**
+- Notebook: `/Workspace/Repos/beproduct-sync/DTC/notebooks/pull_dtc_to_delta`
+- Parameters: `dtc_request_id=<id>`, `dtc_environment=uat`
 
-See [QUICK_START.md](QUICK_START.md) for detailed setup instructions.
+See **[QUICK_START.md](QUICK_START.md)** for detailed instructions.
 
-## 📊 Features
+---
 
-### DTC Sync Platform
+## 📊 Architecture: Single Source of Truth
 
-✅ **Pull from DTC**
-- Full worksheet extraction with column normalization
-- View-based data filtering (Full Version view)
-- Document metadata preservation
-- Change tracking for bi-directional sync
+### Unified Data Model
 
-✅ **Change Tracking**
-- Row-level timestamp tracking (`extracted_time`, `last_modified`)
-- Change log table with full audit trail
-- Identifies rows needing push back to DTC
-- Brand business logic enforcement (request name as source of truth)
-
-✅ **Data Quality**
-- Automatic column normalization (HTML → Delta Lake compatible)
-- Duplicate column detection and resolution
-- Schema evolution with `mergeSchema`
-- Validation and error handling
-
-📋 **Tables Created:**
-- `lft.beproduct.dtc_master_chart_uat` - Main data table
-- `lft.beproduct.dtc_master_chart_uat_change_log` - Change audit trail
-- `lft.beproduct.dtc_seasoncode_mapping` - Season code lookup
-
-### BeProduct STYLE Sync Platform
-
-✅ **Pull STYLE Records**
-- FULL and INCREMENTAL sync modes
-- Timestamp-based change detection
-- 16 key fields extraction
-- Full JSON storage for audit trail
-
-✅ **Push STYLE Changes**
-- Detect modified records via timestamp comparison
-- Field ID mapping for BeProduct API
-- Dry-run mode for safety
-- Comprehensive push audit log
-
-✅ **Master Data Sync**
-- Reference data (BRANDS, TEAMS, SEASONS, etc.)
-- Validation tables for field values
-- Shared across all folders
-
-📋 **Tables Created:**
-- `lft.beproduct.ktb_styles` - Style data
-- `lft.beproduct.ktb_styles_sync_meta` - Sync metadata
-- `lft.beproduct.ktb_styles_push_log` - Push audit trail
-- `lft.beproduct.beproduct_master_*` - Reference tables
-
-### ✨ NEW: BeProduct → DTC Cross-Platform Sync
-
-✅ **Extract Extended Data**
-- Colorways array (`$.colorways[].colorName`)
-- BOM materials (`core_main_material`, `Core_main_material2`)
-- Material category and content
-- Front image URLs
-
-✅ **Denormalization**
-- 1 Style → N Colors (explode colorways)
-- Each Color → 2 Materials (BOM lines)
-- Result: N×2 rows per style (flat structure)
-
-✅ **Season Code Mapping**
-- BeProduct (Season + Year) → DTC (SeasonCode)
-- Example: Spring 2026 → SS26
-
-✅ **DTC Request Management**
-- Auto-create missing DTC requests/sheets
-- Format: "<Customer> <SeasonCode> <Brand>"
-- Example: "KTB SS26 Wrangler"
-
-✅ **Change Detection & Push**
-- Compare staging with current DTC data
-- Detect INSERT/UPDATE/DELETE operations
-- Timezone-aware comparison (UTC ↔ HKT)
-- Push via PATCH API
-
-📋 **Tables Created:**
-- `lft.beproduct.ktb_styles` - STYLE master data (enhanced with colorways/BOM/change tracking)
-- `lft.beproduct.beproduct_to_dtc_staging` - Denormalized staging (N×M rows)
-- `lft.beproduct.dtc_request_mapping` - Request/sheet ID mapping
-- `lft.beproduct.beproduct_to_dtc_push_log` - Push audit log
-- `lft.beproduct.dtc_current_snapshot_*` - DTC data snapshots
-
-## 🔍 Change Tracking
-
-### Query Modified Rows for DTC Push
-
-```sql
--- Find all rows that need to be pushed back to DTC
-SELECT DISTINCT row_id, lf_style, new_value as Brand, modified_at
-FROM lft.beproduct.dtc_master_chart_uat_change_log
-WHERE modification_type = 'brand_overwrite'
-  AND sync_date >= current_date() - INTERVAL 1 DAYS
-ORDER BY modified_at DESC;
+```
+lft.beproduct Schema (Single Source of Truth)
+├─ BeProduct Tables
+│  ├─ ktb_styles              [last_modified, extracted]
+│  │  • Standard STYLE fields
+│  │  • colorways_array (ARRAY<STRING>)
+│  │  • bom_material_1, bom_material_2
+│  │  • front_image_url
+│  │
+│  ├─ materials               [last_modified, extracted]
+│  ├─ colors                  [last_modified, extracted]
+│  └─ blocks                  [last_modified, extracted]
+│
+├─ DTC Tables
+│  ├─ dtc_requests            [last_modified, extracted]
+│  ├─ dtc_sheets              [last_modified, extracted]
+│  └─ dtc_master_chart_uat    [last_modified, extracted]
+│
+└─ Integration Tables
+   ├─ beproduct_to_dtc_staging
+   ├─ dtc_request_mapping
+   ├─ push_log
+   └─ dtc_season_code_mapping
 ```
 
-### Query Current Snapshot
+### Universal Change Tracking
 
-```sql
--- Find rows modified in the current snapshot
-SELECT row_id, lf_style, Brand, last_modified, extracted_time
-FROM lft.beproduct.dtc_master_chart_uat
-WHERE Brand_modified = True;
+Every source table includes:
+- **`last_modified`** - From source system (for delta detection)
+- **`extracted`** - When we pulled it (for audit trail)
+
+### Data Flows
+
+```
+ORIGINAL WORKFLOWS (Keep Running):
+──────────────────────────────────────────────────
+BeProduct → Delta Lake     # Internal reporting, analytics
+Delta Lake → BeProduct     # Bi-directional updates
+DTC → Delta Lake          # Monitor DTC data
+
+NEW WORKFLOW (BeProduct → DTC):
+──────────────────────────────────────────────────
+BeProduct → Delta Lake (with colorways/BOM)
+    ↓
+Transform (denormalize: Style × Color × BOM)
+    ↓
+Auto-create DTC requests/sheets
+    ↓
+Push to DTC via PATCH API
 ```
 
-### Audit History
+---
 
-```sql
--- View change history for a specific style
-SELECT * FROM lft.beproduct.dtc_master_chart_uat_change_log
-WHERE lf_style = 'STYLE123'
-ORDER BY modified_at DESC;
-```
+## 📚 Documentation
 
-## 🔄 Sync Workflows
+| Document | Description |
+|----------|-------------|
+| **[QUICK_START.md](QUICK_START.md)** | Get started in 5 minutes |
+| **[docs/BEPRODUCT_GUIDE.md](docs/BEPRODUCT_GUIDE.md)** | BeProduct sync (STYLE, master data, push) |
+| **[docs/DTC_GUIDE.md](docs/DTC_GUIDE.md)** | DTC sync (pull, change tracking) |
+| **[docs/BEPRODUCT_TO_DTC_GUIDE.md](docs/BEPRODUCT_TO_DTC_GUIDE.md)** | Cross-platform integration (complete workflow) |
+| **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** | Architecture details and implementation |
+| **[docs/requirements.md](docs/requirements.md)** | Original requirements specification |
 
-### DTC ↔ Delta Lake (Bi-Directional)
+---
 
-**Pull (DTC → Delta Lake):**
-1. Notebook pulls data from DTC API
-2. Applies business logic (Brand from request name)
-3. Tracks changes in change_log table
-4. Writes to Delta Lake with timestamps
+## 🎯 Common Use Cases
 
-**Push (Delta Lake → DTC):**
-1. Query change_log for modified rows
-2. For each row_id, call DTC PATCH API:
-   ```
-   PATCH /v1/sheets/{sheet_id}/rows/{row_id}
-   { "columnValues": { "Brand": "Wrangler" } }
-   ```
-3. Mark as pushed in push_log table
+### Use Case 1: Daily STYLE Data Sync
 
-See [DTC CHANGE_TRACKING_DESIGN.md](dtc/CHANGE_TRACKING_DESIGN.md) for details.
+**Objective:** Keep Delta Lake up-to-date with BeProduct STYLE changes
 
-### ✨ BeProduct → DTC (Cross-Platform Integration)
+**Notebook:** `beproduct/beproduct_style_sync.py`  
+**Schedule:** Daily at 11:00 UTC  
+**Output:** `lft.beproduct.ktb_styles`
 
-**NEW: End-to-end workflow for syncing BeProduct STYLE data to DTC WIP Requests.**
+**Features:**
+- Incremental sync (only changed records)
+- Colorways array extraction
+- BOM materials (2 lines per style)
+- Front image URL
+- Change tracking timestamps
 
-**Step 1: Extended Pull (11am UTC)**
-```python
-# beproduct_style_sync.py (enhanced)
-BeProduct API → lft.beproduct.ktb_styles
-(with colorways, BOM, change tracking)
-- Extract header fields + colorways + BOM + materials + images
-- 1 style = 1 row (colorways as array)
-```
+---
 
-**Step 2: Denormalization (12pm UTC)**
-```python
-# beproduct_to_dtc_transform.py
-Extended styles → lft.beproduct.beproduct_to_dtc_staging
-- Explode colorways: 1 style → N rows
-- Explode BOM: each color → 2 material rows
-- Map season codes: Spring 2026 → SS26
-- Derive DTC request name: "KTB SS26 Wrangler"
-- Result: N×2 rows per style
-```
+### Use Case 2: Populate DTC WIP Requests
 
-**Step 3: Request Management (12:30pm UTC)**
-```python
-# dtc_request_manager.py
-Staging → lft.beproduct.dtc_request_mapping
-- Get unique request names from staging
-- Search DTC for existing requests
-- Create missing requests/sheets via POST /v1/sheets
-- Store request_id / sheet_id mapping
-```
+**Objective:** Automatically push BeProduct data to DTC requests
 
-**Step 4: Change Detection & Push (1pm UTC)**
-```python
-# beproduct_to_dtc_push.py
-Staging + DTC current → DTC API (PATCH)
-- Pull current DTC data for comparison
-- Detect INSERT/UPDATE/DELETE operations
-- Timezone-aware comparison (UTC ↔ HKT)
-- Push via PATCH /v1/sheets/{sheetId}/views/{viewId}
-- Log all operations
-```
+**Notebooks:**
+1. `beproduct/beproduct_style_sync.py` (11:00 UTC)
+2. `beproduct/beproduct_to_dtc_transform.py` (12:00 UTC)
+3. `beproduct/dtc_request_manager.py` (12:30 UTC)
+4. `beproduct/beproduct_to_dtc_push.py` (13:00 UTC)
 
-**Complete Guide:** [BEPRODUCT_TO_DTC_GUIDE.md](BEPRODUCT_TO_DTC_GUIDE.md)  
-**Implementation Plan:** [.kilo/plans/beproduct-to-dtc-push-integration.md](.kilo/plans/beproduct-to-dtc-push-integration.md)
+**Output:** Denormalized rows in DTC WIP Requests (via PATCH API)
 
-## 📖 Documentation
+See **[docs/BEPRODUCT_TO_DTC_GUIDE.md](docs/BEPRODUCT_TO_DTC_GUIDE.md)** for complete workflow.
 
-- [QUICK_START.md](QUICK_START.md) - Step-by-step setup
-- [QUICK_REFERENCE.md](QUICK_REFERENCE.md) - All jobs and parameters
-- [dtc/README.md](dtc/README.md) - DTC sync documentation
-- [dtc/DATA_MODEL.md](dtc/DATA_MODEL.md) - DTC data model
-- [dtc/CHANGE_TRACKING_DESIGN.md](dtc/CHANGE_TRACKING_DESIGN.md) - Change tracking architecture
-- [PUSH_SETUP.md](PUSH_SETUP.md) - BeProduct push setup
-- [MASTER_DATA_SETUP.md](MASTER_DATA_SETUP.md) - Master data sync
+---
+
+### Use Case 3: Monitor DTC Data
+
+**Objective:** Pull DTC worksheet data for analysis
+
+**Notebook:** `dtc/notebooks/pull_dtc_to_delta.py`  
+**Schedule:** Daily at 02:00 UTC  
+**Output:** `lft.beproduct.dtc_master_chart_uat`
+
+**Features:**
+- Change detection (INSERT/UPDATE/DELETE)
+- Row-level tracking
+- Historical snapshots
+
+---
 
 ## 🛠️ Development
-
-### Local Testing
-
-```bash
-# Set up Python environment
-python -m venv .venv
-source .venv/bin/activate  # or .venv\Scripts\activate on Windows
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Run tests
-pytest dtc/tests/
-```
 
 ### Upload Notebooks
 
 ```bash
-# Install Databricks SDK
-pip install databricks-sdk
-
-# Configure .env with DATABRICKS_HOST and DATABRICKS_PAT
-
 # Preview uploads (dry run)
 python scripts/upload_notebooks.py --dry-run
 
@@ -372,47 +245,113 @@ python scripts/upload_notebooks.py
 python scripts/upload_notebooks.py --dir beproduct
 ```
 
-**Note:** `scripts/upload_to_databricks.py` is for uploading DATA (SQLite → Delta tables), while `scripts/upload_notebooks.py` is for uploading NOTEBOOKS to workspace.
+### Run Tests
+
+```bash
+# DTC connector tests
+pytest dtc/tests/
+
+# Install test dependencies
+pip install -r requirements-dev.txt
+```
+
+### Local Development
+
+```bash
+# Clone repository
+git clone https://github.com/your-org/beproduct-databricks-sync.git
+cd beproduct-databricks-sync
+
+# Configure environment
+cp .env.example .env
+# Edit .env with your credentials
+
+# Install dependencies
+pip install -r requirements.txt
+```
+
+---
 
 ## 🔐 Security
 
-- All credentials stored in Databricks secrets
-- OAuth 2.0 for BeProduct API
-- API keys for DTC (stored in secrets)
-- No credentials in code or config files
+- ✅ All credentials stored in Databricks secrets
+- ✅ OAuth 2.0 for BeProduct API
+- ✅ API keys for DTC (stored in secrets)
+- ✅ No credentials in code or config files
+- ✅ Environment-specific secrets (UAT/Production)
+
+---
 
 ## 📊 Performance
 
 ### Typical Sync Times
-- **DTC pull (247 rows × 114 cols):** < 1 second
-- **BeProduct FULL sync (50 styles):** 30-60 seconds
-- **BeProduct INCREMENTAL (no changes):** 10-15 seconds
 
-### Scaling
-- Use larger Databricks clusters for >1000 records
-- Adjust batch sizes in push operations
-- Enable auto-scaling for variable workloads
+| Operation | Records | Time |
+|-----------|---------|------|
+| BeProduct FULL sync | 50 styles | 30-60s |
+| BeProduct INCREMENTAL | No changes | 10-15s |
+| DTC pull | 247 rows × 114 cols | <1s |
+| Transform (denormalize) | 50 styles → 200 rows | 5-10s |
+| Push to DTC (PATCH) | 200 rows | 20-30s |
+
+### Scaling Recommendations
+
+- ✅ Use larger Databricks clusters for >1000 records
+- ✅ Adjust batch sizes in push operations (default: 100)
+- ✅ Enable auto-scaling for variable workloads
+- ✅ Use INCREMENTAL mode for daily syncs
+
+---
 
 ## 🤝 Contributing
 
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests
-5. Submit a pull request
+1. Create feature branch: `git checkout -b feature/your-feature`
+2. Make changes and test locally
+3. Upload notebooks: `python scripts/upload_notebooks.py --dir your-dir`
+4. Test in Databricks workspace
+5. Commit and push: `git push origin feature/your-feature`
+6. Create pull request
+
+---
 
 ## 📝 License
 
 [Your License Here]
 
-## 📞 Support
+---
 
-- **Issues:** GitHub Issues
-- **Documentation:** [Wiki](wiki)
-- **Contact:** [Your Team Email]
+## 🆘 Support
+
+- **Issues:** Open GitHub issue with logs and error messages
+- **Documentation:** See `docs/` folder for detailed guides
+- **Quick Help:** Check `QUICK_START.md` for common tasks
 
 ---
 
-**Version:** 1.0.0  
-**Last Updated:** 2026-06-09  
-**Status:** Production Ready
+## 🎯 Roadmap
+
+### ✅ Phase 1: Core Integration (Complete)
+- BeProduct STYLE sync with colorways/BOM
+- DTC sync with change tracking
+- Cross-platform BeProduct → DTC flow
+- Universal change tracking (last_modified, extracted)
+
+### 🚧 Phase 2: Enhancements (Planned)
+- DTC → BeProduct reverse sync
+- Image sync workflow
+- Advanced change detection (UPDATE/DELETE)
+- Multi-region support
+
+### 💡 Phase 3: Advanced Features (Future)
+- Real-time sync with change data capture
+- Conflict resolution for bi-directional sync
+- Data quality monitoring and alerts
+- Performance optimization for large datasets
+
+---
+
+**Quick Links:**
+- [Get Started](QUICK_START.md)
+- [BeProduct Guide](docs/BEPRODUCT_GUIDE.md)
+- [DTC Guide](docs/DTC_GUIDE.md)
+- [Architecture](docs/ARCHITECTURE.md)
