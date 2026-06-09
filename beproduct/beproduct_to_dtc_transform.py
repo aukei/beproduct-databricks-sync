@@ -6,7 +6,7 @@ BeProduct to DTC Denormalization Transform
 Transforms BeProduct's normalized data structure into DTC's flat denormalized structure.
 
 Process:
-1. Read BeProduct extended styles (with colorways, BOM)
+1. Read BeProduct styles (with colorways, BOM)
 2. Explode colorways: 1 style → N rows (one per color)
 3. Explode BOM: Each (style × color) → 2 rows (Main Fabric + Fabric)
 4. Map BeProduct season/year to DTC season code (SS26, FW27, etc.)
@@ -16,12 +16,12 @@ Process:
 
 Result: N colors × 2 materials = 2N rows per style
 
-Schedule: Daily at 12pm UTC (after extended pull at 11am)
+Schedule: Daily at 12pm UTC (after style sync at 11am)
 
 Parameters:
   - catalog: Databricks catalog (default: "lft")
   - schema: Databricks schema (default: "beproduct")
-  - source_table: Extended styles table (default: "ktb_styles_extended")
+  - source_table: Styles table with colorways/BOM (default: "ktb_styles")
   - staging_table: Output staging table (default: "beproduct_to_dtc_staging")
   - folder_name: BeProduct folder name (default: "KTB")
 """
@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 # Configure parameters
 dbutils.widgets.text("catalog", "lft", "Catalog Name")
 dbutils.widgets.text("schema", "beproduct", "Schema Name")
-dbutils.widgets.text("source_table", "ktb_styles_extended", "Source Table")
+dbutils.widgets.text("source_table", "ktb_styles", "Source Table")
 dbutils.widgets.text("staging_table", "beproduct_to_dtc_staging", "Staging Table")
 dbutils.widgets.text("folder_name", "KTB", "Folder Name")
 dbutils.widgets.text("customer_code", "KTB", "DTC Customer Code (e.g., KTB)")
@@ -89,7 +89,7 @@ print("=" * 80)
 try:
     print(f"📥 Loading from {source_table_full}...")
     
-    # Load extended styles
+    # Load styles with colorways and BOM
     df_source = spark.table(source_table_full)
     
     source_count = df_source.count()

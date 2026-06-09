@@ -44,7 +44,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from beproduct.sdk import BeProduct
-from pyspark.sql.types import StructType, StructField, StringType, TimestampType
+from pyspark.sql.types import StructType, StructField, StringType, TimestampType, ArrayType
 from pyspark.sql import Row
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -119,13 +119,24 @@ INTERESTED_FIELDS = {
     "FACTORY": "factory",
 }
 
+# BOM and Material fields (extracted by field ID from headerData)
+# Per requirements: colorways, BOM materials, material category/content, front image
+BOM_MATERIAL_FIELDS = {
+    "core_main_material": "bom_material_1",        # Main Fabric material
+    "Core_main_material2": "bom_material_2",       # Secondary fabric material
+    "main_material_category": "main_material_category",
+    "main_material_content": "main_material_content",
+}
+
 EXTRACTED_FIELDS = {**COMPULSORY_FIELDS, **INTERESTED_FIELDS}
 
 print(f"\n📋 Configuration:")
 print(f"   Folder: {folder_name_val}")
 print(f"   Mode: {refresh_mode_val}")
 print(f"   Target: {catalog_val}.{schema_val}.{table_name_val}")
-print(f"   Extracted fields: {len(EXTRACTED_FIELDS)}")
+print(f"   Standard fields: {len(EXTRACTED_FIELDS)}")
+print(f"   BOM/Material fields: {len(BOM_MATERIAL_FIELDS)}")
+print(f"   Extended: colorways array, front image URL")
 
 # ============================================================================
 # Step 1: Get Credentials and Initialize Client
@@ -396,37 +407,102 @@ if HAS_DATA:
     print("Step 4: Transform Records")
     print("=" * 80)
 
+    def extract_colorways(record: Dict) -> List[str]:
+        """
+        Extract colorway names from record.colorways array.
+        Returns list of color names.
+        """
+        colorways = record.get("colorways", [])
+        if not colorways or not isinstance(colorways, list):
+            return []
+        
+        color_names = []
+        for cw in colorways:
+            if isinstance(cw, dict):
+                color_name = cw.get("colorName")
+                if color_name:
+                    color_names.append(str(color_name))
+        
+        return color_names
+
+    def extract_bom_materials(header_data: Dict) -> Dict[str, Optional[str]]:
+        """
+        Extract BOM material fields by field ID.
+        
+        Per requirements:
+          - core_main_material → BOM Line 1 (Main Fabric)
+          - Core_main_material2 → BOM Line 2 (Fabric)
+        
+        Returns dict with bom_material_1, bom_material_2, etc.
+        """
+        fields_list = header_data.get("fields", [])
+        
+        # Build dict keyed by field ID
+        fields_by_id = {}
+        for field in fields_list:
+            field_id = field.get("id", "")
+            field_value = field.get("value")
+            if field_id:
+                fields_by_id[field_id] = field_value
+        
+        # Extract BOM fields
+        bom_data = {}
+        for field_id, column_name in BOM_MATERIAL_FIELDS.items():
+            value = fields_by_id.get(field_id)
+            # Convert arrays to comma-separated strings
+            if isinstance(value, list):
+                value = ", ".join(str(v) for v in value) if value else None
+            bom_data[column_name] = value
+        
+        return bom_data
+
+    def extract_front_image_url(header_data: Dict) -> Optional[str]:
+        """
+        Extract front image URL from headerData.frontImage.origin.
+        """
+        front_image = header_data.get("frontImage")
+        if not front_image or not isinstance(front_image, dict):
+            return None
+        
+        origin_url = front_image.get("origin")
+        return origin_url if origin_url else None
+
     def transform_style_record(record: Dict) -> Dict:
-        """Transform a BeProduct Style record into a Delta table row."""
+        """Transform a BeProduct Style record into a Delta table row with extended fields."""
         # Extract folder info
         folder_obj = record.get("folder", {})
         folder_name = folder_obj.get("name", "") if folder_obj else ""
         
+        # Current extraction timestamp
+        extracted_now = datetime.now(timezone.utc)
+        
         row = {
             "id": record.get("id"),
             "folder_name": folder_name,
-            "synced_at": datetime.now(timezone.utc),  # Keep as datetime object, not string
+            "synced_at": extracted_now,  # Legacy name, kept for compatibility
+            "extracted": extracted_now,   # NEW: Unified extraction timestamp
         }
         
         # Parse ISO 8601 strings to datetime objects for proper TIMESTAMP storage
         if "createdAt" in record:
             try:
-                # Parse ISO 8601 string to datetime
                 created_str = record["createdAt"]
                 row["created_at"] = datetime.fromisoformat(created_str.replace('Z', '+00:00'))
             except:
                 row["created_at"] = None
         
+        # NEW: last_modified from source (modifiedAt)
         if "modifiedAt" in record:
             try:
-                # Parse ISO 8601 string to datetime
                 modified_str = record["modifiedAt"]
-                row["modified_at"] = datetime.fromisoformat(modified_str.replace('Z', '+00:00'))
+                last_mod = datetime.fromisoformat(modified_str.replace('Z', '+00:00'))
+                row["modified_at"] = last_mod     # Legacy name
+                row["last_modified"] = last_mod   # NEW: Unified change tracking
             except:
                 row["modified_at"] = None
+                row["last_modified"] = None
         
-        # Extract attributes from headerData.fields (list of field objects)
-        # Each field has: {id, name, value, type, required, ...}
+        # Extract attributes from headerData.fields
         header_data = record.get("headerData", {})
         fields_list = header_data.get("fields", [])
         
@@ -438,7 +514,7 @@ if HAS_DATA:
             if field_name:
                 attributes[field_name] = field_value
         
-        # Extract compulsory and interested fields
+        # Extract standard fields
         for beproduct_name, column_name in EXTRACTED_FIELDS.items():
             value = attributes.get(beproduct_name)
             # Convert arrays to comma-separated strings
@@ -446,14 +522,42 @@ if HAS_DATA:
                 value = ", ".join(str(v) for v in value) if value else None
             row[column_name] = value
         
+        # NEW: Extract colorways array
+        colorways = extract_colorways(record)
+        row["colorways_array"] = colorways
+        row["colorways_count"] = len(colorways)
+        
+        # NEW: Extract BOM material fields
+        bom_data = extract_bom_materials(header_data)
+        row.update(bom_data)  # Adds bom_material_1, bom_material_2, etc.
+        
+        # NEW: Extract front image URL
+        row["front_image_url"] = extract_front_image_url(header_data)
+        
         # Store full record as JSON
         row["data_json"] = json.dumps(record)
         
         return row
 
     try:
-        print(f"🔄 Transforming {len(styles)} records...")
+        print(f"🔄 Transforming {len(styles)} records with extended fields...")
+        print(f"   - Standard fields: {len(EXTRACTED_FIELDS)}")
+        print(f"   - BOM/Material fields: {len(BOM_MATERIAL_FIELDS)}")
+        print(f"   - Colorways array + front image")
+        print(f"   - Change tracking: last_modified, extracted")
+        
         rows = [transform_style_record(s) for s in styles]
+        
+        # Print sample for verification
+        if rows:
+            sample = rows[0]
+            print(f"\n   📋 Sample row:")
+            print(f"      - colorways: {sample.get('colorways_array', [])} ({sample.get('colorways_count', 0)} colors)")
+            print(f"      - bom_material_1: {sample.get('bom_material_1', 'N/A')}")
+            print(f"      - bom_material_2: {sample.get('bom_material_2', 'N/A')}")
+            print(f"      - last_modified: {sample.get('last_modified', 'N/A')}")
+            print(f"      - extracted: {sample.get('extracted', 'N/A')}")
+        
         print(f"✅ Transformed {len(rows)} rows")
     except Exception as e:
         print(f"❌ Failed to transform: {str(e)}")
@@ -480,17 +584,21 @@ if HAS_DATA:
         
         print(f"   Columns: {len(sorted_cols)}")
         
-        # Create schema with proper types for timestamp fields
-        timestamp_cols = {"synced_at", "created_at", "modified_at"}
+        # Create schema with proper types for timestamp and array fields
+        timestamp_cols = {"synced_at", "created_at", "modified_at", "last_modified", "extracted"}
+        array_cols = {"colorways_array"}
+        
         fields = []
         for col in sorted_cols:
             if col in timestamp_cols:
                 fields.append(StructField(col, TimestampType(), True))
+            elif col in array_cols:
+                fields.append(StructField(col, ArrayType(StringType()), True))
             else:
                 fields.append(StructField(col, StringType(), True))
         schema = StructType(fields)
         
-        # Convert to Spark rows (preserve datetime objects for timestamp fields)
+        # Convert to Spark rows (preserve types for timestamp and array fields)
         def row_to_spark_row(row_dict, cols):
             row_data = {}
             for col in cols:
@@ -500,6 +608,9 @@ if HAS_DATA:
                 elif col in timestamp_cols:
                     # Keep datetime objects as-is for timestamp columns
                     row_data[col] = val
+                elif col in array_cols:
+                    # Keep list/array as-is for array columns
+                    row_data[col] = val if isinstance(val, list) else []
                 else:
                     # Convert everything else to string
                     row_data[col] = str(val)

@@ -56,8 +56,10 @@ beproduct-databricks-sync/
 │   ├── beproduct_style_push.py      # Push STYLE changes
 │   ├── beproduct_master_data_sync.py # Pull reference data
 │   │
+│   │ ✨ ENHANCED: BeProduct STYLE Sync
+│   ├── beproduct_style_sync.py             # Enhanced: +colorways, BOM, change tracking
+│   │
 │   │ ✨ NEW: BeProduct → DTC Integration
-│   ├── beproduct_style_extended_sync.py    # Extended pull (colorways, BOM)
 │   ├── beproduct_to_dtc_transform.py       # Denormalization transform
 │   ├── dtc_request_manager.py              # DTC request/sheet manager
 │   └── beproduct_to_dtc_push.py            # Push to DTC with change detection
@@ -220,7 +222,7 @@ See [QUICK_START.md](QUICK_START.md) for detailed setup instructions.
 - Push via PATCH API
 
 📋 **Tables Created:**
-- `lft.beproduct.ktb_styles_extended` - Extended style data with colorways/BOM
+- `lft.beproduct.ktb_styles` - STYLE master data (enhanced with colorways/BOM/change tracking)
 - `lft.beproduct.beproduct_to_dtc_staging` - Denormalized staging (N×M rows)
 - `lft.beproduct.dtc_request_mapping` - Request/sheet ID mapping
 - `lft.beproduct.beproduct_to_dtc_push_log` - Push audit log
@@ -284,8 +286,9 @@ See [DTC CHANGE_TRACKING_DESIGN.md](dtc/CHANGE_TRACKING_DESIGN.md) for details.
 
 **Step 1: Extended Pull (11am UTC)**
 ```python
-# beproduct_style_extended_sync.py
-BeProduct API → lft.beproduct.ktb_styles_extended
+# beproduct_style_sync.py (enhanced)
+BeProduct API → lft.beproduct.ktb_styles
+(with colorways, BOM, change tracking)
 - Extract header fields + colorways + BOM + materials + images
 - 1 style = 1 row (colorways as array)
 ```

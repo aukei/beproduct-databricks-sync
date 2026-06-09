@@ -31,9 +31,10 @@ BeProduct (Normalized)              Databricks (Transform)           DTC (Denorm
 ### Data Flow
 
 ```
-1. beproduct_style_extended_sync.py      → lft.beproduct.ktb_styles_extended
+1. beproduct_style_sync.py               → lft.beproduct.ktb_styles
    - Pull from BeProduct with colorways, BOM, materials, images
    - 1 style = 1 row (with colorways as array)
+   - Enhanced with change tracking: last_modified, extracted
 
 2. beproduct_to_dtc_transform.py         → lft.beproduct.beproduct_to_dtc_staging
    - Explode colorways: 1 style → N rows
@@ -54,19 +55,21 @@ BeProduct (Normalized)              Databricks (Transform)           DTC (Denorm
 
 ## Notebooks
 
-### 1. Extended BeProduct Pull
+### 1. BeProduct STYLE Sync (Enhanced)
 
-**File:** `beproduct/beproduct_style_extended_sync.py`
+**File:** `beproduct/beproduct_style_sync.py`
 
-**Purpose:** Extract BeProduct STYLE data with extended fields for DTC integration.
+**Purpose:** Extract BeProduct STYLE data with ALL fields for reporting and DTC integration.
 
-**NEW Features:**
+**Features:**
+- ✅ Standard STYLE fields (LF Style Number, Season, Year, etc.)
 - ✅ Colorways array extraction (`$.colorways[].colorName`)
 - ✅ BOM material fields (`core_main_material`, `Core_main_material2`)
 - ✅ Material category and content
 - ✅ Front image URL (`frontImage.origin`)
+- ✅ Change tracking: `last_modified` (from source), `extracted` (at pull time)
 
-**Schedule:** Daily at 11am UTC
+**Schedule:** Daily at 11am UTC (existing job)
 
 **Parameters:**
 ```python
@@ -74,19 +77,23 @@ folder_name = "KTB"              # BeProduct folder
 refresh_mode = "FULL"            # or "INCREMENTAL"
 catalog = "lft"
 schema = "beproduct"
-table_name = "ktb_styles_extended"
+table_name = "ktb_styles"        # Single unified table
 ```
 
-**Output Table:** `lft.beproduct.ktb_styles_extended`
+**Output Table:** `lft.beproduct.ktb_styles` (single source of truth)
 
 **Schema:**
 ```sql
-CREATE TABLE lft.beproduct.ktb_styles_extended (
+CREATE TABLE lft.beproduct.ktb_styles (
     id STRING,
     folder_name STRING,
-    synced_at TIMESTAMP,
+    synced_at TIMESTAMP,              -- Legacy: extraction timestamp
     created_at TIMESTAMP,
-    modified_at TIMESTAMP,
+    modified_at TIMESTAMP,            -- Legacy: from BeProduct modifiedAt
+    
+    -- Change tracking (NEW)
+    last_modified TIMESTAMP,          -- From source system (modifiedAt)
+    extracted TIMESTAMP,              -- When we pulled it (extraction time)
     
     -- Standard fields
     lf_style_number STRING,
@@ -153,13 +160,13 @@ bom_material_2: COTTON-002
 ```python
 catalog = "lft"
 schema = "beproduct"
-source_table = "ktb_styles_extended"
+source_table = "ktb_styles"
 staging_table = "beproduct_to_dtc_staging"
 folder_name = "KTB"
 customer_code = "KTB"           # DTC customer code
 ```
 
-**Input:** `lft.beproduct.ktb_styles_extended`  
+**Input:** `lft.beproduct.ktb_styles` (unified table with colorways/BOM)  
 **Output:** `lft.beproduct.beproduct_to_dtc_staging`
 
 **Transformation Example:**
@@ -496,8 +503,8 @@ databricks workspace import_dir \
 
 ### Job Configuration
 
-**Job 1: Extended BeProduct Pull**
-- **Notebook:** `/Workspace/Repos/beproduct-sync/beproduct/beproduct_style_extended_sync`
+**Job 1: BeProduct STYLE Sync (Enhanced)**
+- **Notebook:** `/Workspace/Repos/beproduct-sync/beproduct/beproduct_style_sync`
 - **Schedule:** Daily at 11am UTC
 - **Cluster:** Single-node (Standard_DS3_v2)
 - **Parameters:**
