@@ -26,7 +26,7 @@ Run the standard pull notebook:
 databricks runs submit \
   --notebook-task notebook_path=/Workspace/Repos/beproduct-sync/DTC/notebooks/pull_dtc_to_delta \
   --base-parameters '{
-    "dtc_workspace_name": "Kontoor",
+    "dtc_workspace_name": "KTB",
     "dtc_request_id": "69f076f0b7247a661226be9a",
     "dtc_environment": "uat",
     "target_catalog": "lft",
@@ -184,7 +184,7 @@ Push changes to DTC:
 databricks runs submit \
   --notebook-task notebook_path=/Workspace/Repos/beproduct-sync/DTC/notebooks/04_push_changes \
   --base-parameters '{
-    "dtc_workspace_name": "Kontoor",
+    "dtc_workspace_name": "KTB",
     "dtc_request_id": "69f076f0b7247a661226be9a",
     "dtc_environment": "uat",
     "target_catalog": "lft",
@@ -351,7 +351,7 @@ Fix the issue and retry push.
   "notebook_task": {
     "notebook_path": "/Workspace/Repos/beproduct-sync/DTC/notebooks/pull_dtc_to_delta",
     "base_parameters": {
-      "dtc_workspace_name": "Kontoor",
+      "dtc_workspace_name": "KTB",
       "dtc_request_id": "69f076f0b7247a661226be9a",
       "dtc_environment": "uat",
       "target_table": "dtc_master_chart_uat",
@@ -373,7 +373,7 @@ Fix the issue and retry push.
   "notebook_task": {
     "notebook_path": "/Workspace/Repos/beproduct-sync/DTC/notebooks/04_push_changes",
     "base_parameters": {
-      "dtc_workspace_name": "Kontoor",
+      "dtc_workspace_name": "KTB",
       "dtc_request_id": "69f076f0b7247a661226be9a",
       "dtc_environment": "uat",
       "target_table": "dtc_master_chart_uat"

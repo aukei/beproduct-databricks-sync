@@ -37,7 +37,7 @@
 
 ## Objectives
 - Sync selected fields from BeProduct "Style" to DTC "WIP" Requests
-- Customer to focus on = KTB (Kontoor)
+- Customer to focus on = KTB
 - On DTC, denormalized to STYLE x COLOR x BOM
 - The integration workflow to be scheduled and run entirely in Databricks as job
 - Data that should be synced

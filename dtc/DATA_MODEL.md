@@ -9,12 +9,12 @@
 ### Hierarchy
 
 ```
-Workspace (e.g., "Kontoor")
-  └─ Document (e.g., "KON WIP")
+Workspace (e.g., "KTB")
+  └─ Document (e.g., "KTB WIP")
       └─ Requests (multiple, one per customer/season/brand)
-          ├─ KON SS28 Wrangler Western
-          ├─ KON SS28 Wrangler Rugged
-          ├─ KON FW27 Wrangler Western
+          ├─ KTB SS28 Wrangler Western
+          ├─ KTB SS28 Wrangler Rugged
+          ├─ KTB FW27 Wrangler Western
           └─ ...
               └─ Rows (247 rows per request, sheet data)
                   ├─ LFStyle# (unique identifier)
@@ -40,13 +40,13 @@ The sync process will **FAIL** if "Full Version" is not available, preventing pa
 Format: `<customer> <seasonCode> <brand>`
 
 **Examples**:
-- `KON SS28 Wrangler Western` → customer=KON, seasonCode=SS28, brand="Wrangler Western"
-- `KON FW27 Wrangler Rugged` → customer=KON, seasonCode=FW27, brand="Wrangler Rugged"
-- `KON SS28 Lee Regular` → customer=KON, seasonCode=SS28, brand="Lee Regular"
+- `KTB SS28 Wrangler Western` → customer=KTB, seasonCode=SS28, brand="Wrangler Western"
+- `KTB FW27 Wrangler Rugged` → customer=KTB, seasonCode=FW27, brand="Wrangler Rugged"
+- `KTB SS28 Lee Regular` → customer=KTB, seasonCode=SS28, brand="Lee Regular"
 
 **Parsing**:
 1. Split by space
-2. First token = customer (e.g., "KON")
+2. First token = customer (e.g., "KTB")
 3. Second token = seasonCode (e.g., "SS28")
 4. Rest = brand (e.g., "Wrangler Western")
 
@@ -72,7 +72,7 @@ BeProduct and DTC use **different customer codes** for the same entity:
 
 | BeProduct Customer | DTC Customer |
 |--------------------|--------------|
-| KTB | KON |
+| KTB | KTB |
 | (other examples) | (to be provided) |
 
 **Strategy**: Pass as notebook parameters
@@ -113,7 +113,7 @@ Create `lft.beproduct.dtc_season_code_mapping`:
 
 ```sql
 CREATE TABLE IF NOT EXISTS lft.beproduct.dtc_season_code_mapping (
-  dtc_customer STRING,          -- e.g., "KON"
+  dtc_customer STRING,          -- e.g., "KTB"
   season_code STRING,           -- e.g., "SS28"
   beproduct_season STRING,      -- e.g., "Spring"
   beproduct_year INT,           -- e.g., 2028
@@ -128,9 +128,9 @@ USING DELTA
 
 | DTC Customer | Season Code | BeProduct Season | BeProduct Year | Notes |
 |--------------|------------|-----------------|----------------|-------|
-| KON | SS28 | Spring | 2028 | Spring Summer 2028 |
-| KON | FW27 | Fall | 2027 | Fall Winter 2027 |
-| KON | SS26 | Spring | 2026 | Spring Summer 2026 |
+| KTB | SS28 | Spring | 2028 | Spring Summer 2028 |
+| KTB | FW27 | Fall | 2027 | Fall Winter 2027 |
+| KTB | SS26 | Spring | 2026 | Spring Summer 2026 |
 | KTB | SS28 | Spring | 2028 | Customer-specific mapping |
 
 **Notes**:
@@ -148,7 +148,7 @@ USING DELTA
 After implementing this clarification, table will include:
 
 **Extraction Columns** (from request name):
-- `dtc_customer`: Customer code from DTC (e.g., "KON")
+- `dtc_customer`: Customer code from DTC (e.g., "KTB")
 - `season_code`: Season code from request name (e.g., "SS28")
 - `brand`: Brand from request name (e.g., "Wrangler Western")
 
@@ -188,9 +188,9 @@ Store non-varying metadata as table properties:
 SHOW TBLPROPERTIES lft.beproduct.dtc_master_chart_uat;
 
 -- Properties:
--- workspace_name | Kontoor
--- document_name | KON WIP
--- dtc_customer | KON
+-- workspace_name | KTB
+-- document_name | KTB WIP
+-- dtc_customer | KTB
 -- owner_name | ...
 -- owner_email | ...
 ```
@@ -203,10 +203,10 @@ All extraction parameters should be parameterized:
 
 | Parameter | Example | Purpose |
 |-----------|---------|---------|
-| `dtc_workspace_name` | `Kontoor` | DTC workspace to access |
+| `dtc_workspace_name` | `KTB` | DTC workspace to access |
 | `dtc_request_id` | `69f076f0b7247a661226be9a` | Which request to pull |
 | `dtc_environment` | `uat` | Environment (uat/prod) |
-| `dtc_customer` | `KON` | Customer code in DTC |
+| `dtc_customer` | `KTB` | Customer code in DTC |
 | `beproduct_customer` | `KTB` | Customer code in BeProduct |
 | `target_catalog` | `lft` | Databricks catalog |
 | `target_schema` | `beproduct` | Databricks schema |
@@ -237,7 +237,7 @@ When pushing:
   "request_id": "69f076f0b7247a661226be9a",
   "row_id": "e25849e3-f160-4617-b123-9d7c810599cf",
   "composite_key": {
-    "dtc_customer": "KON",
+    "dtc_customer": "KTB",
     "brand": "Wrangler Western",
     "season_code": "SS28",
     "lf_style_number": "WW001"
@@ -265,7 +265,7 @@ When pushing:
 - [ ] Update change log schema to include composite_key field
 - [ ] Update push to use composite key for validation
 - [ ] Document mapping table initialization
-- [ ] Add sample mappings for KON → KTB
+- [ ] Add sample mappings for KTB → KTB
 
 ---
 

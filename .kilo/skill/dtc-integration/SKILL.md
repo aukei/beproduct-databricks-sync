@@ -27,7 +27,7 @@ DTC provides a REST API for accessing worksheet data with the following key conc
 
 Before connecting to DTC:
 1. Obtain DTC API key (UAT or Production)
-2. Know the DTC workspace name (e.g., "Kontoor")
+2. Know the DTC workspace name (e.g., "KTB")
 3. Have request IDs or sheet IDs to query
 4. Understand the environment (uat or prod)
 
@@ -72,7 +72,7 @@ from dtc.python.connectors.dtc import DTCConnector
 dtc = DTCConnector(
     api_key="your-api-key",
     environment="uat",  # or "prod"
-    workspace_name="Kontoor"
+    workspace_name="KTB"
 )
 ```
 
@@ -90,7 +90,7 @@ api_key = dbutils.secrets.get(scope="beproduct", key="dtc_api_key_uat")
 dtc = DTCConnector(
     api_key=api_key,
     environment="uat",
-    workspace_name="Kontoor"
+    workspace_name="KTB"
 )
 
 print("✅ Connected to DTC UAT")

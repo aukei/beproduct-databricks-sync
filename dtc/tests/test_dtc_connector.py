@@ -47,7 +47,7 @@ try:
     connector = DTCConnector(
         api_key=api_key,
         environment="uat",
-        workspace_name="Kontoor"
+        workspace_name="KTB"
     )
     print("✅ DTCConnector created")
 except Exception as e:

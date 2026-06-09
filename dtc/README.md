@@ -2,7 +2,7 @@
 
 **Status**: ✅ Phase 1 Complete (Pull), 🚀 Phase 2 Complete (Change Tracking)  
 **Target Table**: `lft.beproduct.dtc_master_chart_uat`  
-**Source**: DTC API (Kontoor workspace)  
+**Source**: DTC API (KTB workspace)  
 **Schedule**: Daily (configurable)
 
 ---
@@ -42,7 +42,7 @@ This module provides a two-way sync solution for DTC (Data Collaboration Applica
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  DTC API (UAT)                                                  │
-│  ├─ Request: KON FW26 Wrangler                                 │
+│  ├─ Request: KTB FW26 Wrangler                                 │
 │  │  └─ 14 views (Full Version, Vendor 1-3, etc.)             │
 │  │     └─ 247 rows × 114 columns                              │
 │  │                                                              │
@@ -96,7 +96,7 @@ python3 test_dtc_connector.py
 Output:
 ```
 ✅ DTCConnector created
-✅ Request loaded: KON FW26 Wrangler
+✅ Request loaded: KTB FW26 Wrangler
 ✅ Got 14 views
 ✅ DataFrame created: 247 rows, 114 columns
 ✅ ALL TESTS PASSED
@@ -108,7 +108,7 @@ Output:
 - How DTC organizes data (workspace → document → requests)
 - Request naming pattern: `<customer> <seasonCode> <brand>`
 - How DTC maps to BeProduct via composite key: `(Brand, SeasonCode, LFStyle#)`
-- Customer mapping: DTC "KON" ↔ BeProduct "KTB" (configurable)
+- Customer mapping: DTC "KTB" ↔ BeProduct "KTB" (configurable)
 - SeasonCode mapping: DTC "SS28" ↔ BeProduct (Spring, 2028)
 
 ### 3. Deploy to Databricks
@@ -146,10 +146,10 @@ The code is deployed at `/Workspace/Repos/beproduct-sync/DTC/notebooks/pull_dtc_
 databricks runs submit \
   --notebook-task notebook_path=/Workspace/Repos/beproduct-sync/DTC/notebooks/pull_dtc_to_delta \
   --base-parameters '{
-    "dtc_workspace_name": "Kontoor",
+    "dtc_workspace_name": "KTB",
     "dtc_request_id": "69f076f0b7247a661226be9a",
     "dtc_environment": "uat",
-    "dtc_customer": "KON",
+    "dtc_customer": "KTB",
     "beproduct_customer": "KTB",
     "target_catalog": "lft",
     "target_schema": "beproduct",
@@ -163,7 +163,7 @@ databricks runs get-output --run-id <RUN_ID>
 ```
 
 **Parameters explained**:
-- `dtc_customer`: Customer code in DTC (e.g., "KON")
+- `dtc_customer`: Customer code in DTC (e.g., "KTB")
 - `beproduct_customer`: Corresponding customer in BeProduct (e.g., "KTB")
 - Other parameters match the data model structure
 
@@ -185,10 +185,10 @@ cat > dtc_job_config.json << 'EOF'
   "notebook_task": {
     "notebook_path": "/Workspace/Repos/beproduct-sync/DTC/notebooks/pull_dtc_to_delta",
     "base_parameters": {
-      "dtc_workspace_name": "Kontoor",
+      "dtc_workspace_name": "KTB",
       "dtc_request_id": "69f076f0b7247a661226be9a",
       "dtc_environment": "uat",
-      "dtc_customer": "KON",
+      "dtc_customer": "KTB",
       "beproduct_customer": "KTB",
       "target_catalog": "lft",
       "target_schema": "beproduct",
@@ -257,7 +257,7 @@ The `pull_dtc_to_delta.py` notebook accepts these parameters:
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `dtc_workspace_name` | `Kontoor` | DTC workspace to access (parameterized, not hardcoded) |
+| `dtc_workspace_name` | `KTB` | DTC workspace to access (parameterized, not hardcoded) |
 | `dtc_request_id` | `69f076f0b7247a661226be9a` | DTC request ID to sync (parameterized) |
 | `dtc_environment` | `uat` | DTC environment: `uat` (UAT) or `prod` (Production) |
 | `target_catalog` | `lft` | Databricks catalog |
@@ -272,7 +272,7 @@ The `pull_dtc_to_delta.py` notebook accepts these parameters:
 
 **Example - Sync Different Request**:
 ```python
-# Interactive: Widget defaults to 69f076f0b7247a661226be9a (KON FW26 Wrangler)
+# Interactive: Widget defaults to 69f076f0b7247a661226be9a (KTB FW26 Wrangler)
 # To change, update the widget value before running
 
 # Or via CLI for scheduled job:
@@ -300,8 +300,8 @@ When syncing a Request, the notebook automatically captures and stores **Documen
 SHOW TBLPROPERTIES lft.beproduct.dtc_master_chart_uat;
 
 -- Output includes:
--- document_name        | KON WIP
--- request_reference    | KON FW26 Wrangler
+-- document_name        | KTB WIP
+-- request_reference    | KTB FW26 Wrangler
 -- request_description  | MASTER CHART - FW26 Supplier
 -- owner_name           | Kennis Wong
 -- owner_email          | kenniswong@lifung.com
@@ -322,7 +322,7 @@ SHOW TBLPROPERTIES lft.beproduct.dtc_master_chart_uat;
 
 ### Input (DTC Request)
 - **Request ID**: `69f076f0b7247a661226be9a`
-- **Request Reference**: `KON FW26 Wrangler`
+- **Request Reference**: `KTB FW26 Wrangler`
 - **Views Available**: 14 (Full Version, Vendor 1-3, Factory Allocation, etc.)
 - **Rows in Full Version View**: 247
 - **Columns**: 114
