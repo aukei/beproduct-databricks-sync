@@ -35,11 +35,13 @@ databricks secrets put --scope beproduct --key dtc_api_key_prod
 # Install Databricks SDK
 pip install databricks-sdk
 
-# Configure .env
-export DATABRICKS_HOST="https://adb-XXXXXXXX.azuredatabricks.net"
-export DATABRICKS_PAT="dapi..."
+# Configure .env file (one-time setup)
+cp .env.example .env
+# Edit .env and add your credentials:
+#   DATABRICKS_HOST=https://adb-XXXXXXXX.azuredatabricks.net
+#   DATABRICKS_PAT=dapi...
 
-# Upload all notebooks
+# Upload all notebooks (automatically reads .env)
 python scripts/upload_notebooks.py
 ```
 

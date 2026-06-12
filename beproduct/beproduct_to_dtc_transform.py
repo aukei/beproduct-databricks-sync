@@ -6,22 +6,23 @@ BeProduct to DTC Denormalization Transform
 Transforms BeProduct's normalized data structure into DTC's flat denormalized structure.
 
 Process:
-1. Read BeProduct styles (with colorways, BOM)
+1. Read BeProduct styles (with colorways)
 2. Explode colorways: 1 style → N rows (one per color)
-3. Explode BOM: Each (style × color) → 2 rows (Main Fabric + Fabric)
+3. Add fabric row: Each (style × color) → 1 hardcoded row
+   (Fabric Group = "MAIN MATERIAL CONTENT", Placement = main_material_content)
 4. Map BeProduct season/year to DTC season code (SS26, FW27, etc.)
 5. Derive DTC request name: "<Customer> <SeasonCode> <Brand>"
 6. Map all fields to DTC column names
 7. Write to staging table
 
-Result: N colors × 2 materials = 2N rows per style
+Result: N colors × 1 fabric row = N rows per style
 
 Schedule: Daily at 12pm UTC (after style sync at 11am)
 
 Parameters:
   - catalog: Databricks catalog (default: "lft")
   - schema: Databricks schema (default: "beproduct")
-  - source_table: Styles table with colorways/BOM (default: "ktb_styles")
+  - source_table: Styles table with colorways (default: "ktb_styles")
   - staging_table: Output staging table (default: "beproduct_to_dtc_staging")
   - folder_name: BeProduct folder name (default: "KTB")
 """
@@ -37,8 +38,8 @@ print("DENORMALIZATION TRANSFORM SETUP")
 print("=" * 80)
 
 from pyspark.sql.functions import (
-    explode, col, lit, concat_ws, current_timestamp, 
-    current_date, array, when, coalesce, upper, trim
+    explode, col, lit, concat, concat_ws, current_timestamp, 
+    current_date, array, when, coalesce, upper, trim, size, right, substring
 )
 from pyspark.sql.types import StructType, StructField, StringType, TimestampType
 import logging
@@ -63,7 +64,7 @@ customer_code = dbutils.widgets.get("customer_code")
 
 source_table_full = f"{catalog}.{schema}.{source_table}"
 staging_table_full = f"{catalog}.{schema}.{staging_table}"
-season_mapping_table = f"{catalog}.{schema}.dtc_season_code_mapping"
+season_mapping_table = f"{catalog}.{schema}.dtc_seasoncode_mapping"
 
 print("✅ Parameters configured:")
 print(f"   Source: {source_table_full}")
@@ -89,17 +90,44 @@ print("=" * 80)
 try:
     print(f"📥 Loading from {source_table_full}...")
     
-    # Load styles with colorways and BOM
+    # Load styles
     df_source = spark.table(source_table_full)
     
     source_count = df_source.count()
     print(f"✅ Loaded {source_count} styles")
     
+    # Check for duplicate style keys
+    print(f"\n🔍 Checking for duplicate style keys (LF Style # + Brands + Season + Year)...")
+    duplicate_styles = df_source.groupBy("lf_style_number", "brands", "season", "year") \
+        .count() \
+        .filter(col("count") > 1)
+    
+    dup_count = duplicate_styles.count()
+    if dup_count > 0:
+        print(f"⚠️  WARNING: Found {dup_count} duplicate style keys in source data!")
+        duplicate_styles.show(truncate=False)
+        
+        # Log warning to the existing sync_meta table
+        metadata_table = f"{catalog}.{schema}.{source_table}_sync_meta"
+        warning_summary = f"WARNING: Found {dup_count} duplicate style keys (LF Style # + Brands + Season + Year). Pipeline proceeding."
+        
+        spark.sql(f"""
+            INSERT INTO {metadata_table}
+            SELECT 
+                CAST(current_timestamp() AS STRING) AS last_sync_at,
+                'WARNING' AS sync_type,
+                {dup_count} AS records_synced,
+                '{warning_summary.replace("'", "''")}' AS summary
+        """)
+        print(f"✅ Logged duplicate style key warning to {metadata_table}")
+        print(f"⚠️  Pipeline will proceed with the data.")
+    else:
+        print(f"✅ No duplicate style keys found")
+    
     # Show sample
     print(f"\n   Sample source data:")
     df_source.select(
-        "lf_style_number", "season", "year", "brands",
-        "colorways_count", "bom_material_1", "bom_material_2"
+        "lf_style_number", "season", "year", "brands", "main_material_content"
     ).show(3, truncate=50)
     
 except Exception as e:
@@ -120,14 +148,14 @@ try:
     print(f"🔄 Exploding colorways array...")
     
     # Filter out styles with no colorways
-    df_with_colors_raw = df_source.where(col("colorways_count") > 0)
+    df_with_colors_raw = df_source.where(size(col("colorways_array")) > 0)
     styles_with_colors = df_with_colors_raw.count()
     
     print(f"   Styles with colorways: {styles_with_colors} / {source_count}")
     
     # Explode colorways array to create one row per color
     df_exploded_colors = df_with_colors_raw.withColumn(
-        "color_name", 
+        "color", 
         explode(col("colorways_array"))
     )
     
@@ -138,7 +166,7 @@ try:
     # Show sample
     print(f"\n   Sample after colorway explosion:")
     df_exploded_colors.select(
-        "lf_style_number", "brands", "color_name", "bom_material_1"
+        "lf_style_number", "brands", "color", "main_material_content"
     ).show(5, truncate=50)
     
 except Exception as e:
@@ -148,51 +176,66 @@ except Exception as e:
 # COMMAND ----------
 
 # ============================================================================
-# CELL 4: Explode BOM (Each Color → 2 Material Rows)
+# CELL 4: Add Fabric Group and Placement (1 Row per Style × Color)
 # ============================================================================
 
 print("\n" + "=" * 80)
-print("Step 3: Explode BOM Materials")
+print("Step 3: Add Fabric Group and Placement")
 print("=" * 80)
 
 try:
-    print(f"🔄 Creating BOM rows...")
-    print(f"   Per requirements: 2 BOM lines per (style × color)")
-    print(f"     - Line 1: Main Fabric + bom_material_1")
-    print(f"     - Line 2: Fabric + bom_material_2")
+    print(f"🔄 Adding Fabric Group and Placement columns...")
+    print(f"   Per requirements: 1 row per (style × color)")
+    print(f"     - Fabric Group: hardcoded to 'MAIN MATERIAL CONTENT'")
+    print(f"     - Placement: value of main_material_content")
     
-    # Create BOM Line 1: Main Fabric
-    bom_line_1 = df_exploded_colors.withColumn("fabric_group", lit("Main Fabric")) \
-                                    .withColumn("mill_fabric_article", col("bom_material_1")) \
-                                    .withColumn("bom_line_number", lit(1))
-    
-    # Create BOM Line 2: Fabric
-    bom_line_2 = df_exploded_colors.withColumn("fabric_group", lit("Fabric")) \
-                                    .withColumn("mill_fabric_article", col("bom_material_2")) \
-                                    .withColumn("bom_line_number", lit(2))
-    
-    # Union both BOM lines
-    df_denormalized = bom_line_1.union(bom_line_2)
+    df_denormalized = df_exploded_colors.withColumn("fabric_group", lit("MAIN MATERIAL CONTENT")) \
+                                        .withColumn("placement", col("main_material_content"))
     
     denorm_count = df_denormalized.count()
-    print(f"✅ Denormalized to {denorm_count} rows (style × color × material)")
-    print(f"   Expected: {exploded_count} × 2 = {exploded_count * 2}")
+    print(f"✅ Processed to {denorm_count} rows (style × color)")
+    print(f"   Expected: {exploded_count}")
     print(f"   Actual: {denorm_count}")
     
     # Show sample
     print(f"\n   Sample denormalized data:")
     df_denormalized.select(
-        "lf_style_number", "color_name", "fabric_group", "mill_fabric_article"
-    ).orderBy("lf_style_number", "color_name", "bom_line_number").show(6, truncate=50)
+        "lf_style_number", "color", "fabric_group", "placement"
+    ).orderBy("lf_style_number", "color").show(6, truncate=50)
     
 except Exception as e:
-    print(f"❌ Failed to explode BOM: {e}")
+    print(f"❌ Failed to add Fabric Group and Placement: {e}")
     raise
 
 # COMMAND ----------
 
 # ============================================================================
 # CELL 5: Map Season Code (BeProduct Season + Year → DTC SeasonCode)
+# ============================================================================
+#
+# DTC <> BeProduct season identification differs:
+#   - DTC identifies a season with 2 values:  (Customer, SeasonCode)
+#       e.g. (KTB, SS28), (KTB, FW26)
+#   - BeProduct identifies a season with 3 values: (Customer, Season, Year)
+#       e.g. (KTB, Spring, 2028), (KTB, Fall, 2026)
+#
+# The mapping table `lft.beproduct.dtc_seasoncode_mapping` only stores the
+# *prefix* part of the relationship:
+#       CUSTOMER  STRING  -- BeProduct customer code, e.g. "KTB"
+#       SEASON    STRING  -- BeProduct season name,   e.g. "SPRING", "FALL"
+#       DTCCODE   STRING  -- DTC season code prefix,  e.g. "SS", "FW"
+#   Sample rows: (KTB, SPRING, SS), (KTB, FALL, FW)
+#
+# The full DTC SeasonCode is derived at runtime:
+#       DTC SeasonCode = DTCCODE + last 2 digits (YY) of the BeProduct Year
+#   e.g. SPRING + 2028 -> "SS" + "28" -> "SS28"
+#        FALL   + 2027 -> "FW" + "27" -> "FW27"
+#
+# NOTE: `year` in the source styles table is a STRING (e.g. "2026"), and may
+# contain the sentinel "N/A"; such rows simply fail the join / stay NULL and
+# are reported as unmapped below.
+# The reverse direction (DTC -> BeProduct) lives in
+# dtc/notebooks/pull_dtc_to_delta.py and uses the same table.
 # ============================================================================
 
 print("\n" + "=" * 80)
@@ -202,7 +245,7 @@ print("=" * 80)
 try:
     print(f"📋 Loading season code mapping from {season_mapping_table}...")
     
-    # Load season mapping table
+    # Load season mapping table (schema: CUSTOMER, SEASON, DTCCODE)
     df_season_mapping = spark.table(season_mapping_table)
     
     mapping_count = df_season_mapping.count()
@@ -210,19 +253,28 @@ try:
     
     df_season_mapping.show(truncate=False)
     
-    # Join with denormalized data
-    # Match on: dtc_customer (derived from folder), beproduct_season, beproduct_year
+    # Join with denormalized data on (CUSTOMER, SEASON), case-insensitive.
+    # The mapping is on the season *prefix* only; the year supplies the YY suffix.
     print(f"\n🔄 Joining with season mapping...")
-    print(f"   Match on: customer={customer_code}, season, year")
+    print(f"   Match on: CUSTOMER={customer_code}, SEASON=season (case-insensitive)")
     
     df_with_season = df_denormalized.join(
         df_season_mapping,
         on=[
-            (lit(customer_code) == df_season_mapping.dtc_customer),
-            (col("season") == df_season_mapping.beproduct_season),
-            (col("year") == df_season_mapping.beproduct_year)
+            (upper(lit(customer_code)) == upper(df_season_mapping.CUSTOMER)),
+            (upper(col("season")) == upper(df_season_mapping.SEASON))
         ],
         how="left"
+    )
+    
+    # Derive DTC SeasonCode = DTCCODE + last 2 digits of year
+    # (e.g. 'SS' + '28' = 'SS28'). `year` is a STRING, so right() is applied
+    # directly; rows with no mapping match (DTCCODE NULL) stay NULL.
+    df_with_season = df_with_season.withColumn(
+        "season_code",
+        when(col("DTCCODE").isNotNull() & col("year").isNotNull(), 
+             concat(col("DTCCODE"), right(col("year"), 2)))
+        .otherwise(lit(None))
     )
     
     # Check for unmapped seasons
@@ -310,9 +362,9 @@ try:
         "techpack_stage": "Tech Pack Stage",
         
         # Denormalized fields
-        "color_name": "Color / Wash",
+        "color": "Color / Wash",
         "fabric_group": "Fabric Group",
-        "mill_fabric_article": "Mill Fabric Article #",
+        "placement": "Placement",
         
         # Image (deferred to separate notebook)
         "front_image_url": "Style Image URL",  # Not pushed yet
@@ -330,10 +382,11 @@ try:
         # Composite key
         col("dtc_request_name"),
         col("lf_style_number"),
-        col("color_name"),
+        col("color"),
         col("fabric_group"),
+        col("placement"),
         
-        # DTC columns (keep BeProduct names for now, will rename later)
+        # DTC columns
         col("brands"),
         col("season"),
         col("year"),
@@ -345,7 +398,6 @@ try:
         col("division"),
         col("garment_finish"),
         col("techpack_stage"),
-        col("mill_fabric_article"),
         col("front_image_url"),
         
         # Metadata
@@ -370,8 +422,8 @@ try:
     # Show sample
     print(f"\n   Sample staging data:")
     df_staging.select(
-        "dtc_request_name", "lf_style_number", "color_name", 
-        "fabric_group", "brands", "sync_status"
+        "dtc_request_name", "lf_style_number", "color", 
+        "fabric_group", "placement", "brands", "sync_status"
     ).show(5, truncate=50)
     
 except Exception as e:
@@ -395,7 +447,7 @@ try:
     
     # 1. Check required fields
     print(f"\n1️⃣ Checking required fields...")
-    required_fields = ["lf_style_number", "season_code", "brands", "color_name"]
+    required_fields = ["lf_style_number", "season_code", "brands", "color"]
     
     for field in required_fields:
         null_count = df_staging.where(col(field).isNull()).count()
@@ -441,7 +493,7 @@ try:
     # 4. Check for duplicate composite keys
     print(f"\n4️⃣ Checking for duplicate keys...")
     duplicates = df_staging.groupBy(
-        "dtc_request_name", "lf_style_number", "color_name", "fabric_group"
+        "dtc_request_name", "lf_style_number", "color", "fabric_group"
     ).count().where(col("count") > 1).count()
     
     if duplicates > 0:
@@ -522,7 +574,7 @@ print(f"\nTransformation Summary:")
 print(f"  Input styles: {source_count}")
 print(f"  Styles with colors: {styles_with_colors}")
 print(f"  After color explosion: {exploded_count} rows")
-print(f"  After BOM explosion: {denorm_count} rows")
+print(f"  After adding fabric row: {denorm_count} rows")
 print(f"  Final staging rows: {staging_count}")
 print(f"  Unique DTC requests: {unique_requests}")
 print(f"\nStaging table: {staging_table_full}")
@@ -542,7 +594,7 @@ SELECT
     dtc_request_name,
     COUNT(*) as row_count,
     COUNT(DISTINCT lf_style_number) as unique_styles,
-    COUNT(DISTINCT color_name) as unique_colors
+    COUNT(DISTINCT color) as unique_colors
 FROM {staging_table_full}
 GROUP BY dtc_request_name
 ORDER BY dtc_request_name

@@ -88,11 +88,13 @@ databricks secrets put --scope beproduct --key dtc_api_key_prod
 # Install SDK
 pip install databricks-sdk
 
-# Configure environment
-export DATABRICKS_HOST="https://adb-XXXXXXXX.azuredatabricks.net"
-export DATABRICKS_PAT="dapi..."
+# Configure .env file (one-time setup)
+cp .env.example .env
+# Edit .env and add your credentials:
+#   DATABRICKS_HOST=https://adb-XXXXXXXX.azuredatabricks.net
+#   DATABRICKS_PAT=dapi...
 
-# Upload all notebooks
+# Upload all notebooks (automatically reads .env)
 python scripts/upload_notebooks.py
 ```
 
@@ -136,7 +138,7 @@ lft.beproduct Schema (Single Source of Truth)
    ├─ beproduct_to_dtc_staging
    ├─ dtc_request_mapping
    ├─ push_log
-   └─ dtc_season_code_mapping
+   └─ dtc_seasoncode_mapping     [CUSTOMER, SEASON, DTCCODE]
 ```
 
 ### Universal Change Tracking

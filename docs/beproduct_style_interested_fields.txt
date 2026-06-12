@@ -1,0 +1,21 @@
+DTC label                           BeProduct Field
+"Product Status"                    headerData.fields."PRODUCT STATUS"
+"Style Image"                       headerData.frontImage.origin
+"LF Style#"                         headerData.fields."LF Style Number"
+"Active / Dropped"                  (blank)
+"Legacy Code"                       headerData.fields."CUSTOMER STYLE NUMBER / PLM#"
+"Style Description"                 headerData.fields."DESCRIPTION"
+"Class"                             headerData.fields."PRODUCT CATEGORY"
+"Sub Class"                         headerData.fields."PRODUCT SUB CATEGORY"
+"Division"                          headerData.fields."Division"
+"Brand"                             headerData.fields."Brands"[0]
+"Color / Wash"                      colorways[].colorName
+"Garment Finish"                    headerData.fields."GARMENT FINISH"
+"LP Ref#"                           (blank)
+"Tech Pack Stage"                   headerData.fields."TECHPACK STAGE"
+"Lot#"                              headerData.fields."Lot Code"
+"Main Vendor (Sampling)"            headerData.fields."PARENT VENDOR"
+"Main Factory (Sampling)"           headerData.fields."FACTORY"
+"Main Factory Customer ID"          (blank)
+"Fabric Group"                      "MAIN MATERIAL CONTENT"
+"Placement"                         headerData.fields."MAIN MATERIAL CONTENT"

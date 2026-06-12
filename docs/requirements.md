@@ -62,7 +62,11 @@
     - 1 Style link with 1 BOM
         - Each BOM is a datagrid of Material (i.e. Fabric) + Color
         - There is currently NO direct API to retrieve BOM data
-        - At this moment hard code each style to have 2 BOM lines: (Group, Fabric Placement) = [("Main Fabric",  $.headerData[id="core_main_material"].value),('Fabric",value of $.headerData[id="Core_main_material2"].value)].
+        - CURRENT PHASE: hard code each style to have **1 BOM line** per (style × color):
+          (Fabric Group, Placement) = ("MAIN MATERIAL CONTENT", value of $.headerData[id="main_material_content"].value)
+          - i.e. 1 style : n color : 1 BOM = n DTC rows
+        - NEXT PHASE: introduce a `style × bom` table; the transform will then explode
+          to (style × color × bom) rows instead of the single hardcoded BOM line.
         
 
 - DTC: Reference ./EXPLORATION_SUMMARY.md, ./databricks/dtc/README.md

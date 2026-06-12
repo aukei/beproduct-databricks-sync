@@ -15,14 +15,14 @@ This guide documents the BeProduct → DTC integration that syncs STYLE master d
 ```
 BeProduct (Normalized)              Databricks (Transform)           DTC (Denormalized)
 ┌────────────────────┐              ┌─────────────────────┐          ┌──────────────────┐
-│ 1 Style            │              │ Extended Pull       │          │ N×M Flat Rows    │
+│ 1 Style            │              │ Extended Pull       │          │ N Flat Rows      │
 │ ├─ Header Fields   │───Pull──────▶│ ├─ Colorways Array │          │                  │
-│ ├─ N Colorways     │              │ ├─ BOM Materials   │──────────▶│ Each row =       │
-│ └─ 2 BOM Lines     │              │ └─ Images          │          │ (Style×Color×BOM)│
+│ ├─ N Colorways     │              │ └─ Images          │──────────▶│ Each row =       │
+│ └─ 1 Fabric Row    │              │                     │          │ (Style × Color)  │
 └────────────────────┘              │                     │          └──────────────────┘
                                     │ Denormalization     │
                                     │ ├─ Explode Colors   │
-                                    │ ├─ Explode BOM      │
+                                    │ ├─ Add Fabric Row   │
                                     │ ├─ Map Season Code  │
                                     │ └─ Map Fields       │
                                     └─────────────────────┘
@@ -38,8 +38,8 @@ BeProduct (Normalized)              Databricks (Transform)           DTC (Denorm
 
 2. beproduct_to_dtc_transform.py         → lft.beproduct.beproduct_to_dtc_staging
    - Explode colorways: 1 style → N rows
-   - Explode BOM: each color → 2 material rows
-   - Result: N×2 rows per style
+   - Add 1 hardcoded fabric row per (style × color)
+   - Result: N rows per style
 
 3. dtc_request_manager.py                → lft.beproduct.dtc_request_mapping
    - Ensure all DTC requests exist
@@ -149,7 +149,8 @@ bom_material_2: COTTON-002
 
 **Process:**
 1. **Explode Colorways:** 1 style → N rows (one per color)
-2. **Explode BOM:** Each (style × color) → 2 rows (Main Fabric + Fabric)
+2. **Add Fabric Row:** Each (style × color) → 1 hardcoded row
+   (`fabric_group` = "MAIN MATERIAL CONTENT", `placement` = `main_material_content`)
 3. **Map Season Code:** BeProduct (Season + Year) → DTC SeasonCode (SS26, FW27)
 4. **Derive Request Name:** Build DTC request name: "<Customer> <SeasonCode> <Brand>"
 5. **Map Fields:** Map BeProduct columns to DTC column names
@@ -191,7 +192,7 @@ CREATE TABLE lft.beproduct.beproduct_to_dtc_staging (
     dtc_request_name STRING,           -- "KTB SS26 Wrangler"
     lf_style_number STRING,
     color_name STRING,
-    fabric_group STRING,               -- "Main Fabric" or "Fabric"
+    fabric_group STRING,               -- hardcoded "MAIN MATERIAL CONTENT"
     
     -- DTC columns (BeProduct names, mapped during push)
     brands STRING,
@@ -228,15 +229,35 @@ CREATE TABLE lft.beproduct.beproduct_to_dtc_staging (
 
 **Season Code Mapping:**
 
-Uses table: `lft.beproduct.dtc_season_code_mapping`
+Uses table: `lft.beproduct.dtc_seasoncode_mapping`
+
+DTC and BeProduct identify a season differently:
+
+- **DTC** uses 2 values: `(Customer, SeasonCode)` — e.g. `(KTB, SS28)`, `(KTB, FW26)`
+- **BeProduct** uses 3 values: `(Customer, Season, Year)` — e.g. `(KTB, Spring, 2028)`, `(KTB, Fall, 2026)`
+
+The mapping table stores only the **prefix** relationship (no year):
 
 ```sql
-dtc_customer | season_code | beproduct_season | beproduct_year
--------------|-------------|------------------|---------------
-KTB          | SS26        | Spring           | 2026
-KTB          | FW27        | Fall             | 2027
-KTB          | SS28        | Spring           | 2028
+CUSTOMER | SEASON | DTCCODE
+---------|--------|--------
+KTB      | SPRING | SS
+KTB      | FALL   | FW
 ```
+
+The full DTC SeasonCode is derived at runtime:
+
+```
+DTC SeasonCode = DTCCODE + last 2 digits (YY) of the BeProduct Year
+
+  SPRING + 2028  ->  "SS" + "28"  ->  "SS28"
+  FALL   + 2027  ->  "FW" + "27"  ->  "FW27"
+```
+
+Notes:
+- The styles `year` field is a STRING (e.g. `"2026"`) and may be `"N/A"`; such rows stay unmapped (NULL `season_code`) and are reported.
+- The join is case-insensitive on CUSTOMER/SEASON (`Spring` matches `SPRING`).
+- Reverse direction (DTC -> BeProduct) in `dtc/notebooks/pull_dtc_to_delta.py` reads the **same** table: it splits the DTC `season_code` into prefix + year and looks up `SEASON` via `DTCCODE`.
 
 Created by: `dtc/notebooks/00_init_season_mapping.py`
 
@@ -454,11 +475,11 @@ databricks secrets put --scope beproduct --key company_domain
 # Run once to initialize mapping table
 /Workspace/Repos/beproduct-sync/DTC/notebooks/00_init_season_mapping.py
 
-# Then update with actual mappings
-INSERT INTO lft.beproduct.dtc_season_code_mapping VALUES
-  ('KTB', 'SS26', 'Spring', 2026, 'Spring 2026'),
-  ('KTB', 'FW27', 'Fall', 2027, 'Fall 2027'),
-  ('KTB', 'SS28', 'Spring', 2028, 'Spring 2028');
+# Then add prefix mappings (CUSTOMER, SEASON, DTCCODE) -- no year here.
+# Full SeasonCode is derived as DTCCODE + last 2 digits of the style's year.
+INSERT INTO lft.beproduct.dtc_seasoncode_mapping (CUSTOMER, SEASON, DTCCODE) VALUES
+  ('KTB', 'SPRING', 'SS'),
+  ('KTB', 'FALL', 'FW');
 ```
 
 3. **Upload Notebooks:**
@@ -468,14 +489,16 @@ INSERT INTO lft.beproduct.dtc_season_code_mapping VALUES
 # Install Databricks SDK
 pip install databricks-sdk
 
-# Configure environment variables in .env
-export DATABRICKS_HOST="https://adb-XXXXXXXX.azuredatabricks.net"
-export DATABRICKS_PAT="dapi..."
+# Configure .env file (one-time setup)
+cp .env.example .env
+# Edit .env and add your credentials:
+#   DATABRICKS_HOST=https://adb-XXXXXXXX.azuredatabricks.net
+#   DATABRICKS_PAT=dapi...
 
 # Preview uploads (dry run)
 python scripts/upload_notebooks.py --dry-run
 
-# Upload all notebooks
+# Upload all notebooks (automatically reads .env)
 python scripts/upload_notebooks.py
 
 # Upload specific directory only
@@ -627,8 +650,9 @@ Set up alerts for:
 Error: unmapped rows without season code
 
 Fix:
-- Check lft.beproduct.dtc_season_code_mapping
-- Add missing season/year combinations
+- Check lft.beproduct.dtc_seasoncode_mapping
+- Add missing (CUSTOMER, SEASON, DTCCODE) prefix rows
+- Also check the style's `year` field is a real year, not "N/A"
 - Re-run transform
 ```
 
@@ -707,20 +731,22 @@ SET sync_status = 'pending',
 assert exploded_df.count() == 2
 ```
 
-**Test BOM explosion:**
+**Test fabric row (no BOM explosion):**
 ```python
 # Input: 1 (style × color)
-# Expected: 2 material rows
+# Expected: 1 hardcoded fabric row
+#   fabric_group = "MAIN MATERIAL CONTENT", placement = main_material_content
 
-assert bom_df.count() == 2
+assert fabric_df.count() == 1
 ```
 
 **Test season code mapping:**
 ```python
-# Input: Season="Spring", Year=2026
-# Expected: SeasonCode="SS26"
+# Mapping row: (CUSTOMER=KTB, SEASON=SPRING, DTCCODE=SS)
+# Input: Season="Spring", Year="2026"
+# Expected: SeasonCode = DTCCODE + last2(year) = "SS" + "26" = "SS26"
 
-assert derive_season_code("Spring", 2026) == "SS26"
+assert derive_season_code("Spring", "2026") == "SS26"   # FALL/2027 -> "FW27"
 ```
 
 ### Integration Tests

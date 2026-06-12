@@ -25,7 +25,16 @@ Before working with Databricks, ensure:
 
 ### 1. Personal Access Token (PAT)
 
-**Environment Setup:**
+**Environment Setup (using .env - Recommended):**
+```bash
+# Create .env file
+cp .env.example .env
+# Add credentials to .env:
+#   DATABRICKS_HOST=https://your-workspace.cloud.databricks.com
+#   DATABRICKS_PAT=dapi1234567890abcdef
+```
+
+**Alternative - Export directly:**
 ```bash
 export DATABRICKS_HOST="https://your-workspace.cloud.databricks.com"
 export DATABRICKS_TOKEN="dapi1234567890abcdef"

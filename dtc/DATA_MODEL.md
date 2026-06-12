@@ -105,39 +105,49 @@ JOIN lft.beproduct.products bp ON
 
 ## SeasonCode Mapping
 
-DTC uses encoded seasonCode (e.g., "SS28") that must be mapped to BeProduct (Season, Year).
+DTC and BeProduct identify a season differently and must be reconciled:
+
+- **DTC** uses 2 values: `(Customer, SeasonCode)` — e.g. `(KTB, SS28)`, `(KTB, FW26)`
+- **BeProduct** uses 3 values: `(Customer, Season, Year)` — e.g. `(KTB, Spring, 2028)`, `(KTB, Fall, 2026)`
+
+A DTC `SeasonCode` is a **prefix + year**: `SS28` = prefix `SS` + year `28`.
+Only the **prefix** is stored in the lookup table; the **year** part is
+derived from / contributes the last 2 digits of the BeProduct `year`.
+
+```
+DTC SeasonCode = DTCCODE + last 2 digits (YY) of the BeProduct Year
+  SPRING + 2028  ->  "SS28"      FALL + 2027  ->  "FW27"
+```
 
 ### Mapping Table Structure
 
-Create `lft.beproduct.dtc_season_code_mapping`:
+The real table is `lft.beproduct.dtc_seasoncode_mapping` (note: **no** underscore
+between `season` and `code`). Created by `dtc/notebooks/00_init_season_mapping.py`:
 
 ```sql
-CREATE TABLE IF NOT EXISTS lft.beproduct.dtc_season_code_mapping (
-  dtc_customer STRING,          -- e.g., "KTB"
-  season_code STRING,           -- e.g., "SS28"
-  beproduct_season STRING,      -- e.g., "Spring"
-  beproduct_year INT,           -- e.g., 2028
-  description STRING,           -- e.g., "Spring 2028"
-  created_date TIMESTAMP,
-  PRIMARY KEY (dtc_customer, season_code)
+CREATE TABLE IF NOT EXISTS lft.beproduct.dtc_seasoncode_mapping (
+  CUSTOMER STRING NOT NULL,  -- BeProduct customer code, e.g. "KTB"
+  SEASON   STRING NOT NULL,  -- BeProduct season name,   e.g. "SPRING", "FALL"
+  DTCCODE  STRING NOT NULL   -- DTC season code prefix,  e.g. "SS", "FW"
 )
 USING DELTA
 ```
 
-### Example Mappings
+### Example Mappings (prefix only — no year)
 
-| DTC Customer | Season Code | BeProduct Season | BeProduct Year | Notes |
-|--------------|------------|-----------------|----------------|-------|
-| KTB | SS28 | Spring | 2028 | Spring Summer 2028 |
-| KTB | FW27 | Fall | 2027 | Fall Winter 2027 |
-| KTB | SS26 | Spring | 2026 | Spring Summer 2026 |
-| KTB | SS28 | Spring | 2028 | Customer-specific mapping |
+| CUSTOMER | SEASON | DTCCODE | Example derivation |
+|----------|--------|---------|--------------------|
+| KTB | SPRING | SS | `SPRING` + `2028` -> `SS28` |
+| KTB | FALL | FW | `FALL` + `2027` -> `FW27` |
 
 **Notes**:
-- Codes are **arbitrary and differ between customers**
-- Same code (e.g., "SS28") may mean different season for different customers
-- Mapping is **not algorithmic** (cannot infer from code alone)
-- **Must use lookup table** with fallback handling
+- The **prefix** (SS/FW/...) is **not algorithmic** and may differ between
+  customers, so it **must** come from this lookup table.
+- The **year** part **is** algorithmic: last 2 digits of the BeProduct year.
+- Join is case-insensitive on `CUSTOMER` / `SEASON`; the styles `year` field is a
+  STRING and may be `"N/A"` (such rows stay unmapped).
+- Forward (BeProduct -> DTC): `beproduct/beproduct_to_dtc_transform.py`.
+  Reverse (DTC -> BeProduct): `dtc/notebooks/pull_dtc_to_delta.py`. Same table.
 
 ---
 
@@ -259,7 +269,7 @@ When pushing:
 
 - [ ] Update DTCConnector to extract (dtc_customer, season_code, brand) from request name
 - [ ] Update pull notebook to pass customer mapping parameters
-- [ ] Create seasonCode mapping table: `dtc_season_code_mapping`
+- [ ] Create seasonCode mapping table: `dtc_seasoncode_mapping`
 - [ ] Update pull notebook to join and populate (beproduct_season, beproduct_year)
 - [ ] Update change detection to use composite key
 - [ ] Update change log schema to include composite_key field
@@ -272,6 +282,6 @@ When pushing:
 ## Reference
 
 - **Request Name Parsing**: Implemented in `DTCConnector.get_document_metadata()` extension
-- **SeasonCode Mapping**: Query `dtc_season_code_mapping` table
+- **SeasonCode Mapping**: Query `dtc_seasoncode_mapping` table
 - **Customer Mapping**: Passed as notebook parameters
 

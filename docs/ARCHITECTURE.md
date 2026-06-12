@@ -14,7 +14,7 @@ Successfully implemented complete BeProduct → DTC cross-platform integration w
 
 4 new Databricks notebooks implementing full ETL pipeline:
 1. **Extended Pull** - Extract colorways, BOM, materials, images
-2. **Denormalization** - Transform to flat DTC structure (Style × Color × BOM)
+2. **Denormalization** - Transform to flat DTC structure (Style × Color, 1 fabric row)
 3. **Request Manager** - Auto-create DTC requests/sheets
 4. **Change Detection & Push** - Sync to DTC via PATCH API
 
@@ -47,7 +47,8 @@ Successfully implemented complete BeProduct → DTC cross-platform integration w
 
 **Delivered:**
 - ✅ Colorway explosion: 1 style → N rows (one per color)
-- ✅ BOM explosion: Each (style × color) → 2 material rows
+- ✅ Fabric row: 1 hardcoded row per (style × color)
+  (`fabric_group` = "MAIN MATERIAL CONTENT", `placement` = `main_material_content`)
 - ✅ Season code mapping: BeProduct → DTC format (SS26, FW27)
 - ✅ DTC request name derivation: "<Customer> <SeasonCode> <Brand>"
 - ✅ Field mapping: BeProduct columns → DTC column names
@@ -58,13 +59,11 @@ Successfully implemented complete BeProduct → DTC cross-platform integration w
 **Transformation Example:**
 ```
 INPUT (1 style):
-  LF001 with 2 colors, 2 BOM materials
+  LF001 with 2 colors
 
-OUTPUT (4 rows):
-  LF001 | Dark Wash  | Main Fabric | DENIM-001
-  LF001 | Dark Wash  | Fabric      | COTTON-002
-  LF001 | Light Wash | Main Fabric | DENIM-001
-  LF001 | Light Wash | Fabric      | COTTON-002
+OUTPUT (2 rows -- 1 fabric row per color):
+  LF001 | Dark Wash  | MAIN MATERIAL CONTENT | <main_material_content>
+  LF001 | Light Wash | MAIN MATERIAL CONTENT | <main_material_content>
 ```
 
 ### Phase 1C: DTC Request Manager ✅
@@ -123,7 +122,7 @@ patch_row()            # PATCH with flexible rowId/rowIndex support
 | Table | Purpose | Rows (est.) |
 |-------|---------|-------------|
 | `lft.beproduct.ktb_styles_extended` | Extended styles with colorways/BOM | 1 per style |
-| `lft.beproduct.beproduct_to_dtc_staging` | Denormalized flat rows | N×2 per style |
+| `lft.beproduct.beproduct_to_dtc_staging` | Denormalized flat rows | N per style (1 fabric row × N colors) |
 | `lft.beproduct.dtc_request_mapping` | Request/sheet ID mapping | 1 per request |
 | `lft.beproduct.beproduct_to_dtc_push_log` | Push audit trail | 1 per operation |
 | `lft.beproduct.dtc_current_snapshot_uat` | DTC data snapshots | All DTC rows |
@@ -137,7 +136,7 @@ patch_row()            # PATCH with flexible rowId/rowIndex support
 ```
 11:00 UTC │ Extended Pull           → ktb_styles_extended (1 row per style)
           │
-12:00 UTC │ Denormalization         → staging (N×2 rows per style)
+12:00 UTC │ Denormalization         → staging (N rows per style)
           │
 12:30 UTC │ Request Manager         → request_mapping (ensure requests exist)
           │
@@ -151,14 +150,14 @@ BeProduct                    Databricks                      DTC
 ┌──────────┐                ┌──────────┐                    ┌──────────┐
 │ 1 Style  │                │ Extended │                    │          │
 │ + 2 Colors ─Pull(11am)────▶ 1 Row    │                    │          │
-│ + 2 BOM   │                │ (array)  │                    │          │
+│          │                │ (array)  │                    │          │
 └──────────┘                └────┬─────┘                    │          │
                                  │                           │          │
                             Transform(12pm)                  │          │
                                  │                           │          │
                             ┌────▼─────┐                     │          │
                             │ Staging  │                     │          │
-                            │ 4 Rows   ├──Push(1pm)─────────▶ 4 Rows  │
+                            │ 2 Rows   ├──Push(1pm)─────────▶ 2 Rows  │
                             │ (flat)   │     PATCH           │ (WIP)   │
                             └──────────┘                     └──────────┘
 ```
@@ -168,13 +167,15 @@ BeProduct                    Databricks                      DTC
 ## Key Features Implemented
 
 ### Denormalization Logic
-- ✅ Explode colorways array → N rows
-- ✅ Explode BOM materials → 2 rows per color
-- ✅ Cartesian product: N colors × 2 materials = 2N rows
+- ✅ Explode colorways array → N rows (one per color)
+- ✅ Add 1 hardcoded fabric row per (style × color)
+  (`fabric_group` = "MAIN MATERIAL CONTENT", `placement` = `main_material_content`)
+- ✅ Result: N colors × 1 fabric row = N rows per style
 
 ### Season Code Mapping
-- ✅ BeProduct (Season + Year) → DTC (SeasonCode)
-- ✅ Mapping table: `lft.beproduct.dtc_season_code_mapping`
+- ✅ BeProduct (Customer, Season, Year) → DTC (Customer, SeasonCode)
+- ✅ Mapping table: `lft.beproduct.dtc_seasoncode_mapping` (CUSTOMER, SEASON, DTCCODE)
+- ✅ Rule: `SeasonCode = DTCCODE + last 2 digits of year`
 - ✅ Examples: Spring 2026 → SS26, Fall 2027 → FW27
 
 ### Field Mapping
@@ -216,11 +217,12 @@ beproduct/company_domain        # BeProduct domain
 ```
 
 ### Season Code Mapping Table
+Stores the season *prefix* only (CUSTOMER, SEASON, DTCCODE); the full DTC
+SeasonCode is `DTCCODE + last 2 digits of the style's year`.
 ```sql
-INSERT INTO lft.beproduct.dtc_season_code_mapping VALUES
-  ('KTB', 'SS26', 'Spring', 2026, 'Spring 2026'),
-  ('KTB', 'FW27', 'Fall', 2027, 'Fall 2027'),
-  ('KTB', 'SS28', 'Spring', 2028, 'Spring 2028');
+INSERT INTO lft.beproduct.dtc_seasoncode_mapping (CUSTOMER, SEASON, DTCCODE) VALUES
+  ('KTB', 'SPRING', 'SS'),
+  ('KTB', 'FALL', 'FW');
 ```
 
 ---
@@ -229,7 +231,7 @@ INSERT INTO lft.beproduct.dtc_season_code_mapping VALUES
 
 ### Unit Tests
 - ⏳ **TODO:** Colorway explosion test
-- ⏳ **TODO:** BOM explosion test
+- ⏳ **TODO:** Fabric row test (1 hardcoded row per style × color)
 - ⏳ **TODO:** Season code mapping test
 - ⏳ **TODO:** Field validation test
 
@@ -340,7 +342,7 @@ INSERT INTO lft.beproduct.dtc_season_code_mapping VALUES
 - 4 notebooks created and documented
 - 5 Delta tables designed
 - Extended DTCConnector with 4 new methods
-- Complete denormalization logic (Style × Color × BOM)
+- Complete denormalization logic (Style × Color, 1 hardcoded fabric row)
 - Season code mapping
 - Field mapping (16+ fields)
 - Request/sheet auto-creation
@@ -369,7 +371,7 @@ INSERT INTO lft.beproduct.dtc_season_code_mapping VALUES
 ### Open Questions (From Plan)
 
 1. **Field IDs:** Are `core_main_material` and `Core_main_material2` correct?
-2. **BOM Structure:** Is the 2-line BOM hardcoded structure correct for all styles?
+2. **BOM Structure:** RESOLVED — current phase hardcodes **1 BOM line** per (style × color) (`fabric_group` = "MAIN MATERIAL CONTENT", `placement` = `main_material_content`). NEXT PHASE: a `style × bom` table will let the transform explode to (style × color × bom) rows. See `docs/requirements.md`.
 3. **Colorways:** Can a style have 0 colorways? How to handle?
 4. **DTC Column Names:** What are exact column names (case-sensitive)?
 5. **Season Mapping:** Complete season code mapping table data?
