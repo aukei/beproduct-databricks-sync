@@ -196,14 +196,14 @@ try:
             # Get views for this request
             views = connector.get_views(req_id)
             
-            # Find "Full Version" view
+            # Find "WIP_ITS_USE" view
             full_version_view = next(
-                (v for v in views if v.get("viewName") == "Full Version"),
+                (v for v in views if v.get("viewName") == "WIP_ITS_USE"),
                 None
             )
             
             if not full_version_view:
-                print(f"     ⚠️  No 'Full Version' view found, using first view")
+                print(f"     ⚠️  No 'WIP_ITS_USE' view found, using first view")
                 full_version_view = views[0] if views else None
             
             if full_version_view:
@@ -422,7 +422,7 @@ try:
                 req_id = row.request_id
                 views = connector.get_views(req_id)
                 full_version_view = next(
-                    (v for v in views if v.get("viewName") == "Full Version"),
+                    (v for v in views if v.get("viewName") == "WIP_ITS_USE"),
                     views[0] if views else None
                 )
                 

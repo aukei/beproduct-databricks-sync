@@ -71,7 +71,7 @@
 
 - DTC: Reference ./EXPLORATION_SUMMARY.md, ./databricks/dtc/README.md
     - DTC to Databrricks: project artifacts in ./databricks/dtc/    
-    - This phrase primarily focus on Requests of the type "WIP" document using the "Full Version" view (i.e. complete data)
+    - This phrase primarily focus on Requests of the type "WIP" document using the "WIP_ITS_USE" view (i.e. complete data)
         - Workspace = "<Customer>", i.e. "KTB"
         - Document = "<Customer> WIP", i.e. "KTB WIP" in this instance 
     - DTC Requests are named "<Customer> <SeasonCode> <Brand>"

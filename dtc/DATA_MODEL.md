@@ -24,14 +24,14 @@ Workspace (e.g., "KTB")
 
 ### Views (Critical Requirement)
 
-**IMPORTANT**: All DTC requests **must have a "Full Version" view** configured.
+**IMPORTANT**: All DTC requests **must have a "WIP_ITS_USE" view** configured.
 
-- **Full Version view**: Contains ALL columns and ALL rows (unfiltered, complete data)
+- **WIP_ITS_USE view**: Contains ALL columns and ALL rows (unfiltered, complete data)
 - **Other views**: May hide specific columns or filter rows (used for specific reporting needs)
 
-**Sync Rule**: Always pull from "Full Version" view to ensure data integrity and completeness.
+**Sync Rule**: Always pull from "WIP_ITS_USE" view to ensure data integrity and completeness.
 
-The sync process will **FAIL** if "Full Version" is not available, preventing partial data pulls.
+The sync process will **FAIL** if "WIP_ITS_USE" is not available, preventing partial data pulls.
 
 ---
 

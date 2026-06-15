@@ -21,9 +21,9 @@ This module provides a two-way sync solution for DTC (Data Collaboration Applica
 - ✅ **Phase 1 (Pull)**: DTC → Databricks (read-only)
   - Pull any Request by ID (parameterized)
   - Any environment (uat/prod) via parameter
-  - **REQUIRED**: Must use "Full Version" view (all columns, all rows)
+  - **REQUIRED**: Must use "WIP_ITS_USE" view (all columns, all rows)
     - Other views may hide columns/rows, compromising data integrity
-    - Sync fails if "Full Version" not available (prevents partial pulls)
+    - Sync fails if "WIP_ITS_USE" not available (prevents partial pulls)
   - Document metadata stored as Delta table properties
 - ✅ **Phase 2 (Change Tracking)**: Row-level delta detection + push
   - Snapshot-based change detection (SHA256 hash of data)
@@ -43,7 +43,7 @@ This module provides a two-way sync solution for DTC (Data Collaboration Applica
 │                                                                 │
 │  DTC API (UAT)                                                  │
 │  ├─ Request: KTB FW26 Wrangler                                 │
-│  │  └─ 14 views (Full Version, Vendor 1-3, etc.)             │
+│  │  └─ 14 views (WIP_ITS_USE, Vendor 1-3, etc.)             │
 │  │     └─ 247 rows × 114 columns                              │
 │  │                                                              │
 │  ↓ (DTCConnector)                                              │
@@ -63,9 +63,9 @@ This module provides a two-way sync solution for DTC (Data Collaboration Applica
 
 ### DTC Configuration
 
-**CRITICAL**: Each DTC Request must have a **"Full Version" view** configured.
+**CRITICAL**: Each DTC Request must have a **"WIP_ITS_USE" view** configured.
 
-- **Full Version view** must contain:
+- **WIP_ITS_USE view** must contain:
   - ✅ ALL columns (114 data columns, no filtering)
   - ✅ ALL rows (complete dataset, no filtering)
   - ✅ Unfiltered, complete representation of the data
@@ -76,12 +76,12 @@ This module provides a two-way sync solution for DTC (Data Collaboration Applica
   - ❌ Will NOT be used by sync (ignored)
 
 **Sync Behavior**:
-- Always pulls from "Full Version" view
-- **FAILS** with clear error if "Full Version" not found
+- Always pulls from "WIP_ITS_USE" view
+- **FAILS** with clear error if "WIP_ITS_USE" not found
 - Prevents accidental partial data pulls from other views
 - Ensures data integrity and completeness
 
-**Setup**: Work with DTC admin to ensure all synced requests have "Full Version" view configured.
+**Setup**: Work with DTC admin to ensure all synced requests have "WIP_ITS_USE" view configured.
 
 ---
 
@@ -323,8 +323,8 @@ SHOW TBLPROPERTIES lft.beproduct.dtc_master_chart_uat;
 ### Input (DTC Request)
 - **Request ID**: `69f076f0b7247a661226be9a`
 - **Request Reference**: `KTB FW26 Wrangler`
-- **Views Available**: 14 (Full Version, Vendor 1-3, Factory Allocation, etc.)
-- **Rows in Full Version View**: 247
+- **Views Available**: 14 (WIP_ITS_USE, Vendor 1-3, Factory Allocation, etc.)
+- **Rows in WIP_ITS_USE View**: 247
 - **Columns**: 114
 
 ### Output (Delta Table)

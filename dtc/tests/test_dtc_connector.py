@@ -83,10 +83,10 @@ try:
     if len(views) > 5:
         print(f"   ... and {len(views) - 5} more")
     
-    # Use Full Version view
+    # Use WIP_ITS_USE view
     view_id = None
     for v in views:
-        if v.get("viewName") == "Full Version":
+        if v.get("viewName") == "WIP_ITS_USE":
             view_id = v.get("viewId")
             break
     if not view_id and views:

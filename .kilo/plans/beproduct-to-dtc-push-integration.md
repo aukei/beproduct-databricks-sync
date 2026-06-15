@@ -389,7 +389,7 @@ Change Detection:
    for request_name, request_id in request_map.items():
        df_dtc_current = connector.to_dataframe(
            request_id=request_id,
-           view_id="Full Version"
+           view_id="WIP_ITS_USE"
        )
        
        # Store in comparison table

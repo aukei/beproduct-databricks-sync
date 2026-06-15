@@ -42,6 +42,61 @@ By syncing Master Data to Databricks, you can:
 2. Create reference tables for data quality checks
 3. Build UI dropdowns that match BeProduct's valid values
 
+### Field Types on Push-Back (MultiSelect vs DropDown)
+
+The push-back job (`beproduct_style_push.py`) shapes each value to match the
+BeProduct field **type**, read from the style's `data_json` (`headerData.fields[].type`):
+
+| BeProduct type | Example fields | Stored in Delta | Sent to BeProduct |
+|----------------|----------------|-----------------|-------------------|
+| **MultiSelect** | `BRANDS`, `CUSTOMER` | single string, e.g. `Wrangler` | one-element array, e.g. `["Wrangler"]` |
+| **DropDown** | `PRODUCT STATUS` | single string, e.g. `Proto` | single string, e.g. `Pre-Line` |
+| Text / other | `DESCRIPTION`, etc. | string | string |
+
+**Single-value assumption:** `CUSTOMER` and `BRANDS` are multiSelect fields, but
+the project team confirms each style always has exactly **one** value selected.
+The push therefore always sends a single-element array for these fields. If a
+value were ever comma-joined (`"A, B"`), only the first selection is sent.
+
+> ⚠️ Sending a multiSelect value as a bare string (instead of an array) causes
+> BeProduct to silently blank the field — this is why type-aware shaping matters.
+
+### Verify Round-Trip: change in Databricks → see in BeProduct
+
+After a Style Sync has populated `lft.beproduct.ktb_styles`:
+
+1. **Edit a value in Databricks** and bump `modified_at` so the change is detected
+   (`modified_at > synced_at`):
+
+   ```sql
+   -- Brands (MultiSelect): change the single selected brand
+   UPDATE lft.beproduct.ktb_styles
+   SET brands = 'Lee', modified_at = current_timestamp()
+   WHERE lf_style_number = '<LF Style #>';
+
+   -- Product Status (DropDown): e.g. Proto -> Pre-Line
+   UPDATE lft.beproduct.ktb_styles
+   SET product_status = 'Pre-Line', modified_at = current_timestamp()
+   WHERE lf_style_number = '<LF Style #>';
+   ```
+
+2. **Dry-run the push** to confirm the payload shape (array for brands, string
+   for product_status):
+
+   - Notebook: `beproduct/beproduct_style_push.py`
+   - Parameters: `source_table_name=ktb_styles`, `dry_run=true`
+   - In the logged `Fields:` the BRANDS field id maps to a **list** `['Lee']`
+     while the PRODUCT STATUS field id maps to a **string** `Pre-Line`.
+
+3. **Run the push for real** (`dry_run=false`).
+
+4. **Confirm in BeProduct** the style now shows `Brand = Lee` and
+   `Product Status = Pre-Line`. (Both values must exist in the field's Master
+   Data list, or BeProduct silently blanks them.)
+
+5. **Optionally re-pull** with `beproduct_style_sync.py` to confirm the new
+   values round-trip back into `ktb_styles`.
+
 ---
 
 ## Setup

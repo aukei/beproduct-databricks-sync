@@ -88,6 +88,15 @@ schema_val = dbutils.widgets.get("schema")
 dry_run_val = dbutils.widgets.get("dry_run").lower() == "true"
 
 # Field mapping (same as pull job)
+#
+# BeProduct field TYPES matter on push-back (see build_update_payload):
+#   - MultiSelect fields (e.g. BRANDS, and CUSTOMER when synced) are stored in
+#     BeProduct as an array of options. The project team confirms each style
+#     always carries exactly ONE selection for these fields, so the push wraps
+#     the value in a single-element array, e.g. "Wrangler" -> ["Wrangler"].
+#   - DropDown fields (e.g. PRODUCT STATUS) are stored/updated as a single
+#     string option, e.g. "Proto" -> "Pre-Line".
+# Values must exist in the BeProduct Master Data list for that field.
 COMPULSORY_FIELDS = {
     "LF Style Number": "lf_style_number",
     "DESCRIPTION": "description",
@@ -97,12 +106,12 @@ COMPULSORY_FIELDS = {
 }
 
 INTERESTED_FIELDS = {
-    "PRODUCT STATUS": "product_status",
+    "PRODUCT STATUS": "product_status",        # DropDown  (single string)
     "CUSTOMER STYLE NUMBER / PLM #": "customer_style_number",
     "PRODUCT CATEGORY": "product_category",
     "PRODUCT SUB CATEGORY": "product_sub_category",
     "Division": "division",
-    "BRANDS": "brands",
+    "BRANDS": "brands",                        # MultiSelect (single value -> [value])
     "GARMENT FINISH": "garment_finish",
     "TECHPACK STAGE": "techpack_stage",
     "Lot Code": "lot_code",
@@ -219,12 +228,73 @@ if not HAS_CHANGES:
     print(f"\n✅ No changes to push")
     print(f"   All records are in sync (modified_at == synced_at)")
 
+def _to_single_select_list(value) -> List[str]:
+    """Normalize a stored multiSelect value into a single-element list.
+
+    BeProduct multiSelect fields (e.g. CUSTOMER, BRANDS) expect an ARRAY of
+    selected option strings on update. The project team confirms each style
+    always holds exactly ONE selection for these fields, so we collapse the
+    stored value down to a single-element list.
+
+    Accepts any of the shapes the sync job may have persisted:
+      - a real list (Spark array col):      ["Wrangler"]        -> ["Wrangler"]
+      - a JSON-style array string:          "['Wrangler']"      -> ["Wrangler"]
+      - a plain string (comma-joined):      "Wrangler"          -> ["Wrangler"]
+    Returns [] when there is no usable value.
+    """
+    if isinstance(value, list):
+        cleaned = [str(v).strip() for v in value if v is not None and str(v).strip() != ""]
+        return cleaned[:1]
+
+    if isinstance(value, str):
+        s = value.strip()
+        if s == "":
+            return []
+        # JSON-style array string, e.g. "['Wrangler']" or '["Wrangler"]'
+        if s.startswith("[") and s.endswith("]"):
+            try:
+                parsed = json.loads(s.replace("'", '"'))
+                if isinstance(parsed, list):
+                    cleaned = [str(v).strip() for v in parsed if str(v).strip() != ""]
+                    return cleaned[:1]
+            except Exception:
+                pass
+        # Plain string. Single value is expected, but guard against an accidental
+        # "A, B" comma-join by taking the first selection only.
+        first = s.split(",")[0].strip()
+        return [first] if first else []
+
+    return [str(value)]
+
+
+def _to_scalar_string(value) -> Optional[str]:
+    """Normalize a stored dropDown value into a single option string.
+
+    BeProduct dropDown fields (e.g. PRODUCT STATUS) expect a single string
+    option (e.g. "Pre-Line"). Returns None when there is no usable value.
+    """
+    if isinstance(value, list):
+        for v in value:
+            if v is not None and str(v).strip() != "":
+                return str(v).strip()
+        return None
+    s = str(value).strip()
+    return s if s != "" else None
+
+
 def build_update_payload(record: Dict) -> Dict:
     """
     Build BeProduct API update payload from Databricks record.
     
     Uses field IDs (not field names) by extracting the mapping from data_json.
     Returns dict with 'id' and 'fields' for the SDK's attributes_update() method.
+
+    Field values are shaped to match each BeProduct field TYPE (read from the
+    style's data_json):
+      - MultiSelect (CUSTOMER, BRANDS): sent as a one-element array, since the
+        project confirms a single selection per style.
+      - DropDown (PRODUCT STATUS): sent as a single string option.
+      - Text / other: sent as a plain string.
     """
     style_id = record.get("id")
     
@@ -276,25 +346,42 @@ def build_update_payload(record: Dict) -> Dict:
     for col_name, bp_field_name in COLUMN_TO_FIELD.items():
         value = record.get(col_name)
         
-        # Handle array fields (Brands, etc.)
-        if isinstance(value, str) and value.startswith("["):
-            try:
-                value = json.loads(value)
-            except:
-                pass
+        # Skip None / empty up front: empty strings get silently rejected by
+        # BeProduct on dropdown/multiselect fields.
+        if value is None or value == "":
+            continue
         
-        # Only include non-None and non-empty values
-        # Skip empty strings on dropdown/multiselect fields (they get rejected silently)
-        if value is not None and value != "":
-            # Use field ID if available, fallback to field name
-            field_id = field_name_to_id.get(bp_field_name, bp_field_name)
-            
-            # Log warning if sending to dropdown/multiselect with potentially invalid value
-            field_type = field_id_to_type.get(field_id, "")
-            if field_type in ["DropDown", "MultiSelect"] and isinstance(value, str):
-                logger.warning(f"Field {field_id} ({bp_field_name}) is {field_type} type - ensure value '{value}' is in valid Master Data list")
-            
-            fields[field_id] = value
+        # Resolve the BeProduct field ID and its declared type.
+        field_id = field_name_to_id.get(bp_field_name, bp_field_name)
+        field_type = field_id_to_type.get(field_id, "")
+        
+        # Shape the value to match the field type (see function docstring).
+        if field_type == "MultiSelect":
+            # e.g. BRANDS "Wrangler" -> ["Wrangler"], CUSTOMER single value.
+            value = _to_single_select_list(value)
+            logger.warning(
+                f"Field {field_id} ({bp_field_name}) is MultiSelect - ensure "
+                f"each value in {value} exists in the valid Master Data list"
+            )
+        elif field_type == "DropDown":
+            # e.g. PRODUCT STATUS "Proto" -> "Pre-Line"
+            value = _to_scalar_string(value)
+            logger.warning(
+                f"Field {field_id} ({bp_field_name}) is DropDown - ensure value "
+                f"'{value}' exists in the valid Master Data list"
+            )
+        else:
+            # Text and other scalar fields.
+            if isinstance(value, list):
+                value = ", ".join(str(v) for v in value) if value else None
+            else:
+                value = str(value)
+        
+        # Drop anything that normalized to empty.
+        if value is None or value == "" or value == []:
+            continue
+        
+        fields[field_id] = value
     
     return {
         "id": style_id,

@@ -19,7 +19,7 @@ Use this skill when you need to:
 DTC provides a REST API for accessing worksheet data with the following key concepts:
 - **Request**: A DTC request contains metadata and links to sheets
 - **Sheet**: Contains the actual tabular data
-- **View**: Different perspectives/filters on a sheet (e.g., "Full Version", "Summary")
+- **View**: Different perspectives/filters on a sheet (e.g., "WIP_ITS_USE", "Summary")
 - **Rows**: Individual data rows with row_id for updates
 - **Columns**: Named columns, may contain HTML or special formatting
 
@@ -152,13 +152,13 @@ for view in views:
 
 # Find specific view by name
 full_version_view = next(
-    (v for v in views if v['viewName'] == 'Full Version'),
+    (v for v in views if v['viewName'] == 'WIP_ITS_USE'),
     None
 )
 
 if full_version_view:
     view_id = full_version_view['viewId']
-    print(f"Found 'Full Version' view: {view_id}")
+    print(f"Found 'WIP_ITS_USE' view: {view_id}")
 ```
 
 ### 3. Read Sheet Data
@@ -321,7 +321,7 @@ print(f"🏷️  Brand (from request): {brand_from_request}")
 # Step 4: Get views
 views = dtc.get_views(DTC_REQUEST_ID)
 full_version_view = next(
-    (v for v in views if v['viewName'] == 'Full Version'),
+    (v for v in views if v['viewName'] == 'WIP_ITS_USE'),
     views[0]  # Fallback to first view
 )
 view_id = full_version_view['viewId']
@@ -503,9 +503,9 @@ def sync_dtc_to_delta(request_id: str, environment: str = "uat"):
     parsed = dtc.parse_request_name(request['requestReference'])
     brand = parsed.get('brand', 'Unknown')
     
-    # Get Full Version view
+    # Get WIP_ITS_USE view
     views = dtc.get_views(request_id)
-    view = next((v for v in views if v['viewName'] == 'Full Version'), views[0])
+    view = next((v for v in views if v['viewName'] == 'WIP_ITS_USE'), views[0])
     
     # Fetch data
     df = dtc.to_dataframe(sheet_id=request['sheetId'], view_id=view['viewId'])
@@ -547,7 +547,7 @@ def incremental_sync_dtc(request_id: str, environment: str = "uat"):
     
     request = dtc.get_request(request_id)
     views = dtc.get_views(request_id)
-    view = next((v for v in views if v['viewName'] == 'Full Version'), views[0])
+    view = next((v for v in views if v['viewName'] == 'WIP_ITS_USE'), views[0])
     
     new_df = dtc.to_dataframe(sheet_id=request['sheetId'], view_id=view['viewId'])
     new_df = spark.createDataFrame(new_df)
@@ -588,7 +588,7 @@ def sync_multiple_requests(request_ids: list, environment: str = "uat"):
         
         request = dtc.get_request(request_id)
         views = dtc.get_views(request_id)
-        view = next((v for v in views if v['viewName'] == 'Full Version'), views[0])
+        view = next((v for v in views if v['viewName'] == 'WIP_ITS_USE'), views[0])
         
         df = dtc.to_dataframe(sheet_id=request['sheetId'], view_id=view['viewId'])
         spark_df = spark.createDataFrame(df)
@@ -681,7 +681,7 @@ else:
 
 1. **Use secrets for API keys** - Never hardcode credentials
 2. **Parse request names** - Extract brand/season from request reference
-3. **Use Full Version view** - For complete data extraction
+3. **Use WIP_ITS_USE view** - For complete data extraction
 4. **Track row_id** - Essential for updates/push operations
 5. **Add metadata** - Include `extracted_time`, `sync_date`, `batch_id`
 6. **Handle column normalization** - DTC columns may have HTML/special chars
