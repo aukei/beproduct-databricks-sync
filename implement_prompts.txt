@@ -1,0 +1,45 @@
+how is the sync between DTC and Databricks being handled in current code?
+Read instructions @dtc/PHASE1_WORKFLOW.md and highlight gap.
+
+Implement those missing pieces. Ask for clarification if in any doubt. given 1. always validate with live data. DTC / Databricks / Beproduct credentials are all setup in databricks. 2. use local test first before putting into notebook if unclear about API usage. 3. Sync control is a quick braindump, deliberate proper handling with ref to real data. 4. In case BeProduct data should be written to a DTC request that is not exist, log error in phase1. Phase 2 will look at way to create missing DTC request.
+
+# Clarifications
+
+
+
+Request listing/search fails with this UAT key (400 on /v1/requests?workspaceName=KTB; 403 on workspace/document listing). How should in-scope 'KTB <seasoncode> <brands>' requests be discovered in Phase 1?
+please see if "workspaceName=Kontoor" return anything?
+Please provide a valid IN-SCOPE 'KTB ...' UAT request ID (and confirm this UAT API key can read it) so I can validate the upsert/push against real in-scope data. The only ID I have (69f076f0b7247a661226be9a) is the out-of-scope KON request.
+6a26581854e92e7acd8fa71b
+Within a single in-scope request (e.g. 'KTB FW26 Wrangler'), can the per-row 'Brand' column contain multiple brands, or is it exactly one brand per request? (The KON sample mixes Modern/Wrangler/Lee, but that's out of scope.) This determines the (LF Style#, SeasonCode, Brand) match semantics.
+The project team assure me that this col Brand will be read only from user and is only populated by this suite of scripts. therefore only 1 brand per request, and it must agree with the request name. KON are developer test case without catering data consistency.
+For validating the push (PATCH writes mutate live DTC data), how should I proceed in this phase?
+all would-be requests should have been pre-created by project team, and they ought to be empty. if they are not empty, treat as sacrificial (honor the upsert logic anyway). if request does not exist then mark error.
+
+
+
+# TODO
+The implementation is complete and validated against live DTC data. Here's the summary.
+
+What I did
+I validated everything against the live DTC UAT API before/while coding (per your instruction #1/#2), and the validation caught several real bugs that would have broken the pipeline.
+
+Critical discoveries from live validation
+The connector's write contract was wrong: it sent {"columnValues": ...}, but the API requires PATCH /v1/sheets/{sheetId}/views/{viewId} with {"sheetData":[{...}]} (insert→rowIndex, update→rowId, both return 204). It also passed json= to RestClient methods that only accept data=.
+A single PATCH cannot mix rowId and rowIndex — updates/inserts must be separate batches.
+No row-DELETE endpoint exists (all variants 404) — fine, Phase 1 is upsert-only.
+Request listing is not permitted with this key (400/403) → discovery must be registry-driven.
+The interested-fields doc maps to columns that don't exist in the view (Division is really Division?; Garment Finish, Tech Pack Stage, Legacy Code, Main Vendor (Sampling) are absent) — pushing them would 400. The core now maps only to the 99 real columns and filters by the live view.
+Changes (matched to your 4 directives)
+Live-validated every read/write; ran a reversible insert→update→delete-neutralize against the sacrificial KTB FW26 Wrangler request.
+Local-first: dtc/python/sync/phase1.py is pure-Python with dtc/tests/test_phase1.py (unit) + dtc/tests/test_phase1_live.py (live, reversible). All pass.
+Sync control deliberated against real data: 00_init_request_registry.py creates the control table dtc_request_registry [request_id, view_id, customer, season_code, brands, last_extracted, last_pushed, row_count, msgs, in_scope, ...], populated by-id (no listing). Match key is (LF Style#, Color/Wash) within a request (season+brand fixed per request, confirmed one-brand-per-request); RowIndex preserved on UPDATE, sparse max+1 on INSERT; Style Image excluded; delta push via last_pushed; detailed exception logging to beproduct_to_dtc_sync_log.
+Missing requests → error, no creation: dtc_request_manager.py is now a validate-only resolver (missing/out-of-scope/inactive → logged error, excluded from push); beproduct_to_dtc_push.py only pushes resolved requests.
+Files
+New: phase1.py, 00_init_request_registry.py, pull_requests_to_delta.py, test_phase1.py, test_phase1_live.py
+Reworked: beproduct_to_dtc_push.py, dtc_request_manager.py, connectors/dtc.py, client/rest_client.py, sync/__init__.py, and realigned Phase 2's 04_push_changes.py to the corrected contract.
+Caveats
+Notebooks (Spark/Databricks) compile-check clean but can't be executed locally — only the connector + core were run live. The sacrificial UAT request has a few leftover blank rows (inserts can't be deleted, only neutralized); compute_upsert ignores fully-blank rows so they won't interfere.
+implement_prompts.txt and dtc/PHASE1_WORKFLOW.md show as untracked (pre-existing in your tree).
+Suggested next step: register real in-scope request IDs via 00_init_request_registry.py, then run the push with dry_run=true to inspect the plan in beproduct_to_dtc_sync_log before going live.
+

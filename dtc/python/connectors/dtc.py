@@ -294,66 +294,150 @@ class DTCConnector:
         
         return normalized
 
-    def create_row(self, sheet_id: str, row_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Create a new row in DTC sheet.
-        
-        Args:
-            sheet_id: DTC sheet ID
-            row_data: Dict of column_name -> value to insert
-            
-        Returns:
-            Response from DTC API (includes rowId of new row)
-        """
-        logger.info(f"Creating row in sheet {sheet_id}")
-        payload = {"columnValues": row_data}
-        return self.client.post(f"/v1/sheets/{sheet_id}/rows", payload)
-    
-    def update_row(
-        self,
-        sheet_id: str,
-        row_id: str,
-        updates: Dict[str, Dict[str, str]]
+    # ------------------------------------------------------------------
+    # WRITE CONTRACT (validated live against DTC UAT on 2026-06-17)
+    # ------------------------------------------------------------------
+    # The sheet write API is a single endpoint:
+    #
+    #     PATCH /v1/sheets/{sheetId}/views/{viewId}
+    #     body: {"sheetData": [ <rowObject>, ... ]}        -> HTTP 204 on success
+    #
+    # Each <rowObject> is a flat dict of {<DTC column display name>: value}, plus:
+    #   - "rowId":   <uuid>  -> UPDATE that existing row
+    #   - "rowIndex": <int>  -> INSERT a new row at that index
+    # Provide exactly one of rowId / rowIndex per row object.
+    #
+    # IMPORTANT: every key in the row object MUST be a column that exists in the
+    # view's mapping, otherwise the whole call fails with HTTP 400:
+    #     "'<col>' is not found in the mapping."
+    # Use get_view_column_names() to filter payloads before sending.
+    #
+    # There is NO row DELETE endpoint exposed to this API key (all variants 404),
+    # and the older {"columnValues": ...} body shape is REJECTED ("sheetData is
+    # required."). Phase 1 only performs INSERT/UPDATE, so delete is unsupported.
+    # ------------------------------------------------------------------
+
+    def create_row(
+        self, sheet_id: str, view_id: str, row_values: Dict[str, Any], row_index: int
     ) -> Dict[str, Any]:
         """
-        Update an existing row in DTC sheet.
-        
+        Insert a single new row via the validated PATCH/sheetData contract.
+
         Args:
             sheet_id: DTC sheet ID
-            row_id: DTC row ID
-            updates: Dict of column_name -> {old_value, new_value}
-                     Will extract new_value for the PATCH
-            
+            view_id: DTC view ID (e.g. the WIP_ITS_USE view)
+            row_values: Dict of {DTC column name: value} (must be view columns)
+            row_index: rowIndex to assign to the new row
+
         Returns:
-            Response from DTC API
+            {"status_code": int} (endpoint returns 204 No Content)
         """
-        logger.info(f"Updating row {row_id} in sheet {sheet_id}")
-        
-        # Extract new values from the change dict
-        column_values = {}
-        for col_name, change_info in updates.items():
-            if isinstance(change_info, dict) and 'new_value' in change_info:
-                column_values[col_name] = change_info['new_value']
-            else:
-                # If it's not a change dict, use it directly
-                column_values[col_name] = change_info
-        
-        payload = {"columnValues": column_values}
-        return self.client.patch(f"/v1/sheets/{sheet_id}/rows/{row_id}", payload)
-    
+        return self.patch_rows(
+            sheet_id, view_id, [{**row_values, "rowIndex": row_index}]
+        )
+
+    def update_row(
+        self, sheet_id: str, view_id: str, row_id: str, row_values: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Update a single existing row via the validated PATCH/sheetData contract.
+
+        Args:
+            sheet_id: DTC sheet ID
+            view_id: DTC view ID
+            row_id: DTC rowId (UUID) of the existing row
+            row_values: Dict of {DTC column name: value} (must be view columns)
+
+        Returns:
+            {"status_code": int} (endpoint returns 204 No Content)
+        """
+        return self.patch_rows(
+            sheet_id, view_id, [{**row_values, "rowId": row_id}]
+        )
+
+    def patch_rows(
+        self, sheet_id: str, view_id: str, sheet_data: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Batch insert/update rows in one call (the native shape of the API).
+
+        Args:
+            sheet_id: DTC sheet ID
+            view_id: DTC view ID
+            sheet_data: List of row objects. Each must contain exactly one of
+                        "rowId" (update) or "rowIndex" (insert), plus column values.
+
+        Returns:
+            {"status_code": int, "rows": int}
+
+        Raises:
+            ValueError: if a row object lacks both rowId and rowIndex.
+        """
+        has_row_id = has_row_index = False
+        for i, row in enumerate(sheet_data):
+            if "rowId" not in row and "rowIndex" not in row:
+                raise ValueError(
+                    f"sheet_data[{i}] must contain either 'rowId' (update) "
+                    f"or 'rowIndex' (insert)"
+                )
+            has_row_id = has_row_id or ("rowId" in row)
+            has_row_index = has_row_index or ("rowIndex" in row)
+        # The API rejects a mix: "All rows must consistently use either rowId or
+        # rowIndex as key, but not a mix of both." Send updates and inserts in
+        # separate patch_rows() calls.
+        if has_row_id and has_row_index:
+            raise ValueError(
+                "patch_rows() cannot mix rowId (update) and rowIndex (insert) "
+                "in one call; send them as separate batches."
+            )
+        if not sheet_data:
+            return {"status_code": 204, "rows": 0}
+        logger.info(
+            f"PATCH sheet {sheet_id} view {view_id}: {len(sheet_data)} row(s)"
+        )
+        resp = self.client.patch(
+            f"/v1/sheets/{sheet_id}/views/{view_id}",
+            data={"sheetData": sheet_data},
+        )
+        # 204 No Content -> RestClient returns {} ; normalise a small ack
+        if not resp:
+            resp = {"status_code": 204}
+        resp.setdefault("rows", len(sheet_data))
+        return resp
+
     def delete_row(self, sheet_id: str, row_id: str) -> Dict[str, Any]:
         """
-        Delete a row from DTC sheet.
-        
+        Not supported: the DTC API exposes no row-delete endpoint to this key
+        (all known variants return 404), and Phase 1 performs no deletes.
+        """
+        raise NotImplementedError(
+            "DTC API exposes no row-delete endpoint; deletes are out of scope "
+            "for Phase 1 (upsert only)."
+        )
+
+    def get_view_column_names(self, sheet_id: str, view_id: str) -> List[str]:
+        """
+        Return the set of column display names available in a view's mapping.
+
+        Derived from the keys present in the view's sheet data (excluding the
+        rowId / rowIndex control keys). For an empty sheet this returns [] - in
+        that case callers should fall back to a known column list for the
+        Document, since the column set is a Document/view-level property.
+
         Args:
             sheet_id: DTC sheet ID
-            row_id: DTC row ID
-            
+            view_id: DTC view ID
+
         Returns:
-            Response from DTC API
+            Sorted list of column display names.
         """
-        logger.info(f"Deleting row {row_id} from sheet {sheet_id}")
-        return self.client.delete(f"/v1/sheets/{sheet_id}/rows/{row_id}")
+        sheet = self.get_sheet(sheet_id, view_id)
+        cols = set()
+        for row in sheet.get("sheetData", []):
+            cols.update(row.keys())
+        cols.discard("rowId")
+        cols.discard("rowIndex")
+        return sorted(cols)
     
     def create_sheet(
         self,
@@ -392,7 +476,7 @@ class DTCConnector:
             **kwargs
         }
         
-        response = self.client.post("/v1/sheets", json=payload)
+        response = self.client.post("/v1/sheets", data=payload)
         logger.info(f"Created sheet: requestId={response.get('requestId')}, sheetId={response.get('sheetId')}")
         return response
     
@@ -402,28 +486,94 @@ class DTCConnector:
         document_name: str = None
     ) -> List[Dict]:
         """
-        Search for requests in a workspace.
-        
-        GET /v1/requests?workspace={name}&document={name}
-        
+        Search for requests in a workspace via GET /v1/requests.
+
+        NOTE (validated 2026-06-17): this collection endpoint is NOT usable with
+        the current API key. It returns HTTP 400 "Invalid workspaceName." for
+        every workspace value tried (KTB, Kontoor), and the related
+        /v1/workspaces and /v1/documents/{id}/requests endpoints return 403.
+
+        Phase 1 therefore does NOT rely on live listing for request discovery.
+        In-scope requests are resolved from a maintained control/registry table
+        (see dtc/notebooks/00_init_request_registry.py and get_request_scope()).
+        This method is retained for environments/keys where listing is permitted.
+
         Args:
-            workspace_name: DTC workspace name
+            workspace_name: DTC workspace name (the exact registered name)
             document_name: Optional document name to filter
-        
+
         Returns:
             List of request dicts with requestId, requestReference, etc.
         """
         logger.info(f"Searching requests: workspace={workspace_name}, document={document_name}")
-        
-        params = {"workspace": workspace_name}
+
+        params = {"workspaceName": workspace_name}
         if document_name:
-            params["document"] = document_name
-        
+            params["documentName"] = document_name
+
         response = self.client.get("/v1/requests", params=params)
-        requests = response.get("data", [])
-        
+        requests = response.get("data", []) if isinstance(response, dict) else (response or [])
+
         logger.info(f"Found {len(requests)} requests")
         return requests
+
+    def get_request_scope(self, request_id: str) -> Dict[str, Any]:
+        """
+        Resolve a request into the control-table fields needed for Phase 1.
+
+        Reads the request (and its Document-level views) and parses the request
+        reference into (customer, season_code, brand). This is the per-request
+        enrichment used to populate the registry/control table - it relies only
+        on by-id reads, which ARE permitted with the current key.
+
+        Args:
+            request_id: DTC request ID
+
+        Returns:
+            Dict with: request_id, request_reference, document_name, sheet_id,
+            wip_view_id, view_name, request_is_active, customer, season_code,
+            brand, parse_ok, msg
+        """
+        req = self.get_request(request_id)
+        ref = req.get("requestReference", "") or ""
+        sheet_id = req.get("sheetId")
+
+        wip_view_id, view_name = None, None
+        try:
+            views = self.get_views(request_id)
+            wip = next((v for v in views if v.get("viewName") == "WIP_ITS_USE"), None)
+            if wip:
+                wip_view_id, view_name = wip.get("viewId"), "WIP_ITS_USE"
+            elif views:
+                wip_view_id, view_name = views[0].get("viewId"), views[0].get("viewName")
+        except Exception as e:  # views are best-effort during enrichment
+            logger.warning(f"Could not fetch views for {request_id}: {e}")
+
+        customer = season_code = brand = None
+        parse_ok, msg = False, ""
+        try:
+            parsed = self.parse_request_name(ref)
+            customer = parsed["dtc_customer"]
+            season_code = parsed["season_code"]
+            brand = parsed["brand"]
+            parse_ok = True
+        except ValueError as e:
+            msg = str(e)
+
+        return {
+            "request_id": req.get("requestId", request_id),
+            "request_reference": ref,
+            "document_name": req.get("documentName"),
+            "sheet_id": sheet_id,
+            "wip_view_id": wip_view_id,
+            "view_name": view_name,
+            "request_is_active": req.get("requestIsActive"),
+            "customer": customer,
+            "season_code": season_code,
+            "brand": brand,
+            "parse_ok": parse_ok,
+            "msg": msg,
+        }
     
     def get_max_row_index(self, sheet_id: str, view_id: str) -> int:
         """
@@ -457,42 +607,30 @@ class DTCConnector:
         row_index: int = None
     ) -> Dict:
         """
-        Update existing row or create new row using PATCH API.
-        
-        PATCH /v1/sheets/{sheetId}/views/{viewId}
-        
-        Per requirements (lines 80-85):
-        - For existing rows: use rowId
-        - For new rows: use rowIndex (max + 1)
-        
+        Update existing row (row_id) or insert a new row (row_index).
+
+        Backwards-compatible single-row wrapper around patch_rows() using the
+        validated PATCH/sheetData contract (see patch_rows docstring).
+
         Args:
             sheet_id: DTC sheet ID
             view_id: DTC view ID
-            column_values: Dict of {columnName: value}
-            row_id: For updating existing row
-            row_index: For creating new row (if row_id not provided)
-        
+            column_values: Dict of {DTC column name: value}
+            row_id: For updating an existing row
+            row_index: For inserting a new row (if row_id not provided)
+
         Returns:
-            Response dict from DTC API
+            Response dict from DTC API ({"status_code": 204, ...} on success)
         """
-        if not row_id and not row_index:
+        if not row_id and row_index is None:
             raise ValueError("Must provide either row_id or row_index")
-        
-        payload = {"columnValues": column_values}
-        
+
+        row = dict(column_values)
         if row_id:
-            payload["rowId"] = row_id
-            logger.info(f"Patching existing row {row_id} in sheet {sheet_id}")
-        elif row_index:
-            payload["rowIndex"] = row_index
-            logger.info(f"Creating new row at index {row_index} in sheet {sheet_id}")
-        
-        response = self.client.patch(
-            f"/v1/sheets/{sheet_id}/views/{view_id}",
-            json=payload
-        )
-        
-        return response
+            row["rowId"] = row_id
+        else:
+            row["rowIndex"] = row_index
+        return self.patch_rows(sheet_id, view_id, [row])
 
     def close(self):
         """Close the connector."""

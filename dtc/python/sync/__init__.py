@@ -1,12 +1,23 @@
 """
-Sync utilities for bi-directional DTC integration.
+Sync utilities for DTC integration.
 
 Provides:
-- snapshot: Snapshot management and creation
-- change_detection: Change detection and audit trail
+- phase1: Pure-Python BeProduct -> DTC upsert core (no Spark; locally testable)
+- snapshot: Snapshot management and creation (requires pyspark)
+- change_detection: Change detection and audit trail (requires pyspark)
+
+The Spark-dependent modules are imported lazily so that `phase1` (which has no
+Spark dependency) can be imported and unit-tested outside Databricks.
 """
 
-from .snapshot import SnapshotManager
-from .change_detection import ChangeDetector
+from . import phase1
 
-__all__ = ['SnapshotManager', 'ChangeDetector']
+__all__ = ["phase1"]
+
+try:  # pragma: no cover - only available inside Databricks/PySpark
+    from .snapshot import SnapshotManager
+    from .change_detection import ChangeDetector
+    __all__ += ["SnapshotManager", "ChangeDetector"]
+except Exception:  # pyspark not installed (e.g. local dev / unit tests)
+    SnapshotManager = None
+    ChangeDetector = None

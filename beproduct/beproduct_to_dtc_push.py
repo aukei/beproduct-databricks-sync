@@ -1,626 +1,306 @@
 # Databricks notebook source
 """
-BeProduct to DTC Push with Change Detection
-============================================
+BeProduct -> DTC Upsert & Push (Phase 1)
+========================================
 
-Detects changes and pushes BeProduct data to DTC using PATCH API.
+Massages BeProduct (denormalized) staging rows onto each in-scope DTC request
+and pushes the changes back via the DTC PATCH API.
 
-Process:
-1. Load staging data (BeProduct denormalized)
-2. Pull current DTC data for comparison
-3. Join and detect changes (INSERT/UPDATE/DELETE)
-4. Validate data before push
-5. Push to DTC via PATCH API
-6. Log results and update sync status
+Implements dtc/PHASE1_WORKFLOW.md steps 3 & 4 using the validated, unit-tested
+core in dtc/python/sync/phase1.py and connectors/dtc.py:
 
-Timezone handling:
-  - BeProduct: UTC timestamps
-  - DTC: HKT (UTC+8) timestamps
-  - All comparisons done in UTC
+  3a. Upsert on the in-request row key (LF Style#, Color / Wash) - season & brand
+      are fixed by the request (one brand per request). Update indicated non-key
+      fields, EXCEPT "Style Image". Insert new rows with key + mapped fields.
+  3b. RowIndex: keep original rowIndex on UPDATE; on INSERT assign
+      max(rowIndex)+1 within the request (= partition by season+brand),
+      sparse-aware.
+  3c. Log exceptions (scope mismatch, dup keys, missing rowId...) to the sync log.
+  4a. Delta push: only consider staging rows modified since the request's last
+      push (beproduct_modified_at > registry.last_pushed). compute_upsert also
+      emits NOOP for rows whose mapped fields already match, so unchanged rows
+      are never pushed.
+  4b. UPDATE: PATCH .../views/{viewId} with {"sheetData":[{...,"rowId":id}]}.
+  4c. INSERT: PATCH .../views/{viewId} with {"sheetData":[{...,"rowIndex":n}]}.
+      (Updates and inserts are sent as SEPARATE batches - the API rejects a mix.)
+  4d. Log detailed per-row results/exceptions to the sync log table.
 
-Schedule: Daily at 1pm UTC (after request manager at 12:30pm)
+Phase 1 never creates requests: requests are resolved upstream by
+dtc_request_manager.py (validate-only). Requests that BeProduct targets but that
+are missing/out-of-scope are logged there as errors and are absent from the
+resolved mapping, so they are skipped here.
 
 Parameters:
-  - catalog: Databricks catalog (default: "lft")
-  - schema: Databricks schema (default: "beproduct")
-  - staging_table: Staging table (default: "beproduct_to_dtc_staging")
-  - dtc_environment: DTC environment (default: "uat")
-  - dry_run: Test mode without pushing (default: "false")
+  - catalog / schema (default: lft / beproduct)
+  - staging_table (default: beproduct_to_dtc_staging)
+  - dtc_environment (default: uat)
+  - dtc_workspace (default: KTB)
+  - dry_run (default: true)   -- when true, computes & logs but does NOT PATCH
+  - delta_only (default: true) -- only rows modified since last push
+  - batch_size (default: 100)  -- rows per PATCH call
 """
 
 # COMMAND ----------
 
-# ============================================================================
-# CELL 1: Setup
-# ============================================================================
-
 import sys
 sys.path.append("/Workspace/Repos/beproduct-sync/DTC/python")
 
-print("=" * 80)
-print("BEPRODUCT TO DTC PUSH SETUP")
-print("=" * 80)
+import json
+import uuid
+from datetime import datetime, timezone
 
 from connectors.dtc import DTCConnector
-from pyspark.sql.functions import (
-    col, lit, current_timestamp, to_utc_timestamp, from_utc_timestamp,
-    when, coalesce, concat_ws, array, struct
-)
-from pyspark.sql.types import StructType, StructField, StringType, TimestampType, IntegerType
-from datetime import datetime, timezone
-import logging
-import json
+from sync import phase1
+from pyspark.sql import functions as F
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Configure parameters
-dbutils.widgets.text("catalog", "lft", "Catalog Name")
-dbutils.widgets.text("schema", "beproduct", "Schema Name")
+dbutils.widgets.text("catalog", "lft", "Catalog")
+dbutils.widgets.text("schema", "beproduct", "Schema")
 dbutils.widgets.text("staging_table", "beproduct_to_dtc_staging", "Staging Table")
 dbutils.widgets.text("dtc_environment", "uat", "DTC Environment")
-dbutils.widgets.text("dry_run", "false", "Dry Run (true/false)")
-dbutils.widgets.text("batch_size", "100", "Batch Size for Push")
+dbutils.widgets.text("dtc_workspace", "KTB", "DTC Workspace Name")
+dbutils.widgets.text("dry_run", "true", "Dry Run (true/false)")
+dbutils.widgets.text("delta_only", "true", "Only push rows modified since last push")
+dbutils.widgets.text("batch_size", "100", "Rows per PATCH call")
 
 catalog = dbutils.widgets.get("catalog")
 schema = dbutils.widgets.get("schema")
 staging_table = dbutils.widgets.get("staging_table")
-dtc_environment = dbutils.widgets.get("dtc_environment")
-dry_run = dbutils.widgets.get("dry_run").lower() == "true"
+environment = dbutils.widgets.get("dtc_environment").strip().lower()
+workspace = dbutils.widgets.get("dtc_workspace").strip()
+dry_run = dbutils.widgets.get("dry_run").strip().lower() == "true"
+delta_only = dbutils.widgets.get("delta_only").strip().lower() == "true"
 batch_size = int(dbutils.widgets.get("batch_size"))
 
-staging_table_full = f"{catalog}.{schema}.{staging_table}"
-mapping_table_full = f"{catalog}.{schema}.dtc_request_mapping"
-push_log_table_full = f"{catalog}.{schema}.beproduct_to_dtc_push_log"
-dtc_snapshot_table = f"{catalog}.{schema}.dtc_current_snapshot_{dtc_environment}"
+staging_full = f"{catalog}.{schema}.{staging_table}"
+mapping_full = f"{catalog}.{schema}.dtc_request_mapping"
+registry_full = f"{catalog}.{schema}.dtc_request_registry"
+sync_log_full = f"{catalog}.{schema}.beproduct_to_dtc_sync_log"
 
-print("✅ Parameters configured:")
-print(f"   Staging: {staging_table_full}")
-print(f"   Mapping: {mapping_table_full}")
-print(f"   Push log: {push_log_table_full}")
-print(f"   DTC snapshot: {dtc_snapshot_table}")
-print(f"   Environment: {dtc_environment}")
-print(f"   Dry run: {dry_run}")
-print(f"   Batch size: {batch_size}")
+run_id = str(uuid.uuid4())
+now = datetime.now(timezone.utc)
 
-print("\n" + "=" * 80)
-print("✅ SETUP COMPLETE")
 print("=" * 80)
+print("BEPRODUCT -> DTC UPSERT & PUSH (Phase 1)")
+print("=" * 80)
+print(f"  Staging:  {staging_full}")
+print(f"  Mapping:  {mapping_full}")
+print(f"  Registry: {registry_full}")
+print(f"  Sync log: {sync_log_full}")
+print(f"  Env: {environment} | dry_run={dry_run} | delta_only={delta_only} | batch_size={batch_size}")
+print(f"  run_id: {run_id}")
 
 # COMMAND ----------
 
-# ============================================================================
-# CELL 2: Initialize DTC Connector
-# ============================================================================
+spark.sql(f"""
+CREATE TABLE IF NOT EXISTS {sync_log_full} (
+  log_time TIMESTAMP, run_id STRING, stage STRING, environment STRING,
+  dtc_request_name STRING, request_id STRING, operation STRING,
+  lf_style_number STRING, color STRING, match_key STRING,
+  status STRING, reason STRING, detail STRING, payload STRING
+) USING DELTA
+""")
 
-print("\n" + "=" * 80)
-print("Step 1: Initialize DTC Connector")
-print("=" * 80)
-
+# Resolved mapping (from dtc_request_manager). If empty -> nothing to push.
 try:
-    print(f"🔐 Retrieving DTC API key...")
-    secret_key = f"dtc_api_key_{dtc_environment}"
-    dtc_api_key = dbutils.secrets.get(scope="beproduct", key=secret_key)
-    
-    print(f"🚀 Creating DTCConnector...")
-    connector = DTCConnector(
-        api_key=dtc_api_key,
-        environment=dtc_environment,
-        workspace_name="KTB"
-    )
-    print(f"✅ DTCConnector initialized")
-    
-except Exception as e:
-    print(f"❌ Failed to initialize: {e}")
-    raise
+    df_map = spark.table(mapping_full).where(F.col("environment") == environment)
+except Exception:
+    df_map = None
+if df_map is None or df_map.count() == 0:
+    print("⚠️  No resolved requests in mapping - run dtc_request_manager first. Exiting.")
+    dbutils.notebook.exit("NO_RESOLVED_REQUESTS")
+
+mapping = {r.dtc_request_name: r for r in df_map.collect()}
+
+# Registry (for last_pushed delta + state update).
+reg = {r.request_reference: r for r in
+       spark.table(registry_full).where(F.col("environment") == environment).collect()}
+
+# Staging pending rows.
+df_staging = spark.table(staging_full).where(F.col("sync_status") == "pending")
+total_pending = df_staging.count()
+print(f"Pending staging rows: {total_pending}")
+if total_pending == 0:
+    dbutils.notebook.exit("NO_PENDING_ROWS")
 
 # COMMAND ----------
 
-# ============================================================================
-# CELL 3: Load Staging Data
-# ============================================================================
+# DTC connector (only needed for live reads/writes).
+secret_key = f"dtc_api_key_{environment}"
+api_key = dbutils.secrets.get(scope="beproduct", key=secret_key)
+connector = DTCConnector(api_key=api_key, environment=environment, workspace_name=workspace)
 
-print("\n" + "=" * 80)
-print("Step 2: Load Staging Data")
-print("=" * 80)
+# Fallback allowed-columns for an empty request sheet (we still must not send
+# columns absent from the view). These are the FIELD_MAPPING targets, which were
+# validated to exist in the KTB WIP WIP_ITS_USE view.
+FALLBACK_COLS = {c for c in phase1.FIELD_MAPPING.values() if c != phase1.STYLE_IMAGE_COL}
 
-try:
-    print(f"📥 Loading staging data from {staging_table_full}...")
-    
-    # Load staging table
-    df_staging_raw = spark.table(staging_table_full)
-    
-    # Filter for pending rows only
-    df_staging = df_staging_raw.where(col("sync_status") == "pending")
-    
-    total_staging = df_staging_raw.count()
-    pending_count = df_staging.count()
-    
-    print(f"✅ Loaded staging data:")
-    print(f"   Total rows: {total_staging}")
-    print(f"   Pending: {pending_count}")
-    
-    if pending_count == 0:
-        print(f"\n⚠️  No pending rows to sync")
-        dbutils.notebook.exit("NO_PENDING_ROWS")
-    
-    # Load request mapping
-    print(f"\n📥 Loading request mapping...")
-    df_mapping = spark.table(mapping_table_full)
-    
-    # Join staging with mapping to get request_id and sheet_id
-    df_staging_with_mapping = df_staging.join(
-        df_mapping,
-        on="dtc_request_name",
-        how="inner"
-    )
-    
-    # Get unique requests to fetch from DTC
-    unique_requests = df_staging_with_mapping.select(
-        "dtc_request_name", "request_id", "sheet_id"
-    ).distinct().collect()
-    
-    print(f"✅ Unique requests to sync: {len(unique_requests)}")
-    for req in unique_requests[:5]:  # Show first 5
-        print(f"   - {req.dtc_request_name} ({req.request_id})")
-    
-except Exception as e:
-    print(f"❌ Failed to load staging: {e}")
-    raise
+LOG_COLS = ["log_time", "run_id", "stage", "environment", "dtc_request_name", "request_id",
+            "operation", "lf_style_number", "color", "match_key", "status", "reason",
+            "detail", "payload"]
+
+def log(rows, name, request_id, operation, key, status, reason="", detail="", payload=None):
+    lf, color = (key or (None, None))
+    rows.append((now, run_id, "push", environment, name, request_id, operation,
+                 lf, color, f"{lf} | {color}", status, reason, detail,
+                 (json.dumps(payload) if payload is not None else None)))
 
 # COMMAND ----------
 
-# ============================================================================
-# CELL 4: Pull Current DTC Data
-# ============================================================================
+log_rows = []
+totals = {"requests": 0, "updates": 0, "inserts": 0, "noops": 0, "exceptions": 0,
+          "pushed_ok": 0, "push_failed": 0}
+pushed_keys = {}    # request_name -> set of (lf,color) that reached DTC (or would, dry_run)
+error_keys = {}     # request_name -> set of (lf,color) with exceptions
 
-print("\n" + "=" * 80)
-print("Step 3: Pull Current DTC Data")
-print("=" * 80)
+for name, m in mapping.items():
+    totals["requests"] += 1
+    request_id, sheet_id, view_id = m.request_id, m.sheet_id, m.view_id
+    reg_entry = reg.get(name)
+    last_pushed = getattr(reg_entry, "last_pushed", None) if reg_entry else None
+    print(f"\n--- {name}  (request_id={request_id}) ---")
 
-try:
-    print(f"📥 Fetching current DTC data for comparison...")
-    
-    all_dtc_dfs = []
-    
-    for req in unique_requests:
-        req_name = req.dtc_request_name
-        req_id = req.request_id
-        sheet_id = req.sheet_id
-        
-        print(f"\n   Fetching: {req_name}")
-        print(f"     Request ID: {req_id}")
-        print(f"     Sheet ID: {sheet_id}")
-        
+    # Staging rows for this request (optionally delta-filtered).
+    sdf = df_staging.where(F.col("dtc_request_name") == name)
+    if delta_only and last_pushed is not None:
+        sdf = sdf.where(F.col("beproduct_modified_at") > F.lit(last_pushed))
+    bp_rows = [r.asDict() for r in sdf.collect()]
+    print(f"  BeProduct rows considered: {len(bp_rows)}"
+          + (f" (delta since {last_pushed})" if (delta_only and last_pushed) else ""))
+    if not bp_rows:
+        continue
+
+    # Current DTC rows (live) from the WIP_ITS_USE view.
+    try:
+        sheet = connector.get_sheet(sheet_id, view_id)
+        dtc_rows = sheet.get("sheetData", [])
+        allowed = set(connector.get_view_column_names(sheet_id, view_id)) or set(FALLBACK_COLS)
+    except Exception as e:
+        print(f"  ❌ Failed to read DTC sheet: {e}")
+        log(log_rows, name, request_id, "ERROR", None, "error", "sheet_read_failed", str(e)[:300])
+        totals["push_failed"] += 1
+        continue
+
+    scope = {"season_code": m.season_code, "brand": m.brands}
+    plan = phase1.compute_upsert(scope, dtc_rows, bp_rows, allowed_cols=allowed)
+    s = plan.summary()
+    totals["updates"] += s["updates"]; totals["inserts"] += s["inserts"]
+    totals["noops"] += s["noops"]; totals["exceptions"] += s["exceptions"]
+    print(f"  plan: {s}")
+
+    pushed_keys.setdefault(name, set())
+    error_keys.setdefault(name, set())
+
+    # Log exceptions (3c / 4d).
+    for ex in plan.exceptions:
+        log(log_rows, name, request_id, "EXCEPTION", ex.match_key, "error", ex.reason, ex.detail)
+        error_keys[name].add(ex.match_key)
+    # NOOPs (informational) + count as already-synced.
+    for op in plan.noops:
+        log(log_rows, name, request_id, "NOOP", op.match_key, "ok", "no_field_changes")
+        pushed_keys[name].add(op.match_key)
+
+    # ---- UPDATES (PATCH by rowId, batched) ----
+    upd_sd = phase1.update_sheet_data(plan)
+    for chunk_ops, chunk_sd in zip(phase1.chunked(plan.updates, batch_size),
+                                   phase1.chunked(upd_sd, batch_size)):
         try:
-            # Get views for this request
-            views = connector.get_views(req_id)
-            
-            # Find "WIP_ITS_USE" view
-            full_version_view = next(
-                (v for v in views if v.get("viewName") == "WIP_ITS_USE"),
-                None
-            )
-            
-            if not full_version_view:
-                print(f"     ⚠️  No 'WIP_ITS_USE' view found, using first view")
-                full_version_view = views[0] if views else None
-            
-            if full_version_view:
-                view_id = full_version_view["viewId"]
-                
-                # Fetch sheet data
-                df_dtc, doc_metadata = connector.pull_request_to_dataframe(
-                    request_id=req_id,
-                    view_id=view_id
-                )
-                
-                # Convert to Spark DataFrame
-                spark_df_dtc = spark.createDataFrame(df_dtc)
-                
-                # Add request name for joining
-                spark_df_dtc = spark_df_dtc.withColumn("dtc_request_name", lit(req_name))
-                
-                all_dtc_dfs.append(spark_df_dtc)
-                
-                row_count = spark_df_dtc.count()
-                print(f"     ✅ Fetched {row_count} rows")
-            else:
-                print(f"     ⚠️  No views available")
-        
+            if not dry_run:
+                connector.patch_rows(sheet_id, view_id, chunk_sd)
+            for op in chunk_ops:
+                log(log_rows, name, request_id, "UPDATE", op.match_key, "ok",
+                    "dry_run" if dry_run else "", "", op.fields)
+                pushed_keys[name].add(op.match_key); totals["pushed_ok"] += 1
         except Exception as e:
-            print(f"     ⚠️  Failed to fetch: {e}")
-            # Continue with other requests
-    
-    # Combine all DTC data
-    if all_dtc_dfs:
-        from functools import reduce
-        from pyspark.sql import DataFrame
-        
-        df_dtc_current = reduce(DataFrame.union, all_dtc_dfs)
-        dtc_current_count = df_dtc_current.count()
-        
-        print(f"\n✅ Combined DTC data: {dtc_current_count} rows")
-        
-        # Save snapshot for auditing
-        print(f"\n💾 Saving DTC snapshot to {dtc_snapshot_table}...")
-        df_dtc_current.write.format("delta") \
-            .mode("overwrite") \
-            .option("overwriteSchema", "true") \
-            .saveAsTable(dtc_snapshot_table)
-        print(f"   ✅ Snapshot saved")
-    else:
-        print(f"\n⚠️  No DTC data fetched")
-        df_dtc_current = spark.createDataFrame([], StructType([]))
-        dtc_current_count = 0
-    
-except Exception as e:
-    print(f"❌ Failed to pull DTC data: {e}")
-    raise
+            for op in chunk_ops:
+                log(log_rows, name, request_id, "UPDATE", op.match_key, "error",
+                    "patch_failed", str(e)[:300], op.fields)
+                error_keys[name].add(op.match_key); totals["push_failed"] += 1
+
+    # ---- INSERTS (PATCH by rowIndex, batched) ----
+    ins_sd = phase1.insert_sheet_data(plan)
+    for chunk_ops, chunk_sd in zip(phase1.chunked(plan.inserts, batch_size),
+                                   phase1.chunked(ins_sd, batch_size)):
+        try:
+            if not dry_run:
+                connector.patch_rows(sheet_id, view_id, chunk_sd)
+            for op in chunk_ops:
+                log(log_rows, name, request_id, "INSERT", op.match_key, "ok",
+                    "dry_run" if dry_run else "", f"rowIndex={op.row_index}", op.fields)
+                pushed_keys[name].add(op.match_key); totals["pushed_ok"] += 1
+        except Exception as e:
+            for op in chunk_ops:
+                log(log_rows, name, request_id, "INSERT", op.match_key, "error",
+                    "patch_failed", str(e)[:300], op.fields)
+                error_keys[name].add(op.match_key); totals["push_failed"] += 1
+
+    # Update registry last_pushed/msgs for this request (skip in dry_run).
+    if not dry_run:
+        reg_msg = "pushed u={u} i={i} noop={n} exc={e}".format(
+            u=s["updates"], i=s["inserts"], n=s["noops"], e=s["exceptions"])
+        ts = now.isoformat()
+        spark.sql(f"""
+          UPDATE {registry_full}
+          SET last_pushed = timestamp('{ts}'),
+              msgs = '{reg_msg}',
+              updated_at = timestamp('{ts}')
+          WHERE environment = '{environment}' AND request_id = '{request_id}'
+        """)
+
+connector.close()
 
 # COMMAND ----------
 
-# ============================================================================
-# CELL 5: Join and Detect Changes
-# ============================================================================
+# Write the sync log (4d).
+if log_rows:
+    spark.createDataFrame(log_rows, LOG_COLS).write.format("delta").mode("append").saveAsTable(sync_log_full)
+    print(f"\n✅ Logged {len(log_rows)} sync-log rows to {sync_log_full}")
 
-print("\n" + "=" * 80)
-print("Step 4: Detect Changes")
-print("=" * 80)
+# COMMAND ----------
 
-try:
-    print(f"🔄 Joining staging with current DTC data...")
-    print(f"   Composite key: (lf_style_number, color_name, fabric_group)")
-    
-    # Normalize column names for joining
-    # DTC columns might have different names
-    # Per requirements: LF Style# in DTC = lf_style_number in staging
-    
-    # Build mapping of expected DTC columns (normalized names from connector)
-    # Based on connector's _normalize_column_name logic
-    
-    if dtc_current_count > 0:
-        # Join on composite key
-        # Note: DTC columns are normalized, so "LF Style#" becomes "LF_Style"
-        #       "Color / Wash" becomes "Color___Wash"
-        #       "Fabric Group" becomes "Fabric_Group"
-        
-        # First, check what columns exist in DTC data
-        print(f"\n   Available DTC columns:")
-        dtc_columns = df_dtc_current.columns
-        for col_name in sorted(dtc_columns)[:20]:  # Show first 20
-            print(f"     - {col_name}")
-        
-        # Perform full outer join
-        df_comparison = df_staging_with_mapping.alias("stg").join(
-            df_dtc_current.alias("dtc"),
-            on=[
-                (col("stg.dtc_request_name") == col("dtc.dtc_request_name")),
-                # TODO: Adjust these based on actual DTC normalized column names
-                # For now, use placeholders - will need to check actual column names
-            ],
-            how="full_outer"
+# Update staging sync_status (skip in dry_run). pushed -> rows that reached DTC
+# (incl NOOP); error -> rows with exceptions/failed pushes.
+if not dry_run:
+    def _flatten(d):
+        out = []
+        for nm, keys in d.items():
+            for (lf, color) in keys:
+                out.append((nm, lf, color))
+        return out
+
+    pushed_list = _flatten(pushed_keys)
+    error_list = _flatten(error_keys)
+
+    if pushed_list or error_list:
+        upd = spark.table(staging_full)
+        pushed_set = F.array(*[F.array(F.lit(a), F.lit(b), F.lit(c)) for (a, b, c) in pushed_list]) \
+            if pushed_list else F.array().cast("array<array<string>>")
+        error_set = F.array(*[F.array(F.lit(a), F.lit(b), F.lit(c)) for (a, b, c) in error_list]) \
+            if error_list else F.array().cast("array<array<string>>")
+        keytuple = F.array(F.col("dtc_request_name"),
+                           F.trim(F.col("lf_style_number")), F.trim(F.col("color")))
+        upd = upd.withColumn(
+            "sync_status",
+            F.when(F.array_contains(error_set, keytuple), F.lit("error"))
+             .when(F.array_contains(pushed_set, keytuple), F.lit("pushed"))
+             .otherwise(F.col("sync_status"))
         )
-        
-        # For now, since we don't have actual DTC data to test with,
-        # assume all staging rows are INSERTs
-        print(f"\n⚠️  NOTE: Using simplified change detection (all INSERTs)")
-        print(f"   Full join logic will be completed after DTC column mapping is confirmed")
-        
-        # Classify operations
-        df_inserts = df_staging_with_mapping.withColumn("operation", lit("INSERT"))
-        df_updates = spark.createDataFrame([], df_staging_with_mapping.schema)
-        df_deletes = spark.createDataFrame([], df_staging_with_mapping.schema)
-        
-    else:
-        # No existing DTC data - all are INSERTs
-        print(f"\n   No existing DTC data - all rows are INSERTs")
-        df_inserts = df_staging_with_mapping.withColumn("operation", lit("INSERT"))
-        df_updates = spark.createDataFrame([], df_staging_with_mapping.schema)
-        df_deletes = spark.createDataFrame([], df_staging_with_mapping.schema)
-    
-    insert_count = df_inserts.count()
-    update_count = df_updates.count()
-    delete_count = df_deletes.count()
-    
-    print(f"\n✅ Change detection complete:")
-    print(f"   INSERTs: {insert_count}")
-    print(f"   UPDATEs: {update_count}")
-    print(f"   DELETEs: {delete_count}")
-    print(f"   Total operations: {insert_count + update_count + delete_count}")
-    
-except Exception as e:
-    print(f"❌ Failed to detect changes: {e}")
-    raise
+        if "pushed_at" not in upd.columns:
+            upd = upd.withColumn("pushed_at", F.lit(None).cast("timestamp"))
+        upd = upd.withColumn(
+            "pushed_at",
+            F.when(F.array_contains(pushed_set, keytuple), F.lit(now)).otherwise(F.col("pushed_at"))
+        )
+        upd.write.format("delta").mode("overwrite").option("overwriteSchema", "true").saveAsTable(staging_full)
+        print(f"✅ Updated staging sync_status (pushed={len(pushed_list)}, error={len(error_list)})")
 
 # COMMAND ----------
 
-# ============================================================================
-# CELL 6: Prepare DTC Payloads
-# ============================================================================
-
 print("\n" + "=" * 80)
-print("Step 5: Prepare DTC Payloads")
+print("PUSH SUMMARY")
 print("=" * 80)
-
-try:
-    print(f"🔄 Mapping fields to DTC column names...")
-    
-    # Field mapping: Staging column → DTC column name
-    # Per requirements document
-    COLUMN_MAPPING = {
-        "lf_style_number": "LF Style#",
-        "brands": "Brand",
-        "description": "Style Description",
-        "product_status": "Product Status",
-        "product_category": "Class",
-        "product_sub_category": "Sub Class",
-        "division": "Division",
-        "garment_finish": "Garment Finish",
-        "techpack_stage": "Tech Pack Stage",
-        "color_name": "Color / Wash",
-        "fabric_group": "Fabric Group",
-        "mill_fabric_article": "Mill Fabric Article #",
-        # Add more mappings as needed
-    }
-    
-    def prepare_payload(row_dict):
-        """Prepare DTC PATCH payload from staging row."""
-        payload = {}
-        
-        for staging_col, dtc_col in COLUMN_MAPPING.items():
-            value = row_dict.get(staging_col)
-            if value is not None:  # Only include non-null values
-                payload[dtc_col] = str(value)
-        
-        return payload
-    
-    print(f"✅ Payload preparation function ready")
-    print(f"   Mapped fields: {len(COLUMN_MAPPING)}")
-    
-except Exception as e:
-    print(f"❌ Failed to prepare payloads: {e}")
-    raise
-
-# COMMAND ----------
-
-# ============================================================================
-# CELL 7: Push to DTC
-# ============================================================================
-
-print("\n" + "=" * 80)
-print("Step 6: Push Changes to DTC")
-print("=" * 80)
-
+for k, v in totals.items():
+    print(f"  {k}: {v}")
 if dry_run:
-    print(f"\n⚠️  DRY RUN MODE - Not actually pushing to DTC")
-    print(f"   Would push {insert_count + update_count + delete_count} changes")
-
-# Initialize results
-results = {
-    "success": 0,
-    "failed": 0,
-    "errors": []
-}
-
-push_log_rows = []
-
-try:
-    # Process INSERTs
-    if insert_count > 0:
-        print(f"\n📤 Processing {insert_count} INSERTs...")
-        
-        inserts_list = df_inserts.collect()
-        
-        for idx, row in enumerate(inserts_list[:batch_size], 1):  # Limit to batch size
-            try:
-                req_name = row.dtc_request_name
-                sheet_id = row.sheet_id
-                lf_style = row.lf_style_number
-                
-                # Get views for this request
-                req_id = row.request_id
-                views = connector.get_views(req_id)
-                full_version_view = next(
-                    (v for v in views if v.get("viewName") == "WIP_ITS_USE"),
-                    views[0] if views else None
-                )
-                
-                if not full_version_view:
-                    raise ValueError(f"No view found for request {req_id}")
-                
-                view_id = full_version_view["viewId"]
-                
-                # Get max row index
-                max_row_index = connector.get_max_row_index(sheet_id, view_id)
-                new_row_index = max_row_index + idx
-                
-                # Prepare payload
-                payload = prepare_payload(row.asDict())
-                
-                print(f"   [{idx}/{min(insert_count, batch_size)}] INSERT: {lf_style} at index {new_row_index}")
-                
-                if not dry_run:
-                    # Push to DTC
-                    response = connector.patch_row(
-                        sheet_id=sheet_id,
-                        view_id=view_id,
-                        column_values=payload,
-                        row_index=new_row_index
-                    )
-                    
-                    print(f"      ✅ Success")
-                    results["success"] += 1
-                else:
-                    print(f"      [DRY RUN] Would push")
-                    results["success"] += 1
-                
-                # Log
-                push_log_rows.append({
-                    "push_time": datetime.now(timezone.utc),
-                    "dtc_request_name": req_name,
-                    "operation": "INSERT",
-                    "lf_style_number": lf_style,
-                    "color_name": row.color_name,
-                    "fabric_group": row.fabric_group,
-                    "status": "success",
-                    "error_message": None,
-                    "payload": json.dumps(payload),
-                    "dry_run": dry_run
-                })
-                
-            except Exception as e:
-                error_msg = str(e)
-                print(f"      ❌ Failed: {error_msg}")
-                results["failed"] += 1
-                results["errors"].append({
-                    "operation": "INSERT",
-                    "lf_style": lf_style if 'lf_style' in locals() else "?",
-                    "error": error_msg
-                })
-                
-                # Log error
-                push_log_rows.append({
-                    "push_time": datetime.now(timezone.utc),
-                    "dtc_request_name": req_name if 'req_name' in locals() else "?",
-                    "operation": "INSERT",
-                    "lf_style_number": lf_style if 'lf_style' in locals() else "?",
-                    "color_name": row.color_name if 'row' in locals() else None,
-                    "fabric_group": row.fabric_group if 'row' in locals() else None,
-                    "status": "failed",
-                    "error_message": error_msg,
-                    "payload": None,
-                    "dry_run": dry_run
-                })
-        
-        if insert_count > batch_size:
-            print(f"\n   ⚠️  Batch limit reached. {insert_count - batch_size} inserts remaining.")
-            print(f"      Run again to process remaining rows.")
-    
-    # TODO: Process UPDATEs and DELETEs similarly
-    # (Skipped for now as they require DTC row_id from comparison)
-    
-except Exception as e:
-    print(f"❌ Push failed: {e}")
-    import traceback
-    traceback.print_exc()
-
-# COMMAND ----------
-
-# ============================================================================
-# CELL 8: Log Results
-# ============================================================================
-
-print("\n" + "=" * 80)
-print("Step 7: Log Push Results")
-print("=" * 80)
-
-try:
-    print(f"💾 Writing push log to {push_log_table_full}...")
-    
-    if push_log_rows:
-        df_push_log = spark.createDataFrame(push_log_rows)
-        
-        # Append to push log table
-        df_push_log.write.format("delta") \
-            .mode("append") \
-            .saveAsTable(push_log_table_full)
-        
-        print(f"✅ Logged {len(push_log_rows)} operations")
-    else:
-        print(f"   No operations to log")
-    
-except Exception as e:
-    print(f"⚠️  Failed to log results: {e}")
-    # Don't fail the job for logging errors
-
-# COMMAND ----------
-
-# ============================================================================
-# CELL 9: Update Sync Status
-# ============================================================================
-
-print("\n" + "=" * 80)
-print("Step 8: Update Sync Status")
-print("=" * 80)
-
-try:
-    if results["success"] > 0 and not dry_run:
-        print(f"🔄 Updating sync status for successful pushes...")
-        
-        # Get list of successfully pushed styles
-        successful_styles = [
-            log["lf_style_number"] 
-            for log in push_log_rows 
-            if log["status"] == "success"
-        ]
-        
-        if successful_styles:
-            # Update staging table
-            from pyspark.sql.functions import when
-            
-            df_staging_updated = spark.table(staging_table_full).withColumn(
-                "sync_status",
-                when(
-                    col("lf_style_number").isin(successful_styles),
-                    lit("pushed")
-                ).otherwise(col("sync_status"))
-            ).withColumn(
-                "pushed_at",
-                when(
-                    col("lf_style_number").isin(successful_styles),
-                    current_timestamp()
-                ).otherwise(col("pushed_at"))
-            )
-            
-            # Overwrite staging table
-            df_staging_updated.write.format("delta") \
-                .mode("overwrite") \
-                .option("overwriteSchema", "false") \
-                .saveAsTable(staging_table_full)
-            
-            print(f"✅ Updated sync status for {len(successful_styles)} rows")
-    else:
-        print(f"   No status updates needed")
-    
-except Exception as e:
-    print(f"⚠️  Failed to update status: {e}")
-
-# COMMAND ----------
-
-# ============================================================================
-# Final Summary
-# ============================================================================
-
-print("\n" + "=" * 80)
-print("✅ PUSH COMPLETE")
-print("=" * 80)
-
-print(f"\nPush Summary:")
-print(f"  Environment: {dtc_environment}")
-print(f"  Pending rows: {pending_count}")
-print(f"  Operations detected:")
-print(f"    - INSERTs: {insert_count}")
-print(f"    - UPDATEs: {update_count}")
-print(f"    - DELETEs: {delete_count}")
-print(f"  Results:")
-print(f"    - Success: {results['success']}")
-print(f"    - Failed: {results['failed']}")
-
-if results["errors"]:
-    print(f"\n  Errors:")
-    for err in results["errors"][:10]:  # Show first 10 errors
-        print(f"    - {err['operation']} {err['lf_style']}: {err['error']}")
-
-if dry_run:
-    print(f"\n⚠️  DRY RUN - No actual changes made to DTC")
-
-print(f"\nNext steps:")
-if results["failed"] > 0:
-    print(f"  ⚠️  Review errors in {push_log_table_full}")
-    print(f"  Fix issues and re-run for failed rows")
-else:
-    print(f"  ✅ All operations successful!")
-    print(f"  Data is now synced to DTC")
-
-print(f"\n✅ Push complete!")
+    print("\n⚠️  DRY RUN - no PATCH calls were made. Set dry_run=false to apply.")
+print(f"\nReview details:\n  SELECT * FROM {sync_log_full} WHERE run_id = '{run_id}' ORDER BY status DESC;")
+print("\n✅ Push complete")

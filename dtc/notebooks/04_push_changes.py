@@ -90,7 +90,17 @@ try:
         print(f"❌ Request {DTC_REQUEST_ID} has no sheetId")
         dbutils.notebook.exit(1)
     
-    print(f"   Sheet ID: {sheet_id}")
+    # The validated write contract is PATCH /v1/sheets/{sheetId}/views/{viewId},
+    # so a view_id is required. Use WIP_ITS_USE (complete, unfiltered).
+    views = connector.get_views(DTC_REQUEST_ID)
+    view_id = next((v.get("viewId") for v in views if v.get("viewName") == "WIP_ITS_USE"), None)
+    if not view_id:
+        print("❌ 'WIP_ITS_USE' view not found for this request")
+        dbutils.notebook.exit(1)
+    # Running max rowIndex used to assign indexes for INSERTs.
+    next_row_index = connector.get_max_row_index(sheet_id, view_id)
+
+    print(f"   Sheet ID: {sheet_id} | View ID: {view_id} | max rowIndex: {next_row_index}")
 except Exception as e:
     print(f"❌ Error getting request: {e}")
     dbutils.notebook.exit(1)
@@ -136,29 +146,39 @@ for i, change in enumerate(pending_changes, 1):
     operation = change['operation']
     columns_changed = change['columns_changed']
     
+    # change_detection stores columns_changed as {col: {old_value, new_value}}.
+    # Flatten to {col: new_value} for the DTC write contract.
+    flat_values = {
+        col: (info.get("new_value") if isinstance(info, dict) else info)
+        for col, info in (columns_changed or {}).items()
+    }
+
     try:
         print(f"\n   [{i}/{len(pending_changes)}] {operation} - row_id: {row_id}")
         
         if operation == 'INSERT':
-            # POST to create new row
-            response = connector.create_row(sheet_id, columns_changed)
-            print(f"      ✅ Created")
+            # INSERT: PATCH .../views/{viewId} with a fresh rowIndex
+            next_row_index += 1
+            response = connector.create_row(sheet_id, view_id, flat_values, next_row_index)
+            print(f"      ✅ Created at rowIndex {next_row_index}")
             detector.mark_as_pushed(change_id, response)
             results['success'] += 1
             
         elif operation == 'UPDATE':
-            # PATCH to update row
-            response = connector.update_row(sheet_id, row_id, columns_changed)
+            # UPDATE: PATCH .../views/{viewId} with rowId
+            response = connector.update_row(sheet_id, view_id, row_id, flat_values)
             print(f"      ✅ Updated")
             detector.mark_as_pushed(change_id, response)
             results['success'] += 1
             
         elif operation == 'DELETE':
-            # DELETE to remove row
-            response = connector.delete_row(sheet_id, row_id)
-            print(f"      ✅ Deleted")
-            detector.mark_as_pushed(change_id, response)
-            results['success'] += 1
+            # The DTC API exposes no row-delete endpoint (validated 2026-06-17).
+            # Mark as rejected so it is visible for manual handling (Phase 2+).
+            msg = "DELETE not supported by DTC API (no row-delete endpoint)"
+            print(f"      ⚠️  {msg}")
+            detector.mark_as_rejected(change_id, msg)
+            results['conflict'] = results.get('conflict', 0) + 1
+            continue
             
     except Exception as e:
         print(f"      ❌ Error: {str(e)}")

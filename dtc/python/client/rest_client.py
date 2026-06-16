@@ -51,6 +51,22 @@ class RestClient:
 
         logger.info(f"RestClient initialized for {base_url}")
 
+    @staticmethod
+    def _parse_body(resp) -> Dict[str, Any]:
+        """
+        Parse a response body, tolerating empty bodies (e.g. HTTP 204 No Content,
+        which the DTC sheet write endpoint returns on success).
+
+        Returns the parsed JSON dict, or {"status_code": <code>} when there is no
+        body to decode.
+        """
+        if resp.status_code == 204 or not (resp.content and resp.content.strip()):
+            return {"status_code": resp.status_code}
+        try:
+            return resp.json()
+        except ValueError:
+            return {"status_code": resp.status_code, "text": resp.text}
+
     def _get_headers(self) -> Dict[str, str]:
         """Get request headers."""
         headers = {
@@ -121,7 +137,7 @@ class RestClient:
                 url, json=data, headers=req_headers, timeout=self.timeout
             )
             resp.raise_for_status()
-            return resp.json()
+            return self._parse_body(resp)
         except requests.exceptions.RequestException as e:
             logger.error(f"POST {url} failed: {e}")
             raise
@@ -154,7 +170,7 @@ class RestClient:
                 url, json=data, headers=req_headers, timeout=self.timeout
             )
             resp.raise_for_status()
-            return resp.json()
+            return self._parse_body(resp)
         except requests.exceptions.RequestException as e:
             logger.error(f"PATCH {url} failed: {e}")
             raise
@@ -187,7 +203,7 @@ class RestClient:
                 url, json=data, headers=req_headers, timeout=self.timeout
             )
             resp.raise_for_status()
-            return resp.json()
+            return self._parse_body(resp)
         except requests.exceptions.RequestException as e:
             logger.error(f"PUT {url} failed: {e}")
             raise
