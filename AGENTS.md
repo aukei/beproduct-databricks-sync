@@ -25,13 +25,15 @@ fieldId, JSONPath, sync direction. Always update it first, then the code constan
 | Direction | Constant | File |
 |-----------|----------|------|
 | BeProduct → DTC | `FIELD_MAPPING` | `dtc/python/sync/phase1.py` |
+| BeProduct → DTC (image only) | `STYLE_IMAGE_COL` + `compute_image_uploads` | `dtc/python/sync/phase3.py` |
 | DTC → BeProduct (header) | `REVERSE_HEADER_FIELDS` | `dtc/python/sync/phase2.py` |
 | DTC → BeProduct (colorway) | `REVERSE_COLORWAY_FIELDS` | `dtc/python/sync/phase2.py` |
 | DTC → BeProduct (no target yet) | `UNSUPPORTED_FIELDS` | `dtc/python/sync/phase2.py` |
 | BeProduct extraction (raw → master) | `COMPULSORY_FIELDS` / `INTERESTED_FIELDS` | `beproduct/beproduct_style_sync.py` |
 | BeProduct → DTC transform (denormalize) | `FIELD_MAPPING` + staging `select` | `beproduct/beproduct_to_dtc_transform.py` |
 
-Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`.
+Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
+`dtc/tests/test_phase3.py`.
 
 ### Current direction partition
 
@@ -41,7 +43,11 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`.
   (`parent_vendor`), Main Factory (Sampling) (`factory`) [header];
   Lot# (`drawing_number_walmart`) [colorway]; Main Factory Customer ID (no target → skipped).
 - **Keys** (match, not overwritten): LF Style# (`header_number`), Color/Wash (`colorName`).
-- **Excluded**: Style Image.
+- **BeProduct → DTC, image only (Phase 3)**: Style Image (`front_image_url` →
+  DTC "Style Image"). Binary, so it does NOT ride the Phase 1 sheetData PATCH;
+  uploaded by `beproduct_to_dtc_images` via the multipart images endpoint, only
+  when the DTC cell is blank and BeProduct has a valid `front_image_url`. Still
+  one-directional (never read back to BeProduct, never in `phase2.REVERSE_*`).
 
 ## Ground rules / invariants
 
@@ -68,6 +74,15 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`.
   rowId (update) and rowIndex (insert) — send separate batches.
 - Row delete EXISTS: `DELETE /v1/sheets/{sheetId}/views/{viewId}/rows` body
   `{"rowIndexes":[...]}` → 204 (keys off rowIndex, not rowId).
+- Cell image upload (Phase 3, **NOT yet live-validated**):
+  `POST /v1/sheets/{sheetId}/views/{viewId}/images?rowindex={int}&columnname=Style Image`
+  with the image bytes as a **multipart/form-data** file part (binary). Operates
+  on an EXISTING row (keys off lowercase `rowindex`), so it must run AFTER Phase 1
+  creates the rows. The JSON sheetData PATCH cannot set images. The multipart
+  file PART NAME (`file`) and success status are still **unverified** — confirm
+  against the sacrificial UAT request before a non-dry-run prod run. Connector:
+  `DTCConnector.upload_row_image` → `RestClient.post_multipart` (the only client
+  method that sends `files=`/`params=` and does NOT force `application/json`).
 - Request listing works via `GET /v1/requests` with `workspaceName`+`filters` in the
   **request body** (not query params; query param → 400 "Invalid workspaceName").
 - Registry refresh is the shared `sync.registry.refresh` (used by
@@ -107,6 +122,19 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`.
 
 ## Decisions on record
 
+- **Phase 3 image sync is a separate post-Phase-1 step (2026-06-17).** Style Image
+  is binary and cannot ride the Phase 1 JSON sheetData PATCH, and its endpoint
+  targets an EXISTING row by `rowindex`, so it cannot run at insert time. New
+  notebook `beproduct/beproduct_to_dtc_images.py` runs AFTER `beproduct_to_dtc_push`:
+  it re-reads each in-scope sheet live (freshest rowIndex + Style Image state),
+  and for every row whose cell is blank AND whose BeProduct staging row has a
+  valid `front_image_url`, downloads the CDN image and POSTs it to the multipart
+  images endpoint (`columnname="Style Image"`). Pure decision logic in
+  `dtc/python/sync/phase3.py` (`compute_image_uploads`, unit-tested in
+  `test_phase3.py`); idempotent (already-imaged rows skipped). The orchestrator
+  (`orchestrate_sync.py`) runs it as Step 8, gated by `run_phase3`, preceded by a
+  Step 7 re-pull of `dtc_wip_<customer>` so the table reflects Phase 1 inserts.
+  Still needs a UAT validation run (multipart part name + status unverified).
 - **Phase 1 now CREATES missing in-scope DTC requests (2026-06-17, reverses prior
   scope).** The earlier rule "Phase 1 does NOT create requests; the project team
   pre-creates them" is superseded. `dtc_request_manager` creates missing **in-scope**
@@ -140,6 +168,7 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`.
 ```bash
 python3 dtc/tests/test_phase1.py        # Phase 1 core unit tests
 python3 dtc/tests/test_phase2.py        # Phase 2 core unit tests
+python3 dtc/tests/test_phase3.py        # Phase 3 image-upload core unit tests
 python3 dtc/tests/test_phase1_live.py   # live reversible DTC write test (needs UAT)
 python scripts/upload_notebooks.py --dry-run   # preview Databricks notebook upload
 python scripts/upload_notebooks.py             # deploy notebooks to Databricks

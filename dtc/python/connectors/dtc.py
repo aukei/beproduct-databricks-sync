@@ -449,6 +449,63 @@ class DTCConnector:
         """Delete a single row by rowIndex (thin wrapper over delete_rows())."""
         return self.delete_rows(sheet_id, view_id, [row_index])
 
+    # ------------------------------------------------------------------
+    # IMAGE WRITE CONTRACT (Phase 3 — NOT YET LIVE-VALIDATED)
+    # ------------------------------------------------------------------
+    # Cell images (e.g. the "Style Image" column) are NOT settable through the
+    # JSON sheetData PATCH used for normal columns; they are binary and use a
+    # dedicated multipart endpoint, keyed on rowIndex (not rowId):
+    #
+    #     POST /v1/sheets/{sheetId}/views/{viewId}/images
+    #          ?rowindex={int}&columnname={display name}
+    #     body: multipart/form-data with the image bytes as a file part
+    #
+    # IMPORTANT: the query param name is lowercase "rowindex"; columnname is the
+    # column DISPLAY name ("Style Image"). The multipart file PART NAME ("file"
+    # below) and the success status code are still UNVALIDATED — verify live
+    # against the sacrificial UAT request (KTB FW26 Wrangler,
+    # 6a26581854e92e7acd8fa71b) before enabling a non-dry-run production run.
+    # ------------------------------------------------------------------
+
+    def upload_row_image(
+        self,
+        sheet_id: str,
+        view_id: str,
+        row_index: int,
+        image_bytes: bytes,
+        column_name: str = "Style Image",
+        filename: str = "image.jpg",
+        content_type: str = "image/jpeg",
+        file_field: str = "file",
+    ) -> Dict[str, Any]:
+        """
+        Upload a binary image into a single sheet cell (Phase 3).
+
+        Args:
+            sheet_id: DTC sheet ID
+            view_id: DTC view ID (WIP_ITS_USE)
+            row_index: target row's rowIndex (the image endpoint keys off rowindex)
+            image_bytes: raw image content (already downloaded from BeProduct CDN)
+            column_name: DTC column display name (default "Style Image")
+            filename: filename for the multipart part
+            content_type: MIME type of the image (e.g. image/jpeg, image/png)
+            file_field: multipart field name (UNVALIDATED; default "file")
+
+        Returns:
+            Parsed response (or {"status_code": <code>}).
+        """
+        files = {file_field: (filename, image_bytes, content_type)}
+        params = {"rowindex": row_index, "columnname": column_name}
+        logger.info(
+            f"Upload image: sheet {sheet_id} view {view_id} "
+            f"rowindex={row_index} column={column_name!r} ({len(image_bytes)} bytes)"
+        )
+        return self.client.post_multipart(
+            f"/v1/sheets/{sheet_id}/views/{view_id}/images",
+            params=params,
+            files=files,
+        )
+
     def get_view_definition(self, view_id: str) -> Dict[str, Any]:
         """
         Get a single view record (its schema), including dynamicFields.

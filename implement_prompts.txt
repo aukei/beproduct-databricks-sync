@@ -65,7 +65,7 @@ Notebooks (Spark/Databricks) compile-check clean but can't be executed locally â
 implement_prompts.txt and dtc/PHASE1_WORKFLOW.md show as untracked (pre-existing in your tree).
 Suggested next step: register real in-scope request IDs via 00_init_request_registry.py, then run the push with dry_run=true to inspect the plan in beproduct_to_dtc_sync_log before going live.
 
-# Phase 2  $28
+# Phase 2  $128
 Phase 2 DTC -> BeProduct seems trivial at this point, maybe add together. In this phase:
 1. cater rows that have key fields updated in beproduct causing DTC rows fall into different request.
 2. these DTC values updated to BeProduct corresponding style and push back to beproduct: "Legacy Code", "Lot#", "Main Vendor (Sampling)", "Main Factory (Sampling)", "Main Factory Customer ID"
@@ -78,8 +78,15 @@ Skip it for now
 Point 1: when a BeProduct key field (LF Style#, brand, or season) changes, the row's DTC request changes (e.g. brand Wranglerâ†’Lee moves it to a different request). The new request gets an INSERT. What about the now-stale row left in the OLD request?
 mark stale DTC row "Product Status" to "(removed)" - this is not a valid BeProduct value, so act as a signal to DTC user .
 
-# Tidy up 2026/06/17
+## Tidy up 2026/06/17
 1. rewrite  @dtc/PHASE1_WORKFLOW.md  similar to PHASE2_WORKFLOW documenting BeProduct to DTC dataflow. I have backup its original content to @implement_prompts.txt  for my own future reference. 
 2. what is the best way to refactory docs / agent notes so that subsequent changes to field mapping via another kilo agent can pick up all the previous discovery?
 3. commit and update databricks notebook. 
 4. give a summary of steps to run the 2 workflows.
+
+# Phase 3 Image
+Tackle image. Since image API is an operation on existing row, it cannot be handled at record insert time. Therefore tentatively:
+1. as an independent step after beproduct_to_dtc_push, reload all in-scope request/sheet rows from dtc ie. refresh dtc_wip_ktb, noting "Style Image" of each row is populated or not.
+2. if  the row "Style image" attribute is not populated, and corresponding BeProduct row has valid "front_image_url", then use p.16 "POST /v1/sheets/{sheetId}/views/{viewId}/images?rowindex={number}&columnname={text}" API to add image to the row.
+2.1 {columnname} should be "Style Image"
+2.2 Body is retrieved from front_image_url (e.g. curl), then put into request body in binary format as multipart/form-data

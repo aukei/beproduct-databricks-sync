@@ -22,12 +22,15 @@ Sync direction (one-way per field; see AGENTS.md "field mapping" for code locati
     Legacy Code, Lot#, Main Vendor (Sampling), Main Factory (Sampling),
     Main Factory Customer ID (no BeProduct target yet -> skipped)
   key (used for matching, not overwritten): LF Style#, Color / Wash
-  excluded (never pushed): Style Image
+  BeProduct -> DTC image only (Phase 3, phase3 / beproduct_to_dtc_images):
+    Style Image (binary; uploaded via the multipart images endpoint, only when
+    the DTC cell is blank and BeProduct has a valid front_image_url. NEVER
+    pushed via the Phase 1 sheetData PATCH, and never read back to BeProduct.)
 
 DTC column                 | BeProduct field name           | fieldId                  | Location (JSONPath in Style JSON)                          | Notes
 ---------------------------+--------------------------------+--------------------------+------------------------------------------------------------+------------------------------------------------------------
 Product Status             | PRODUCT STATUS                 | style_status             | headerData.fields[id="style_status"].value                 |
-Style Image                | (front image)                  | -                        | headerData.frontImage.origin                               | excluded from Phase 1 push
+Style Image                | (front image)                  | -                        | headerData.frontImage.origin                               | Phase 3 only: binary upload to blank cells (images endpoint); excluded from Phase 1 PATCH
 LF Style#                  | LF Style Number                | header_number            | headerData.fields[id="header_number"].value                | match key
 Active / Dropped           | (blank)                        | -                        | (not sourced from BeProduct)                               |
 Legacy Code                | CUSTOMER STYLE NUMBER / PLM #  | customer_style_number    | headerData.fields[id="customer_style_number"].value        | name has a trailing space before "#"

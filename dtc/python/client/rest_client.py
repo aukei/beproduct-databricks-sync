@@ -147,6 +147,59 @@ class RestClient:
             logger.error(f"POST {url} failed: {e}")
             raise
 
+    def post_multipart(
+        self,
+        endpoint: str,
+        params: Optional[Dict[str, Any]] = None,
+        files: Optional[Dict[str, Any]] = None,
+        data: Optional[Dict[str, Any]] = None,
+        headers: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        """
+        POST a multipart/form-data request (binary file upload).
+
+        Unlike post()/patch()/etc., this does NOT force a JSON Content-Type. When
+        `files` is supplied, `requests` sets the multipart Content-Type (with the
+        correct boundary) automatically; setting it ourselves would break the
+        upload. Only the x-api-key auth header is carried over.
+
+        Used for the DTC row-image endpoint
+        (POST /v1/sheets/{sheetId}/views/{viewId}/images?rowindex=..&columnname=..),
+        which expects the image bytes as a multipart file part, not JSON.
+
+        Args:
+            endpoint: API endpoint (e.g. "/v1/sheets/{s}/views/{v}/images")
+            params: Query-string parameters (e.g. {"rowindex": 5, "columnname": ...})
+            files: requests-style files mapping, e.g.
+                   {"file": ("image.jpg", <bytes>, "image/jpeg")}
+            data: Optional extra form fields
+            headers: Additional headers to merge (Content-Type is intentionally
+                     left for requests to set)
+
+        Returns:
+            Parsed response body (or {"status_code": <code>} for empty/204).
+        """
+        url = f"{self.base_url}{endpoint}"
+        # Build headers WITHOUT a forced application/json Content-Type so requests
+        # can set the multipart boundary itself.
+        req_headers: Dict[str, str] = {}
+        if self.api_key:
+            req_headers["x-api-key"] = self.api_key
+        if headers:
+            req_headers.update(headers)
+
+        logger.debug(f"POST (multipart) {url} params={params}")
+        try:
+            resp = self.session.post(
+                url, params=params, files=files, data=data,
+                headers=req_headers, timeout=self.timeout,
+            )
+            resp.raise_for_status()
+            return self._parse_body(resp)
+        except requests.exceptions.RequestException as e:
+            logger.error(f"POST (multipart) {url} failed: {e}")
+            raise
+
     def patch(
         self,
         endpoint: str,
