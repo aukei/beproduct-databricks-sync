@@ -88,6 +88,18 @@ ids = registry.discover_request_ids(conn, "KTB", "KTB WIP")
 check(ids == ["a", "b"], f"deduped/ordered ids == ['a','b'] (got {ids})")
 check(conn.called_with == ("KTB", "KTB WIP"), "search_requests called with workspace+document")
 
+print("\n[6b] discover_requests keeps full dicts (for reference pre-filter)")
+conn2 = FakeConn([
+    {"requestId": "a", "requestReference": "KTB FW26 Wrangler"},
+    {"requestId": "b", "requestReference": "KON FW26 Wrangler"},
+    {"requestId": "a", "requestReference": "KTB FW26 Wrangler"},  # dup
+])
+items = registry.discover_requests(conn2, "KTB", "KTB WIP")
+check([i["requestId"] for i in items] == ["a", "b"], "discover_requests deduped by requestId")
+in_scope = [i for i in items if i.get("requestReference", "").startswith("KTB ")]
+check(len(in_scope) == 1 and items[0]["requestReference"] == "KTB FW26 Wrangler",
+      "references available for pre-filter (1 KTB in-scope, 1 KON out)")
+
 print("\n[7] REGISTRY_COLS matches expected 19-col schema order")
 check(len(registry.REGISTRY_COLS) == 19, "19 registry columns")
 check(registry.REGISTRY_COLS[0] == "environment" and registry.REGISTRY_COLS[4] == "request_id",

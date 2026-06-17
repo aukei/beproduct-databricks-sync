@@ -92,9 +92,11 @@ populated by `00_init_request_registry.py`.
   to register only those.
 
 In-scope = reference parses as `<customer> <seasonCode> <brand>` AND the customer
-token matches (e.g. `KTB …` in, `KON …` out). Out-of-scope requests are still
-registered (for audit) with `in_scope = false` and ignored by pull/push. A
-request/view may be empty (0 rows).
+token matches (e.g. `KTB …` in, `KON …` out). During **auto-discovery** the scan
+pre-filters on the listed `requestReference` and **only reads/registers in-scope
+requests** — out-of-scope/foreign requests are skipped entirely (no by-id
+`get_request`, so no HTTP 400 and no registry rows). A request/view may be empty
+(0 rows). (Explicit `request_ids` are read by-id without the reference pre-filter.)
 
 ### Missing-request creation (`dtc_request_manager`)
 

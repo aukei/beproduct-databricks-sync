@@ -33,17 +33,24 @@ REGISTRY_COLS = [
 # Pure helpers (no Spark) - unit-testable
 # ---------------------------------------------------------------------------
 
-def discover_request_ids(connector, workspace: str, document: str) -> List[str]:
-    """List the distinct requestIds in a workspace+document via search_requests."""
+def discover_requests(connector, workspace: str, document: str) -> List[Dict[str, Any]]:
+    """Return the distinct raw request dicts (deduped by requestId) from
+    search_requests. Each carries at least requestId + requestReference, which lets
+    callers pre-filter to in-scope names BEFORE doing any by-id read."""
     discovered = connector.search_requests(workspace, document_name=document)
-    ids: List[str] = []
+    out: List[Dict[str, Any]] = []
     seen = set()
     for r in discovered:
         rid = r.get("requestId")
         if rid and rid not in seen:
             seen.add(rid)
-            ids.append(rid)
-    return ids
+            out.append(r)
+    return out
+
+
+def discover_request_ids(connector, workspace: str, document: str) -> List[str]:
+    """Distinct requestIds in a workspace+document (see discover_requests)."""
+    return [r["requestId"] for r in discover_requests(connector, workspace, document)]
 
 
 def build_registry_row(
@@ -191,22 +198,42 @@ def refresh(
     """
     (Re)discover + enrich + upsert the request registry.
 
-    - `request_ids` blank/None → auto-discover every request in workspace+document.
-    - Returns a summary dict: {discovered, registered, in_scope, rows}.
+    - `request_ids` blank/None → auto-discover requests in workspace+document, then
+      pre-filter on the listed `requestReference` so only IN-SCOPE names are read
+      by-id (`get_request`/`get_views`) and registered. Out-of-scope/foreign requests
+      are skipped entirely (no by-id call → no HTTP 400, no registry rows).
+    - `request_ids` given → enrich exactly those ids (targeted; no pre-filter).
+    - Returns a summary: {discovered, skipped_out_of_scope, registered, in_scope, rows}.
     """
     now = now or datetime.now(timezone.utc)
     ensure_table(spark, registry_table)
 
-    if not request_ids:
-        request_ids = discover_request_ids(connector, workspace, document)
+    # Resolve which request ids to enrich by-id.
+    #  - explicit request_ids (targeted) → enrich all of them (no pre-filter).
+    #  - auto-discover → pre-filter on the LIST's requestReference and only enrich
+    #    IN-SCOPE names, so we never call get_request on foreign/out-of-scope
+    #    requests (which return HTTP 400) and never register them.
+    discovered_n = 0
+    skipped_oos = 0
+    if request_ids:
+        ids_to_enrich = list(request_ids)
         if verbose:
-            print(f"   registry.refresh: discovered {len(request_ids)} request(s) "
-                  f"in workspace={workspace!r}, document={document!r}")
-    elif verbose:
-        print(f"   registry.refresh: enriching {len(request_ids)} request id(s)")
+            print(f"   registry.refresh: enriching {len(ids_to_enrich)} explicit request id(s)")
+    else:
+        items = discover_requests(connector, workspace, document)
+        discovered_n = len(items)
+        ids_to_enrich = [
+            it.get("requestId") for it in items
+            if phase1.is_in_scope(it.get("requestReference") or "", customer)
+        ]
+        skipped_oos = discovered_n - len(ids_to_enrich)
+        if verbose:
+            print(f"   registry.refresh: discovered {discovered_n} in workspace={workspace!r}, "
+                  f"document={document!r}; in-scope {len(ids_to_enrich)}; "
+                  f"skipped {skipped_oos} out-of-scope")
 
     rows: List[Dict[str, Any]] = []
-    for rid in request_ids:
+    for rid in ids_to_enrich:
         try:
             scope = connector.get_request_scope(rid)
         except Exception as e:  # keep going; record the read failure
@@ -219,7 +246,8 @@ def refresh(
             customer=customer, now=now, request_id=rid))
 
     summary = {
-        "discovered": len(request_ids),
+        "discovered": discovered_n if not request_ids else len(ids_to_enrich),
+        "skipped_out_of_scope": skipped_oos,
         "registered": len(rows),
         "in_scope": sum(1 for r in rows if r.get("in_scope")),
         "rows": rows,
@@ -228,5 +256,5 @@ def refresh(
         merge_rows(spark, registry_table, rows, mode=mode)
     if verbose:
         print(f"   registry.refresh: registered={summary['registered']} "
-              f"in_scope={summary['in_scope']} (mode={mode})")
+              f"in_scope={summary['in_scope']} skipped_oos={skipped_oos} (mode={mode})")
     return summary

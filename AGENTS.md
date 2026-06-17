@@ -70,13 +70,15 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`.
   `{"rowIndexes":[...]}` → 204 (keys off rowIndex, not rowId).
 - Request listing works via `GET /v1/requests` with `workspaceName`+`filters` in the
   **request body** (not query params; query param → 400 "Invalid workspaceName").
-- Registry (`00_init_request_registry`) **auto-discovers by default**: blank
-  `request_ids` → `search_requests(workspace, document_name=document)` lists every
-  request in the document, then by-id enrich + `mode=merge` upsert keyed on
-  `(environment, request_id)`. Merge preserves `last_extracted`/`last_pushed`/
-  `row_count`; `replace` wipes them. Run it as step 0 of each sync. Pass explicit
-  `request_ids` only for targeted re-registration. Out-of-scope refs still land with
-  `in_scope=false`.
+- Registry refresh is the shared `sync.registry.refresh` (used by
+  `00_init_request_registry`, `pull_requests_to_delta`, `dtc_request_manager`):
+  `search_requests(workspace, document_name=document)` lists requests, then it
+  **pre-filters on the listed `requestReference` and only reads/registers IN-SCOPE
+  names** by-id (`get_request`/`get_views`). Out-of-scope/foreign requests are
+  skipped entirely — NOT enriched, NOT registered — which is why `get_request` is
+  never called on them (they were the source of HTTP 400 noise). Explicit
+  `request_ids` are read by-id without the pre-filter. Upsert `mode=merge` preserves
+  `last_extracted`/`last_pushed`/`row_count`; `replace` wipes them.
 - Allowed columns must come from the **view definition** (`GET /v1/views/{viewId}` →
   178 dynamicFields), NOT from sheet cells (empty columns don't appear in `sheetData`,
   which previously caused false "missing column" findings). `WIP_ITS_USE` column
