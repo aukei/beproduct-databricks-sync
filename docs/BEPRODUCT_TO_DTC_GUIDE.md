@@ -257,7 +257,7 @@ DTC SeasonCode = DTCCODE + last 2 digits (YY) of the BeProduct Year
 Notes:
 - The styles `year` field is a STRING (e.g. `"2026"`) and may be `"N/A"`; such rows stay unmapped (NULL `season_code`) and are reported.
 - The join is case-insensitive on CUSTOMER/BPSEASON (`Spring` matches `SPRING`).
-- Reverse direction (DTC -> BeProduct) in `dtc/notebooks/pull_dtc_to_delta.py` reads the **same** table: it splits the DTC `season_code` into prefix + year and looks up `BPSEASON` via `DTCCODE`.
+- Applied forward-only (BeProduct -> DTC). Season is a fixed per-request key, so the DTC -> BeProduct direction (Phase 2) does not reverse-map it.
 
 Created by: `dtc/notebooks/00_init_season_mapping.py`
 

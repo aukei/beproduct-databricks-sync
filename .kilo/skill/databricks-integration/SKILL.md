@@ -469,9 +469,9 @@ job = w.jobs.create(
             task_key="pull_dtc",
             depends_on=[jobs.TaskDependency(task_key="init_mapping")],
             notebook_task=jobs.NotebookTask(
-                notebook_path="/Workspace/Repos/beproduct-sync/DTC/notebooks/pull_dtc_to_delta",
+                notebook_path="/Workspace/Repos/beproduct-sync/DTC/notebooks/pull_requests_to_delta",
                 base_parameters={
-                    "dtc_request_id": "REQ_12345",
+                    "customer": "KTB",
                     "dtc_environment": "uat"
                 }
             ),
@@ -614,7 +614,7 @@ df = df.withColumn("sync_date", current_date())
 df.write.format("delta") \
     .mode("append") \
     .option("mergeSchema", "true") \
-    .saveAsTable("lft.beproduct.dtc_master_chart_uat")
+    .saveAsTable("lft.beproduct.dtc_wip_ktb")
 
 print(f"✅ Synced {df.count()} rows to Delta Lake")
 ```

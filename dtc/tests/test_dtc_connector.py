@@ -154,7 +154,7 @@ except Exception as e:
 print("\n[TEST 7] Save sample to CSV")
 print("-" * 80)
 try:
-    csv_path = Path(__file__).parent / "data_samples" / "dtc_master_chart_sample.csv"
+    csv_path = Path(__file__).parent / "data_samples" / "dtc_wip_sample.csv"
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     
     # Save first 3 rows and key columns
@@ -189,5 +189,5 @@ print("\n2. Set up secrets:")
 print("   databricks secrets create-scope --scope sync_hub")
 print("   databricks secrets put --scope sync_hub --key dtc_api_key --string-value YOUR_KEY")
 print("\n3. Run notebook in Databricks:")
-print("   databricks runs submit --notebook-task notebook_path=/Workspace/Repos/YOUR_REPO/sync_hub/notebooks/pull_dtc_to_delta")
+print("   databricks runs submit --notebook-task notebook_path=/Workspace/Repos/beproduct-sync/DTC/notebooks/pull_requests_to_delta")
 print()

@@ -55,12 +55,17 @@ Parameters:
   - refresh_mode: FULL
 ```
 
-**DTC Sync:**
+**DTC Sync:** (run in order)
 ```
-Notebook: /Workspace/Repos/beproduct-sync/DTC/notebooks/pull_dtc_to_delta
-Parameters:
-  - dtc_request_id: <your-request-id>
-  - dtc_environment: uat
+1. Notebook: /Workspace/Repos/beproduct-sync/DTC/notebooks/00_init_request_registry
+   Parameters:
+     - request_ids: (blank → auto-discover all requests in the workspace+document)
+     - dtc_environment: uat
+     - customer: KTB
+2. Notebook: /Workspace/Repos/beproduct-sync/DTC/notebooks/pull_requests_to_delta
+   Parameters:
+     - dtc_environment: uat
+     - customer: KTB        → lft.beproduct.dtc_wip_ktb
 ```
 
 ---
@@ -118,21 +123,31 @@ schema = "beproduct"
 
 ### Use Case 3: Pull DTC Request Data
 
-**Purpose:** Monitor DTC WIP Request data
+**Purpose:** Pull in-scope DTC WIP Request worksheets to Delta
 
-**Notebook:** `dtc/notebooks/pull_dtc_to_delta.py`
+**Notebooks (in order):**
+1. `dtc/notebooks/00_init_request_registry.py` — build/refresh the control table
+2. `dtc/notebooks/pull_requests_to_delta.py` — pull the `WIP_ITS_USE` view of each
+   in-scope request
 
 **Schedule:** Daily at 2:00 AM UTC
 
 **Parameters:**
 ```python
-dtc_request_id = "req_abc123"    # DTC request ID
+# 00_init_request_registry
+request_ids = ""                 # blank → auto-discover; or comma-separated IDs
 dtc_environment = "uat"          # or "prod"
-dtc_customer = "KTB"
+customer = "KTB"
+dtc_workspace = "KTB"
+dtc_document = "KTB WIP"
+
+# pull_requests_to_delta
+dtc_environment = "uat"
+customer = "KTB"
 ```
 
 **Output Table:**
-- `lft.beproduct.dtc_master_chart_uat` (or `_prod`)
+- `lft.beproduct.dtc_wip_<customer>` (e.g. `dtc_wip_ktb`)
 
 ---
 

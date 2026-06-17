@@ -7,7 +7,7 @@ Enterprise data synchronization platform for syncing BeProduct and DTC data to D
 Unified data platform with three core capabilities:
 
 1. **BeProduct Sync** - STYLE master data and reference data (Materials, Colors, Blocks)
-2. **DTC Sync** - Pull DTC WIP Request worksheets with change tracking
+2. **DTC Sync** - Pull in-scope DTC WIP Request worksheets (registry-driven)
 3. **Cross-Platform** - Automated BeProduct → DTC data flow with denormalization
 
 ### Key Features
@@ -37,13 +37,19 @@ beproduct-databricks-sync/
 │
 ├── dtc/                              # DTC sync notebooks
 │   ├── notebooks/
-│   │   ├── pull_dtc_to_delta.py     # Pull DTC data
-│   │   └── 00_init_season_mapping.py # Season mapping setup
+│   │   ├── 00_init_request_registry.py # Build/refresh request registry (control table)
+│   │   ├── 00_init_season_mapping.py   # Season mapping setup
+│   │   ├── pull_requests_to_delta.py   # Pull in-scope requests → dtc_wip_<customer>
+│   │   └── 05_push_dtc_to_beproduct.py # Phase 2 pushback (DTC → BeProduct)
 │   ├── python/
-│   │   └── connectors/
-│   │       └── dtc.py               # DTC API connector
-│   ├── CHANGE_TRACKING_DESIGN.md    # Change tracking design
-│   └── PHASE2_WORKFLOW.md           # Future workflow
+│   │   ├── connectors/
+│   │   │   └── dtc.py               # DTC API connector
+│   │   └── sync/
+│   │       ├── phase1.py            # BeProduct → DTC core (pure-Python)
+│   │       └── phase2.py            # DTC → BeProduct core (pure-Python)
+│   ├── DATA_MODEL.md                # Tables, keys, dtc_wip schema
+│   ├── PHASE1_WORKFLOW.md           # BeProduct → DTC workflow
+│   └── PHASE2_WORKFLOW.md           # DTC → BeProduct workflow
 │
 ├── scripts/
 │   ├── upload_notebooks.py          # Deploy notebooks to workspace
@@ -105,8 +111,10 @@ python scripts/upload_notebooks.py
 - Parameters: `folder_name=KTB`, `refresh_mode=FULL`
 
 **DTC Sync:**
-- Notebook: `/Workspace/Repos/beproduct-sync/DTC/notebooks/pull_dtc_to_delta`
-- Parameters: `dtc_request_id=<id>`, `dtc_environment=uat`
+1. Notebook: `/Workspace/Repos/beproduct-sync/DTC/notebooks/00_init_request_registry`
+   - Parameters: `request_ids=` (blank → auto-discover), `dtc_environment=uat`, `customer=KTB`
+2. Notebook: `/Workspace/Repos/beproduct-sync/DTC/notebooks/pull_requests_to_delta`
+   - Parameters: `dtc_environment=uat`, `customer=KTB` → `lft.beproduct.dtc_wip_ktb`
 
 See **[QUICK_START.md](QUICK_START.md)** for detailed instructions.
 
@@ -130,14 +138,13 @@ lft.beproduct Schema (Single Source of Truth)
 │  └─ blocks                  [last_modified, extracted]
 │
 ├─ DTC Tables
-│  ├─ dtc_requests            [last_modified, extracted]
-│  ├─ dtc_sheets              [last_modified, extracted]
-│  └─ dtc_master_chart_uat    [last_modified, extracted]
+│  ├─ dtc_request_registry    [in-scope requests + sync state]
+│  └─ dtc_wip_<customer>      [one row per DTC sheet row; e.g. dtc_wip_ktb]
 │
 └─ Integration Tables
    ├─ beproduct_to_dtc_staging
    ├─ dtc_request_mapping
-   ├─ push_log
+   ├─ beproduct_to_dtc_sync_log / dtc_to_beproduct_sync_log
    └─ dtc_seasoncode_mapping     [CUSTOMER, BPSEASON, DTCCODE]
 ```
 
@@ -217,18 +224,20 @@ See **[docs/BEPRODUCT_TO_DTC_GUIDE.md](docs/BEPRODUCT_TO_DTC_GUIDE.md)** for com
 
 ---
 
-### Use Case 3: Monitor DTC Data
+### Use Case 3: Pull DTC WIP Requests
 
-**Objective:** Pull DTC worksheet data for analysis
+**Objective:** Pull in-scope DTC request worksheets to Delta for reconciliation/push
 
-**Notebook:** `dtc/notebooks/pull_dtc_to_delta.py`  
-**Schedule:** Daily at 02:00 UTC  
-**Output:** `lft.beproduct.dtc_master_chart_uat`
+**Notebooks:**
+1. `dtc/notebooks/00_init_request_registry.py` (build/refresh the control table)
+2. `dtc/notebooks/pull_requests_to_delta.py`
+
+**Output:** `lft.beproduct.dtc_wip_<customer>` (e.g. `dtc_wip_ktb`)
 
 **Features:**
-- Change detection (INSERT/UPDATE/DELETE)
-- Row-level tracking
-- Historical snapshots
+- Registry-driven request discovery (auto-discover or explicit IDs)
+- Reads only the `WIP_ITS_USE` view of each request
+- Row-level keys (`row_id` / `row_index`) for upsert
 
 ---
 
@@ -338,10 +347,12 @@ pip install -r requirements.txt
 - Cross-platform BeProduct → DTC flow
 - Universal change tracking (last_modified, extracted)
 
-### 🚧 Phase 2: Enhancements (Planned)
-- DTC → BeProduct reverse sync
+### ✅ Phase 2: DTC → BeProduct pushback (Complete)
+- DTC-owned fields pushed back to BeProduct (`05_push_dtc_to_beproduct.py`)
+- See `dtc/PHASE2_WORKFLOW.md`
+
+### 🚧 Enhancements (Planned)
 - Image sync workflow
-- Advanced change detection (UPDATE/DELETE)
 - Multi-region support
 
 ### 💡 Phase 3: Advanced Features (Future)

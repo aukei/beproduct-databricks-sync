@@ -96,6 +96,15 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`.
 
 ## Decisions on record
 
+- **Legacy change-tracking pipeline removed (2026-06-17).** The old single-table
+  `dtc_master_chart_uat` snapshot/change-log flow (`pull_dtc_to_delta`,
+  `01_create_sync_tables`, `02_create_snapshot`, `03_detect_changes`,
+  `04_push_changes`, `sync/snapshot.py`, `sync/change_detection.py`,
+  `CHANGE_TRACKING_DESIGN.md`) was deleted from the repo and the Databricks
+  workspace. Current model: registry-driven pull of the `WIP_ITS_USE` view into
+  `dtc_wip_<customer>` + Phase 1/2. The season mapping is forward-only (Phase 2
+  doesn't reverse-map season). `.kilo/skill/dtc-integration/SKILL.md` still contains
+  disclaimed legacy examples behind a "superseded" banner.
 - Moved-key orphan (style's key changed → row belongs to a different request): mark the
   stale DTC row `Product Status = "(removed)"` (invalid BeProduct value, user signal);
   do not delete. Only mark keys that moved to another request.

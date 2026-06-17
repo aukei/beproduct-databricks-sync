@@ -6,7 +6,10 @@ Pull In-Scope DTC Requests -> Delta (Phase 1, requirement 1)
 Uploads every in-scope request listed in the control table to ONE Delta table
 per (workspace + customer):
 
-    lft.beproduct.dtc_wip_<CUSTOMER>            e.g. dtc_wip_KTB
+    lft.beproduct.dtc_wip_<customer>            e.g. dtc_wip_ktb  (customer lowercased)
+
+For each request it reads ONLY the "WIP_ITS_USE" view (the canonical sync
+projection); requests whose registered view is anything else are skipped + logged.
 
 Each row carries the request's [request_reference, season_code, brands] plus the
 DTC rowId / rowIndex, so the table is keyed for reconciliation and push:
@@ -16,8 +19,9 @@ It also maintains the control table (requirement 1a): for each request it update
 last_extracted, row_count and msgs. Empty requests (no rows) are allowed
 (requirement 1b) and recorded with row_count = 0.
 
-Discovery is registry-driven (the API key cannot list requests). Run
-00_init_request_registry.py first.
+Discovery is registry-driven. Run 00_init_request_registry.py first to populate
+lft.beproduct.dtc_request_registry (it resolves each request's WIP_ITS_USE
+view_id/view_name).
 
 Parameters:
   - dtc_environment (default: uat)
@@ -61,6 +65,11 @@ FIXED_FIELDS = [
     StructField("data_json", StringType()),
 ]
 
+# Phase 1 only ever reads the "WIP_ITS_USE" view of each request (the canonical
+# column projection used for sync). The registry stores each request's WIP view
+# under view_id/view_name; we assert it here so the source view is explicit.
+WIP_VIEW_NAME = "WIP_ITS_USE"
+
 dbutils.widgets.text("dtc_environment", "uat", "DTC Environment")
 dbutils.widgets.text("customer", "KTB", "Customer")
 dbutils.widgets.text("dtc_workspace", "KTB", "DTC Workspace")
@@ -83,6 +92,7 @@ print("PULL IN-SCOPE DTC REQUESTS -> DELTA (Phase 1)")
 print("=" * 80)
 print(f"  Registry: {registry_full}")
 print(f"  Target:   {target_full}")
+print(f"  Source view: {WIP_VIEW_NAME} (per request, from registry)")
 print(f"  Env: {environment} | Customer: {customer} | write_mode: {write_mode}")
 
 # COMMAND ----------
@@ -113,7 +123,18 @@ control_updates = []  # (request_id, row_count, msg)
 
 for r in reg_rows:
     name = r.request_reference
+
+    # Explicitly require the WIP_ITS_USE view. r.view_id is that view's id (the
+    # registry resolves view_id/view_name from get_request_scope); skip + log if a
+    # request's registered view is anything else so we never pull the wrong view.
+    if r.view_name != WIP_VIEW_NAME:
+        print(f"  ⏭️  {name}: skipped (view_name={r.view_name!r}, expected {WIP_VIEW_NAME!r})")
+        control_updates.append((r.request_id, None,
+                                f"skipped: WIP view missing (view_name={r.view_name})"))
+        continue
+
     try:
+        # Pull the WIP_ITS_USE view's sheet data.
         sheet = connector.get_sheet(r.sheet_id, r.view_id)
         rows = sheet.get("sheetData", [])
     except Exception as e:

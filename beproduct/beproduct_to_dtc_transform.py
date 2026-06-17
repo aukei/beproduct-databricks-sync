@@ -252,9 +252,9 @@ except Exception as e:
 #
 # NOTE: `year` in the source styles table is a STRING (e.g. "2026"), and may
 # contain the sentinel "N/A"; such rows simply fail the join / stay NULL and
-# are reported as unmapped below.
-# The reverse direction (DTC -> BeProduct) lives in
-# dtc/notebooks/pull_dtc_to_delta.py and uses the same table.
+# are reported as unmapped below. The season mapping is applied forward-only
+# (BeProduct -> DTC); season is a fixed per-request key so Phase 2 never
+# reverse-maps it.
 # ============================================================================
 
 print("\n" + "=" * 80)

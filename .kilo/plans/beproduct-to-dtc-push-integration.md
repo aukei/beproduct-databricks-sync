@@ -1,7 +1,14 @@
 # BeProduct to DTC Push Integration - Implementation Plan
 
+> ⚠️ **Historical plan — superseded.** Kept for context. The shipped design differs:
+> discovery is registry-driven (`dtc_request_registry`), the pull target is
+> `lft.beproduct.dtc_wip_<customer>`, and the snapshot/change-tracking pipeline
+> (`pull_dtc_to_delta`, `02_create_snapshot`, `03_detect_changes`, `04_push_changes`)
+> was **removed**. For the current flows see `dtc/PHASE1_WORKFLOW.md`,
+> `dtc/PHASE2_WORKFLOW.md`, `dtc/DATA_MODEL.md`, and `AGENTS.md`.
+
 **Created:** 2026-06-09  
-**Status:** Ready for Implementation  
+**Status:** Superseded (historical)  
 **Complexity:** High - Cross-platform integration with denormalization
 
 ---
@@ -27,8 +34,8 @@ This plan addresses the Phase 1 requirement to sync BeProduct STYLE data to DTC 
 |-----------|--------|-------|
 | BeProduct → Delta Lake | ✅ Complete | `beproduct/beproduct_style_sync.py` |
 | BeProduct ← Delta Lake | ✅ Complete | `beproduct/beproduct_style_push.py` |
-| DTC → Delta Lake | ✅ Complete | `dtc/notebooks/pull_dtc_to_delta.py` |
-| DTC ← Delta Lake | ✅ Complete | `dtc/notebooks/04_push_changes.py` |
+| DTC → Delta Lake | ✅ Complete | `dtc/notebooks/pull_requests_to_delta.py` (+ `00_init_request_registry.py`) |
+| DTC → BeProduct (Phase 2) | ✅ Complete | `dtc/notebooks/05_push_dtc_to_beproduct.py` |
 | DTCConnector API | ✅ Complete | `dtc/python/connectors/dtc.py` |
 | Season Code Mapping | ✅ Complete | `dtc/notebooks/00_init_season_mapping.py` |
 | Master Data Sync | ✅ Complete | `beproduct/beproduct_master_data_sync.py` |

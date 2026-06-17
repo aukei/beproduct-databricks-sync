@@ -2,6 +2,14 @@
 
 Guide for connecting to DTC (Data Collaboration Tool) and reading worksheet data.
 
+> ⚠️ **Partially superseded.** The DTC **connector** usage below is current, but
+> the snapshot / change-detection / `dtc_master_chart_uat` change-log examples
+> describe a **removed** pipeline. The current model pulls the `WIP_ITS_USE` view
+> of registry-discovered requests into `lft.beproduct.dtc_wip_<customer>` and pushes
+> via Phase 1 / Phase 2. Follow `docs/DTC_GUIDE.md`, `dtc/DATA_MODEL.md`,
+> `dtc/PHASE1_WORKFLOW.md`, `dtc/PHASE2_WORKFLOW.md`, and `AGENTS.md` — not the
+> change-tracking snippets in this file.
+
 ## When to Use This Skill
 
 Use this skill when you need to:
@@ -722,5 +730,5 @@ class DTCConnector:
 
 - Connector: `dtc/python/connectors/dtc.py`
 - REST Client: `dtc/python/client/rest_client.py`
-- Notebook: `dtc/notebooks/pull_dtc_to_delta.py`
-- Documentation: `dtc/README.md`, `dtc/DATA_MODEL.md`, `dtc/CHANGE_TRACKING_DESIGN.md`
+- Notebook: `dtc/notebooks/pull_requests_to_delta.py` (+ `00_init_request_registry.py`)
+- Documentation: `docs/DTC_GUIDE.md`, `dtc/DATA_MODEL.md`, `dtc/PHASE1_WORKFLOW.md`, `dtc/PHASE2_WORKFLOW.md`

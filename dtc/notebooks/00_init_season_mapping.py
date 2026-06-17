@@ -23,9 +23,8 @@
 # MAGIC e.g. `SPRING + 2028 -> "SS" + "28" -> "SS28"`
 # MAGIC
 # MAGIC The year is **not** stored here; it comes from each style's `year` field at
-# MAGIC runtime. Forward direction (BeProduct -> DTC):
-# MAGIC `beproduct/beproduct_to_dtc_transform.py`. Reverse direction (DTC -> BeProduct):
-# MAGIC `dtc/notebooks/pull_dtc_to_delta.py`. Both read this same table.
+# MAGIC runtime. Applied forward-only (BeProduct -> DTC) in
+# MAGIC `beproduct/beproduct_to_dtc_transform.py`.
 # MAGIC
 # MAGIC **Important**: Run this once to set up the mapping table, then add a row for
 # MAGIC each (customer, season) prefix combination.
@@ -44,7 +43,7 @@ TARGET_CATALOG = dbutils.widgets.get("target_catalog")
 TARGET_SCHEMA = dbutils.widgets.get("target_schema")
 
 # NOTE: table name is `dtc_seasoncode_mapping` (no underscore between season/code)
-# to match the readers in beproduct_to_dtc_transform.py and pull_dtc_to_delta.py.
+# to match the reader in beproduct_to_dtc_transform.py.
 mapping_table = f"{TARGET_CATALOG}.{TARGET_SCHEMA}.dtc_seasoncode_mapping"
 
 print(f"Initializing seasonCode mapping table: {mapping_table}")

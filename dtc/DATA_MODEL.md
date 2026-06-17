@@ -148,8 +148,9 @@ the styles table's `season` column during the join.)
 - The **year** part **is** algorithmic: last 2 digits of the BeProduct year.
 - Join is case-insensitive on `CUSTOMER` / `BPSEASON`; the styles `year` field is a
   STRING and may be `"N/A"` (such rows stay unmapped).
-- Forward (BeProduct -> DTC): `beproduct/beproduct_to_dtc_transform.py`.
-  Reverse (DTC -> BeProduct): `dtc/notebooks/pull_dtc_to_delta.py`. Same table.
+- Applied forward-only (BeProduct -> DTC) in
+  `beproduct/beproduct_to_dtc_transform.py`. Season is a fixed per-request key, so
+  the DTC -> BeProduct direction (Phase 2) never needs to reverse-map it.
 
 ---
 
@@ -226,64 +227,34 @@ single `request_id` parameter here.
 
 ---
 
-## Change Detection & Push
+## Push semantics (Phase 1: BeProduct → DTC)
 
-### Composite Key for Change Tracking
+`beproduct/beproduct_to_dtc_push.py` pushes the staging table into each request's
+**WIP_ITS_USE** view:
 
-Changes are tracked by composite key: `(dtc_customer, brand, season_code, lf_style_number)`
+1. **Delta push** — only staging rows with `beproduct_modified_at >
+   registry.last_pushed` are pushed (first run pushes all).
+2. **Match key within a request**: `(LF Style#, Color / Wash)` — season & brand are
+   fixed per request.
+3. **UPDATE** — matched DTC row: PATCH changed non-key fields by `row_id`.
+4. **INSERT** — new row: key + mapped fields at `rowIndex = max(rowIndex)+1`.
+5. UPDATE and INSERT are sent as **separate** PATCH batches (the API rejects a
+   mixed rowId/rowIndex body).
+6. **Moved-key orphans** — a style whose key moved to another request marks the
+   stale DTC row `Product Status = "(removed)"` (it is not deleted).
 
-When detecting changes:
-1. Group rows by composite key
-2. Compare current vs snapshot using all columns for that key
-3. Log INSERT/UPDATE/DELETE by key
-
-When pushing:
-1. Use DTC `row_id` for PATCH/DELETE operations
-2. Include composite key columns in INSERT payload
-
-### Example Change Log Entry
-
-```json
-{
-  "change_id": "uuid-123",
-  "request_id": "69f076f0b7247a661226be9a",
-  "row_id": "e25849e3-f160-4617-b123-9d7c810599cf",
-  "composite_key": {
-    "dtc_customer": "KTB",
-    "brand": "Wrangler Western",
-    "season_code": "SS28",
-    "lf_style_number": "WW001"
-  },
-  "operation": "UPDATE",
-  "columns_changed": {
-    "FOB_Price_USD": {
-      "old_value": "3.07",
-      "new_value": "2.99"
-    }
-  },
-  "status": "pending"
-}
-```
-
----
-
-## Implementation Checklist
-
-- [ ] Update DTCConnector to extract (dtc_customer, season_code, brand) from request name
-- [ ] Update pull notebook to pass customer mapping parameters
-- [ ] Create seasonCode mapping table: `dtc_seasoncode_mapping`
-- [ ] Update pull notebook to join and populate (beproduct_season, beproduct_year)
-- [ ] Update change detection to use composite key
-- [ ] Update change log schema to include composite_key field
-- [ ] Update push to use composite key for validation
-- [ ] Document mapping table initialization
-- [ ] Add sample mappings for KTB → KTB
+See `PHASE1_WORKFLOW.md` for the full forward flow and `PHASE2_WORKFLOW.md` for the
+DTC → BeProduct direction.
 
 ---
 
 ## Reference
 
-- **Request Name Parsing**: Implemented in `DTCConnector.get_document_metadata()` extension
-- **SeasonCode Mapping**: Query `dtc_seasoncode_mapping` table
-- **Customer Mapping**: Passed as notebook parameters
+- **Request-name parsing / in-scope test**: `sync/phase1.py`
+  (`parse_request_reference`, `is_in_scope`).
+- **SeasonCode mapping**: `lft.beproduct.dtc_seasoncode_mapping`
+  (`[CUSTOMER, BPSEASON, DTCCODE]`) — forward-only (BeProduct → DTC), applied in
+  `beproduct_to_dtc_transform.py`.
+- **Control table**: `lft.beproduct.dtc_request_registry`, populated by
+  `00_init_request_registry.py`.
 
