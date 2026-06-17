@@ -239,7 +239,7 @@ DTC and BeProduct identify a season differently:
 The mapping table stores only the **prefix** relationship (no year):
 
 ```sql
-CUSTOMER | SEASON | DTCCODE
+CUSTOMER | BPSEASON | DTCCODE
 ---------|--------|--------
 KTB      | SPRING | SS
 KTB      | FALL   | FW
@@ -256,8 +256,8 @@ DTC SeasonCode = DTCCODE + last 2 digits (YY) of the BeProduct Year
 
 Notes:
 - The styles `year` field is a STRING (e.g. `"2026"`) and may be `"N/A"`; such rows stay unmapped (NULL `season_code`) and are reported.
-- The join is case-insensitive on CUSTOMER/SEASON (`Spring` matches `SPRING`).
-- Reverse direction (DTC -> BeProduct) in `dtc/notebooks/pull_dtc_to_delta.py` reads the **same** table: it splits the DTC `season_code` into prefix + year and looks up `SEASON` via `DTCCODE`.
+- The join is case-insensitive on CUSTOMER/BPSEASON (`Spring` matches `SPRING`).
+- Reverse direction (DTC -> BeProduct) in `dtc/notebooks/pull_dtc_to_delta.py` reads the **same** table: it splits the DTC `season_code` into prefix + year and looks up `BPSEASON` via `DTCCODE`.
 
 Created by: `dtc/notebooks/00_init_season_mapping.py`
 
@@ -475,9 +475,9 @@ databricks secrets put --scope beproduct --key company_domain
 # Run once to initialize mapping table
 /Workspace/Repos/beproduct-sync/DTC/notebooks/00_init_season_mapping.py
 
-# Then add prefix mappings (CUSTOMER, SEASON, DTCCODE) -- no year here.
+# Then add prefix mappings (CUSTOMER, BPSEASON, DTCCODE) -- no year here.
 # Full SeasonCode is derived as DTCCODE + last 2 digits of the style's year.
-INSERT INTO lft.beproduct.dtc_seasoncode_mapping (CUSTOMER, SEASON, DTCCODE) VALUES
+INSERT INTO lft.beproduct.dtc_seasoncode_mapping (CUSTOMER, BPSEASON, DTCCODE) VALUES
   ('KTB', 'SPRING', 'SS'),
   ('KTB', 'FALL', 'FW');
 ```
@@ -651,7 +651,7 @@ Error: unmapped rows without season code
 
 Fix:
 - Check lft.beproduct.dtc_seasoncode_mapping
-- Add missing (CUSTOMER, SEASON, DTCCODE) prefix rows
+- Add missing (CUSTOMER, BPSEASON, DTCCODE) prefix rows
 - Also check the style's `year` field is a real year, not "N/A"
 - Re-run transform
 ```
@@ -742,7 +742,7 @@ assert fabric_df.count() == 1
 
 **Test season code mapping:**
 ```python
-# Mapping row: (CUSTOMER=KTB, SEASON=SPRING, DTCCODE=SS)
+# Mapping row: (CUSTOMER=KTB, BPSEASON=SPRING, DTCCODE=SS)
 # Input: Season="Spring", Year="2026"
 # Expected: SeasonCode = DTCCODE + last2(year) = "SS" + "26" = "SS26"
 

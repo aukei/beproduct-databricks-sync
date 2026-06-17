@@ -241,7 +241,7 @@ except Exception as e:
 # The mapping table `lft.beproduct.dtc_seasoncode_mapping` only stores the
 # *prefix* part of the relationship:
 #       CUSTOMER  STRING  -- BeProduct customer code, e.g. "KTB"
-#       SEASON    STRING  -- BeProduct season name,   e.g. "SPRING", "FALL"
+#       BPSEASON  STRING  -- BeProduct season name,   e.g. "SPRING", "FALL"
 #       DTCCODE   STRING  -- DTC season code prefix,  e.g. "SS", "FW"
 #   Sample rows: (KTB, SPRING, SS), (KTB, FALL, FW)
 #
@@ -264,7 +264,7 @@ print("=" * 80)
 try:
     print(f"📋 Loading season code mapping from {season_mapping_table}...")
     
-    # Load season mapping table (schema: CUSTOMER, SEASON, DTCCODE)
+    # Load season mapping table (schema: CUSTOMER, BPSEASON, DTCCODE)
     df_season_mapping = spark.table(season_mapping_table)
     
     mapping_count = df_season_mapping.count()
@@ -273,17 +273,17 @@ try:
     df_season_mapping.show(truncate=False)
     
     # Rename mapping columns to non-colliding names. The styles side already has a
-    # `season` column, and Spark matches names case-insensitively, so joining
-    # against a mapping column also named SEASON makes `col("season")` AMBIGUOUS.
+    # `season` column; the mapping's BeProduct-season column is named BPSEASON to
+    # avoid the case-insensitive collision that would make `col("season")` ambiguous.
     df_map = (df_season_mapping
               .withColumnRenamed("CUSTOMER", "map_customer")
-              .withColumnRenamed("SEASON", "map_season")
+              .withColumnRenamed("BPSEASON", "map_season")
               .withColumnRenamed("DTCCODE", "map_dtccode"))
     
-    # Join with denormalized data on (CUSTOMER, SEASON), case-insensitive.
+    # Join with denormalized data on (CUSTOMER, BPSEASON), case-insensitive.
     # The mapping is on the season *prefix* only; the year supplies the YY suffix.
     print(f"\n🔄 Joining with season mapping...")
-    print(f"   Match on: CUSTOMER={customer_code}, SEASON=season (case-insensitive)")
+    print(f"   Match on: CUSTOMER={customer_code}, BPSEASON=season (case-insensitive)")
     
     df_with_season = df_denormalized.join(
         df_map,

@@ -127,15 +127,17 @@ between `season` and `code`). Created by `dtc/notebooks/00_init_season_mapping.p
 ```sql
 CREATE TABLE IF NOT EXISTS lft.beproduct.dtc_seasoncode_mapping (
   CUSTOMER STRING NOT NULL,  -- BeProduct customer code, e.g. "KTB"
-  SEASON   STRING NOT NULL,  -- BeProduct season name,   e.g. "SPRING", "FALL"
+  BPSEASON STRING NOT NULL,  -- BeProduct season name,   e.g. "SPRING", "FALL"
   DTCCODE  STRING NOT NULL   -- DTC season code prefix,  e.g. "SS", "FW"
 )
 USING DELTA
 ```
+(`BPSEASON` was renamed from `SEASON` to avoid a case-insensitive collision with
+the styles table's `season` column during the join.)
 
 ### Example Mappings (prefix only — no year)
 
-| CUSTOMER | SEASON | DTCCODE | Example derivation |
+| CUSTOMER | BPSEASON | DTCCODE | Example derivation |
 |----------|--------|---------|--------------------|
 | KTB | SPRING | SS | `SPRING` + `2028` -> `SS28` |
 | KTB | FALL | FW | `FALL` + `2027` -> `FW27` |
@@ -144,7 +146,7 @@ USING DELTA
 - The **prefix** (SS/FW/...) is **not algorithmic** and may differ between
   customers, so it **must** come from this lookup table.
 - The **year** part **is** algorithmic: last 2 digits of the BeProduct year.
-- Join is case-insensitive on `CUSTOMER` / `SEASON`; the styles `year` field is a
+- Join is case-insensitive on `CUSTOMER` / `BPSEASON`; the styles `year` field is a
   STRING and may be `"N/A"` (such rows stay unmapped).
 - Forward (BeProduct -> DTC): `beproduct/beproduct_to_dtc_transform.py`.
   Reverse (DTC -> BeProduct): `dtc/notebooks/pull_dtc_to_delta.py`. Same table.

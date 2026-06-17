@@ -138,7 +138,7 @@ lft.beproduct Schema (Single Source of Truth)
    ├─ beproduct_to_dtc_staging
    ├─ dtc_request_mapping
    ├─ push_log
-   └─ dtc_seasoncode_mapping     [CUSTOMER, SEASON, DTCCODE]
+   └─ dtc_seasoncode_mapping     [CUSTOMER, BPSEASON, DTCCODE]
 ```
 
 ### Universal Change Tracking

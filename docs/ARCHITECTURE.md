@@ -174,7 +174,7 @@ BeProduct                    Databricks                      DTC
 
 ### Season Code Mapping
 - ✅ BeProduct (Customer, Season, Year) → DTC (Customer, SeasonCode)
-- ✅ Mapping table: `lft.beproduct.dtc_seasoncode_mapping` (CUSTOMER, SEASON, DTCCODE)
+- ✅ Mapping table: `lft.beproduct.dtc_seasoncode_mapping` (CUSTOMER, BPSEASON, DTCCODE)
 - ✅ Rule: `SeasonCode = DTCCODE + last 2 digits of year`
 - ✅ Examples: Spring 2026 → SS26, Fall 2027 → FW27
 
@@ -217,10 +217,10 @@ beproduct/company_domain        # BeProduct domain
 ```
 
 ### Season Code Mapping Table
-Stores the season *prefix* only (CUSTOMER, SEASON, DTCCODE); the full DTC
+Stores the season *prefix* only (CUSTOMER, BPSEASON, DTCCODE); the full DTC
 SeasonCode is `DTCCODE + last 2 digits of the style's year`.
 ```sql
-INSERT INTO lft.beproduct.dtc_seasoncode_mapping (CUSTOMER, SEASON, DTCCODE) VALUES
+INSERT INTO lft.beproduct.dtc_seasoncode_mapping (CUSTOMER, BPSEASON, DTCCODE) VALUES
   ('KTB', 'SPRING', 'SS'),
   ('KTB', 'FALL', 'FW');
 ```

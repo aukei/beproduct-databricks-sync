@@ -388,7 +388,7 @@ from collections import Counter
 # 
 # Mapping table structure (lft.beproduct.dtc_seasoncode_mapping):
 #   CUSTOMER (BeProduct customer code, e.g., "KTB")
-#   SEASON (BeProduct season name, e.g., "SPRING", "FALL")
+#   BPSEASON (BeProduct season name, e.g., "SPRING", "FALL")
 #   DTCCODE (DTC season code prefix, e.g., "SS", "FW")
 #
 # DTC season_code format: "<prefix><year>" (e.g., "SS28", "FW27")
@@ -432,7 +432,7 @@ try:
     mapping_data = mapping_df.select(
         col("CUSTOMER"),
         col("DTCCODE"),
-        col("SEASON").alias("mapped_season")
+        col("BPSEASON").alias("mapped_season")
     )
     
     # Step 5: Join using the mapping table
