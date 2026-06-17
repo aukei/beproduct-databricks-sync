@@ -35,6 +35,37 @@ sys.path.append("/Workspace/Repos/beproduct-sync/DTC/python")
 import uuid
 from datetime import datetime, timezone
 from pyspark.sql import functions as F
+from pyspark.sql.types import StructType, StructField, StringType, TimestampType
+
+# Explicit schemas so createDataFrame never has to infer types from all-NULL
+# columns (e.g. a REQUEST_NOT_FOUND log row has request_id/lf_style_number/
+# color/match_key/payload = None), which raises CANNOT_DETERMINE_TYPE.
+SYNC_LOG_SCHEMA = StructType([
+    StructField("log_time", TimestampType()),
+    StructField("run_id", StringType()),
+    StructField("stage", StringType()),
+    StructField("environment", StringType()),
+    StructField("dtc_request_name", StringType()),
+    StructField("request_id", StringType()),
+    StructField("operation", StringType()),
+    StructField("lf_style_number", StringType()),
+    StructField("color", StringType()),
+    StructField("match_key", StringType()),
+    StructField("status", StringType()),
+    StructField("reason", StringType()),
+    StructField("detail", StringType()),
+    StructField("payload", StringType()),
+])
+MAPPING_SCHEMA = StructType([
+    StructField("environment", StringType()),
+    StructField("dtc_request_name", StringType()),
+    StructField("request_id", StringType()),
+    StructField("sheet_id", StringType()),
+    StructField("view_id", StringType()),
+    StructField("season_code", StringType()),
+    StructField("brands", StringType()),
+    StructField("resolved_at", TimestampType()),
+])
 
 dbutils.widgets.text("catalog", "lft", "Catalog")
 dbutils.widgets.text("schema", "beproduct", "Schema")
@@ -148,7 +179,9 @@ for name in req_names:
 
 # Persist the resolved mapping (overwrite each run; push consumes it).
 if resolved_rows:
-    df_map = spark.createDataFrame(resolved_rows)
+    _ordered = [f.name for f in MAPPING_SCHEMA.fields]
+    _map_data = [tuple(r[fn] for fn in _ordered) for r in resolved_rows]
+    df_map = spark.createDataFrame(_map_data, MAPPING_SCHEMA)
     df_map.write.format("delta").mode("overwrite").option("overwriteSchema", "true").saveAsTable(mapping_full)
     print(f"✅ Wrote {len(resolved_rows)} resolved request(s) to {mapping_full}")
 else:
@@ -165,10 +198,7 @@ else:
 
 # Log resolution errors.
 if log_rows:
-    cols = ["log_time", "run_id", "stage", "environment", "dtc_request_name", "request_id",
-            "operation", "lf_style_number", "color", "match_key", "status", "reason",
-            "detail", "payload"]
-    spark.createDataFrame(log_rows, cols).write.format("delta").mode("append").saveAsTable(sync_log_full)
+    spark.createDataFrame(log_rows, SYNC_LOG_SCHEMA).write.format("delta").mode("append").saveAsTable(sync_log_full)
     print(f"⚠️  Logged {len(log_rows)} unresolved-request error(s) to {sync_log_full}")
 
 # COMMAND ----------

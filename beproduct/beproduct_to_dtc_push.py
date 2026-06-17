@@ -52,6 +52,26 @@ from datetime import datetime, timezone
 from connectors.dtc import DTCConnector
 from sync import phase1
 from pyspark.sql import functions as F
+from pyspark.sql.types import StructType, StructField, StringType, TimestampType
+
+# Explicit log schema so createDataFrame never infers from all-NULL columns
+# (raises CANNOT_DETERMINE_TYPE). Matches the sync_log CREATE TABLE below.
+SYNC_LOG_SCHEMA = StructType([
+    StructField("log_time", TimestampType()),
+    StructField("run_id", StringType()),
+    StructField("stage", StringType()),
+    StructField("environment", StringType()),
+    StructField("dtc_request_name", StringType()),
+    StructField("request_id", StringType()),
+    StructField("operation", StringType()),
+    StructField("lf_style_number", StringType()),
+    StructField("color", StringType()),
+    StructField("match_key", StringType()),
+    StructField("status", StringType()),
+    StructField("reason", StringType()),
+    StructField("detail", StringType()),
+    StructField("payload", StringType()),
+])
 
 dbutils.widgets.text("catalog", "lft", "Catalog")
 dbutils.widgets.text("schema", "beproduct", "Schema")
@@ -290,7 +310,7 @@ connector.close()
 
 # Write the sync log (4d).
 if log_rows:
-    spark.createDataFrame(log_rows, LOG_COLS).write.format("delta").mode("append").saveAsTable(sync_log_full)
+    spark.createDataFrame(log_rows, SYNC_LOG_SCHEMA).write.format("delta").mode("append").saveAsTable(sync_log_full)
     print(f"\n✅ Logged {len(log_rows)} sync-log rows to {sync_log_full}")
 
 # COMMAND ----------

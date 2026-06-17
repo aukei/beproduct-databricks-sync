@@ -56,6 +56,28 @@ except Exception:
 
 from sync import phase1, phase2
 from pyspark.sql import functions as F
+from pyspark.sql.types import StructType, StructField, StringType, TimestampType
+
+# Explicit log schema so createDataFrame never infers from all-NULL columns
+# (raises CANNOT_DETERMINE_TYPE). Matches the sync_log CREATE TABLE below.
+SYNC_LOG_SCHEMA = StructType([
+    StructField("log_time", TimestampType()),
+    StructField("run_id", StringType()),
+    StructField("environment", StringType()),
+    StructField("customer", StringType()),
+    StructField("beproduct_style_id", StringType()),
+    StructField("colorway_id", StringType()),
+    StructField("lf_style_number", StringType()),
+    StructField("color", StringType()),
+    StructField("dtc_request_name", StringType()),
+    StructField("dtc_row_id", StringType()),
+    StructField("scope", StringType()),
+    StructField("operation", StringType()),
+    StructField("status", StringType()),
+    StructField("reason", StringType()),
+    StructField("detail", StringType()),
+    StructField("payload", StringType()),
+])
 
 dbutils.widgets.text("catalog", "lft", "Catalog")
 dbutils.widgets.text("schema", "beproduct", "Schema")
@@ -250,7 +272,7 @@ for c in calls:
 # COMMAND ----------
 
 if log_rows:
-    spark.createDataFrame(log_rows, LOG_COLS).write.format("delta").mode("append").saveAsTable(sync_log_full)
+    spark.createDataFrame(log_rows, SYNC_LOG_SCHEMA).write.format("delta").mode("append").saveAsTable(sync_log_full)
     print(f"✅ Logged {len(log_rows)} rows to {sync_log_full}")
 
 print("\n" + "=" * 80)
