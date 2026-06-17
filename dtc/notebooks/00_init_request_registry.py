@@ -7,15 +7,19 @@ Creates and populates the Phase 1 control table (requirement 1a):
 
     lft.beproduct.dtc_request_registry
 
-Request discovery is registry-driven by design: an admin seeds the in-scope
-request IDs here, and this notebook enriches each one via by-id reads
-(get_request + get_views). This gives an explicit, auditable in-scope list and
-keeps out-of-scope developer requests (e.g. "KON ...") out of the pipeline.
+Discovery: by default (request_ids left blank) this notebook auto-discovers
+EVERY request in the given workspace+document via DTCConnector.search_requests()
+and registers them all, so the registry mirrors the document at sync time. Each
+request is then enriched via by-id reads (get_request + get_views) and tagged
+with in_scope (computed from its reference, see below). Pass request_ids
+explicitly to restrict the run to specific requests (targeted re-registration).
 
-(Listing IS available if needed: GET /v1/requests works when workspaceName +
-filters are sent in the JSON BODY - see DTCConnector.search_requests(). An
-earlier note here claimed the key could not list; that was a client bug from
-sending workspaceName as a query param, not an API/permission limitation.)
+Listing works because GET /v1/requests reads workspaceName + filters from the
+JSON BODY (see DTCConnector.search_requests(); validated live). An earlier note
+claimed the key could not list; that was a client bug from sending workspaceName
+as a query param, not an API/permission limitation. Out-of-scope developer
+requests (e.g. "KON ...") are still kept out of the pipeline because they are
+recorded with in_scope = false and ignored by pull/push.
 
 In scope == request reference parses as "<customer> <seasonCode> <brand>" AND its
 customer token equals `customer` (e.g. "KTB FW26 Wrangler"). Developer test
@@ -27,13 +31,17 @@ Control columns (per requirement 1a):
 plus operational fields (sheet_id, request_reference, row_count, last_pushed...).
 
 Parameters:
-  - request_ids: comma-separated DTC request IDs to register (REQUIRED)
+  - request_ids: comma-separated DTC request IDs to register. OPTIONAL - leave
+    blank to auto-discover all requests in dtc_workspace+dtc_document.
   - dtc_environment: uat | prod (default: uat)
   - customer: in-scope customer token (default: KTB)
   - dtc_workspace: DTC workspace name (default: KTB)
-  - dtc_document: DTC document name (default: KTB WIP)
+  - dtc_document: DTC document name (default: KTB WIP). Used as the documentName
+    filter when auto-discovering.
   - catalog / schema: target location (default: lft / beproduct)
-  - mode: "merge" (upsert by request_id) or "replace" (default: merge)
+  - mode: "merge" (upsert by request_id, preserves last_extracted/last_pushed/
+    row_count) or "replace" (full overwrite, wipes sync state). Default: merge.
+    Use merge for routine/seasonal refreshes.
 """
 
 # COMMAND ----------
@@ -49,7 +57,7 @@ from pyspark.sql.types import (
     StructType, StructField, StringType, BooleanType, LongType, TimestampType,
 )
 
-dbutils.widgets.text("request_ids", "", "Comma-separated DTC request IDs")
+dbutils.widgets.text("request_ids", "", "Request IDs (blank = auto-discover)")
 dbutils.widgets.text("dtc_environment", "uat", "DTC Environment")
 dbutils.widgets.text("customer", "KTB", "In-scope customer token")
 dbutils.widgets.text("dtc_workspace", "KTB", "DTC Workspace Name")
@@ -68,6 +76,7 @@ schema = dbutils.widgets.get("schema").strip()
 mode = dbutils.widgets.get("mode").strip().lower()
 
 registry_table = f"{catalog}.{schema}.dtc_request_registry"
+auto_discover = len(request_ids) == 0
 
 print("=" * 80)
 print("DTC REQUEST REGISTRY (Phase 1 control table)")
@@ -75,11 +84,8 @@ print("=" * 80)
 print(f"  Registry: {registry_table}")
 print(f"  Environment: {environment} | Customer: {customer}")
 print(f"  Workspace/Document: {workspace} / {document}")
-print(f"  Request IDs to register: {len(request_ids)}")
+print(f"  Discovery: {'AUTO (all requests in workspace+document)' if auto_discover else f'MANUAL ({len(request_ids)} request_ids)'}")
 print(f"  Mode: {mode}")
-
-if not request_ids:
-    raise ValueError("Parameter 'request_ids' is required (comma-separated DTC request IDs)")
 
 # COMMAND ----------
 
@@ -112,10 +118,28 @@ print(f"✅ Registry table ready: {registry_table}")
 
 # COMMAND ----------
 
-# Enrich each request id via by-id reads (no listing required).
+# Enrich each request id via by-id reads. When request_ids is blank, first
+# discover every request in the workspace+document (listing via JSON body).
 secret_key = f"dtc_api_key_{environment}"
 api_key = dbutils.secrets.get(scope="beproduct", key=secret_key)
 connector = DTCConnector(api_key=api_key, environment=environment, workspace_name=workspace)
+
+if auto_discover:
+    print(f"🔎 Auto-discovering requests in workspace={workspace!r}, document={document!r} ...")
+    discovered = connector.search_requests(workspace, document_name=document)
+    seen = set()
+    request_ids = []
+    for r in discovered:
+        rid = r.get("requestId")
+        if rid and rid not in seen:
+            seen.add(rid)
+            request_ids.append(rid)
+    print(f"   Discovered {len(request_ids)} request(s) in the document")
+    if not request_ids:
+        connector.close()
+        dbutils.notebook.exit("NO_REQUESTS_DISCOVERED")
+else:
+    print(f"📌 Registering {len(request_ids)} manually-specified request(s)")
 
 now = datetime.now(timezone.utc)
 rows = []

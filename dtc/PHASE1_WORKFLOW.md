@@ -52,6 +52,8 @@ Only BeProduct-owned columns are pushed (`Style Image` excluded). DTC-owned colu
 ## Flow
 
 ```
+0. Build/refresh request registry        dtc/notebooks/00_init_request_registry.py
+                                         → lft.beproduct.dtc_request_registry
 1. Pull in-scope DTC requests → Delta   dtc/notebooks/pull_requests_to_delta.py
                                          → lft.beproduct.dtc_wip_<customer>
 2. Ensure BeProduct style sync is fresh  beproduct/beproduct_style_sync.py
@@ -62,26 +64,40 @@ Only BeProduct-owned columns are pushed (`Style Image` excluded). DTC-owned colu
 5. Upsert + push BeProduct → DTC         beproduct/beproduct_to_dtc_push.py
 ```
 
-Run `00_init_request_registry.py` once (and whenever the in-scope request set
-changes) to seed the control table.
+Run `00_init_request_registry.py` to (re)build the control table. The table is
+created once and **upserted** thereafter (`mode=merge`, the default), so run it as
+step 0 of each sync to refresh the request set without losing sync state. Leave
+`request_ids` blank to auto-discover every request in the workspace+document; pass
+specific IDs only for targeted re-registration.
 
 ---
 
 ## Request discovery (registry-driven)
 
-Discovery uses an explicit, auditable **control table**
+Discovery is backed by the **control table**
 `lft.beproduct.dtc_request_registry`
 `[request_id, view_id, customer, season_code, brands, sheet_id, request_reference,
 in_scope, request_is_active, row_count, last_extracted, last_pushed, msgs, ...]`,
-seeded by `00_init_request_registry.py` from admin-provided request IDs and enriched
-via by-id reads (`get_request` + `get_views`).
+populated by `00_init_request_registry.py`.
+
+- **Auto-discovery (default):** with `request_ids` blank, the notebook lists every
+  request in the workspace+document via `DTCConnector.search_requests` (`GET
+  /v1/requests` with `workspaceName`+`filters` in the **body**), then enriches each
+  by-id (`get_request` + `get_views`). The registry therefore mirrors the document
+  at sync time.
+- **Manual override:** pass `request_ids` (comma-separated) to register only those.
 
 In-scope = reference parses as `<customer> <seasonCode> <brand>` AND the customer
-token matches (e.g. `KTB …` in, `KON …` out). A request/view may be empty (0 rows).
+token matches (e.g. `KTB …` in, `KON …` out). Out-of-scope requests are still
+registered (for audit) with `in_scope = false` and ignored by pull/push. A
+request/view may be empty (0 rows).
 
-> Listing IS available if needed (`GET /v1/requests` with `workspaceName`+`filters`
-> in the **body** — see `DTCConnector.search_requests`); the registry is a design
-> choice for an explicit scope, not an API limitation.
+**Refresh semantics (`mode=merge`, default):** upsert keyed on
+`(environment, request_id)`. Matched rows refresh metadata / `request_is_active` /
+`in_scope` but **preserve** `last_extracted`, `last_pushed`, `row_count`; new
+requests are inserted with null sync-state. `mode=replace` overwrites the whole
+table (wipes sync state) — avoid for routine runs. Merge never deletes, so a
+closed-season request lingers but is skipped once `request_is_active` flips off.
 
 ---
 
