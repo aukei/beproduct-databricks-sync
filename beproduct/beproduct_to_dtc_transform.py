@@ -300,7 +300,7 @@ try:
     df_with_season = df_with_season.withColumn(
         "season_code",
         when(col("map_dtccode").isNotNull() & col("year").isNotNull(), 
-             concat(col("map_dtccode"), right(col("year"), 2)))
+             concat(col("map_dtccode"), right(col("year"), lit(2))))
         .otherwise(lit(None))
     )
     
