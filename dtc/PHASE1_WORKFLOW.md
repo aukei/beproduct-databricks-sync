@@ -116,8 +116,17 @@ will **create** the DTC request/sheet (`POST /v1/sheets` via
 `(environment, request_id)`. Matched rows refresh metadata / `request_is_active` /
 `in_scope` but **preserve** `last_extracted`, `last_pushed`, `row_count`; new
 requests are inserted with null sync-state. `mode=replace` overwrites the whole
-table (wipes sync state) — avoid for routine runs. Merge never deletes, so a
-closed-season request lingers but is skipped once `request_is_active` flips off.
+table (wipes sync state) — avoid for routine runs.
+
+**Reconciliation:** because the scan now only reads ACTIVE + IN-SCOPE requests, a
+request that later goes inactive / is renamed out of scope would otherwise keep a
+stale `request_is_active='Y'` / `in_scope=true` row. So after a full auto-discover
+(non-empty listing), refresh **marks** any registry row in the scanned scope
+(`environment`+`customer`+`document`) absent from the scan as
+`request_is_active='N'`, `in_scope=false` (`reconciled_inactive` in the summary).
+It's a **mark, not a delete** — sync state survives and a later scan that
+re-discovers the request flips it back via merge. Reconciliation is skipped for
+explicit `request_ids` (partial) and for empty listings (treated as a failed scan).
 
 ---
 

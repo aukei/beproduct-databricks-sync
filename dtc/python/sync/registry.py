@@ -210,6 +210,36 @@ def merge_rows(spark, registry_table: str, rows: List[Dict[str, Any]], *, mode: 
     return len(rows)
 
 
+def reconcile_inactive(spark, registry_table: str, *, environment: str, customer: str,
+                       document: str, keep_ids: List[str], now: datetime) -> int:
+    """Mark registry rows absent from the latest active scan as inactive.
+
+    For the scanned scope (environment + customer + document_name), any row whose
+    request_id is NOT in `keep_ids` (the active+in-scope set just discovered) and
+    that is still flagged active/in-scope is set to request_is_active='N',
+    in_scope=false. Rows + sync state survive (mark, not delete); a later scan that
+    re-discovers them flips them back via merge. Returns the number of rows marked.
+    """
+    keep_df = spark.createDataFrame([(k,) for k in keep_ids], "request_id string")
+    keep_df.createOrReplaceTempView("keep_request_ids")
+    where = (
+        f"environment = '{environment}' AND customer = '{customer}' "
+        f"AND document_name = '{document}' "
+        f"AND request_id NOT IN (SELECT request_id FROM keep_request_ids) "
+        f"AND (in_scope = true OR upper(coalesce(request_is_active, '')) IN ('Y','TRUE','1'))"
+    )
+    n = spark.sql(f"SELECT count(*) AS c FROM {registry_table} WHERE {where}").collect()[0]["c"]
+    if n:
+        spark.sql(f"""
+            UPDATE {registry_table}
+            SET request_is_active = 'N', in_scope = false,
+                msgs = 'reconciled: absent from latest active scan',
+                updated_at = timestamp('{now.isoformat()}')
+            WHERE {where}
+        """)
+    return n
+
+
 def refresh(
     spark,
     connector,
@@ -233,8 +263,13 @@ def refresh(
       (`get_request`/`get_views`) and registered. Inactive and out-of-scope/foreign
       requests are skipped entirely (no by-id call → no HTTP 400, no registry rows).
     - `request_ids` given → enrich exactly those ids (targeted; no pre-filter).
+    - On a full auto-discover (non-empty listing), **reconciles**: registry rows in
+      the scanned scope (environment+customer+document) that are absent from this
+      scan are marked inactive (`request_is_active='N'`, `in_scope=false`) so the
+      registry doesn't keep stale inactive/out-of-scope rows. Mark, not delete —
+      sync state survives and a later scan flips them back via merge.
     - Returns a summary: {discovered, skipped_inactive, skipped_out_of_scope,
-      registered, in_scope, rows}.
+      registered, in_scope, reconciled_inactive, rows}.
     """
     now = now or datetime.now(timezone.utc)
     ensure_table(spark, registry_table)
@@ -282,18 +317,31 @@ def refresh(
             scope, environment=environment, workspace=workspace, document=document,
             customer=customer, now=now, request_id=rid))
 
+    if rows:
+        merge_rows(spark, registry_table, rows, mode=mode)
+
+    # Reconcile: on a FULL auto-discover that returned a non-empty listing, mark
+    # any in-scope/active registry row absent from this scan as inactive (it went
+    # inactive / was renamed out of scope / is legacy). Skipped for explicit
+    # request_ids (partial) and for empty listings (treat as a failed scan), and
+    # never under mode=replace (which already rewrote the whole table).
+    reconciled = 0
+    if mode != "replace" and not request_ids and discovered_n > 0:
+        reconciled = reconcile_inactive(
+            spark, registry_table, environment=environment, customer=customer,
+            document=document, keep_ids=ids_to_enrich, now=now)
+
     summary = {
         "discovered": discovered_n if not request_ids else len(ids_to_enrich),
         "skipped_inactive": skipped_inactive,
         "skipped_out_of_scope": skipped_oos,
         "registered": len(rows),
         "in_scope": sum(1 for r in rows if r.get("in_scope")),
+        "reconciled_inactive": reconciled,
         "rows": rows,
     }
-    if rows:
-        merge_rows(spark, registry_table, rows, mode=mode)
     if verbose:
         print(f"   registry.refresh: registered={summary['registered']} "
               f"in_scope={summary['in_scope']} skipped_inactive={skipped_inactive} "
-              f"skipped_oos={skipped_oos} (mode={mode})")
+              f"skipped_oos={skipped_oos} reconciled_inactive={reconciled} (mode={mode})")
     return summary

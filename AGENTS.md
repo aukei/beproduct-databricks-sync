@@ -82,7 +82,12 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`.
   which is why `get_request` is never called on them (they were the HTTP 400 noise).
   Explicit
   `request_ids` are read by-id without the pre-filter. Upsert `mode=merge` preserves
-  `last_extracted`/`last_pushed`/`row_count`; `replace` wipes them.
+  `last_extracted`/`last_pushed`/`row_count`; `replace` wipes them. After a full
+  auto-discover (non-empty listing) it **reconciles**: registry rows in the scanned
+  scope (`environment`+`customer`+`document`) absent from the scan are **marked**
+  `request_is_active='N'`/`in_scope=false` (mark, not delete — sync state survives,
+  re-discovery flips them back). So the registry doesn't keep stale inactive/
+  out-of-scope rows. Skipped for explicit `request_ids` and empty listings.
 - Allowed columns must come from the **view definition** (`GET /v1/views/{viewId}` →
   178 dynamicFields), NOT from sheet cells (empty columns don't appear in `sheetData`,
   which previously caused false "missing column" findings). `WIP_ITS_USE` column
