@@ -65,17 +65,20 @@ BOLD = lambda t: _c("1", t)  # bold
 # CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Notebook directories to upload: (local_dir, workspace_path)
-#
-# ONLY notebooks go through this importer. The Python module packages under
-# dtc/python (`connectors`, `client`, `sync` -> phase1/phase2/...) are deployed as
-# real importable .py FILES via the git Repo (Databricks Repos pull from origin),
-# NOT as notebooks. Uploading them here would create extension-less NOTEBOOK nodes
-# that shadow/duplicate the files and are not importable. The notebooks add
-# "/Workspace/Repos/beproduct-sync/DTC/python" to sys.path and import those files.
+# Notebook directories: imported as Databricks NOTEBOOKS (extension stripped).
 NOTEBOOK_DIRS = [
     ("beproduct", "/Workspace/Repos/beproduct-sync/beproduct"),
     ("dtc/notebooks", "/Workspace/Repos/beproduct-sync/DTC/notebooks"),
+]
+
+# Python module packages: uploaded as importable workspace FILES (extension KEPT).
+# The notebooks add "/Workspace/Repos/beproduct-sync/DTC/python" to sys.path and do
+# `from sync import phase1, phase2`, `from connectors.dtc import ...`, etc. These are
+# plain modules (NOT Databricks notebooks) and must be FILE objects, so they go
+# through workspace.upload(), not the notebook importer. The target location is a
+# plain workspace folder (NOT a git Repo), so this script is the deployment path.
+MODULE_DIRS = [
+    ("dtc/python", "/Workspace/Repos/beproduct-sync/DTC/python"),
 ]
 
 
@@ -207,6 +210,75 @@ def upload_notebooks_to_databricks(
     return uploaded, failed
 
 
+def upload_modules_to_databricks(
+    local_dir: str,
+    workspace_path: str,
+    dry_run: bool = False,
+) -> tuple[int, int]:
+    """
+    Upload Python module files (.py) as importable workspace FILES, preserving the
+    directory structure and the .py extension (so `import` resolves them). Skips
+    __pycache__ / compiled artifacts.
+    """
+    try:
+        from databricks.sdk import WorkspaceClient
+        from databricks.sdk.service.workspace import ImportFormat
+    except ImportError:
+        print(ERR("✗ 'databricks-sdk' is not installed.  Run: pip install databricks-sdk"))
+        sys.exit(1)
+
+    base = Path(local_dir)
+    if not base.exists():
+        print(ERR(f"✗ Local directory not found: {local_dir}"))
+        return 0, 0
+
+    files: list[tuple[Path, str]] = []
+    for p in sorted(base.rglob("*.py")):
+        if "__pycache__" in p.parts:
+            continue
+        rel = p.relative_to(base)
+        remote = workspace_path + "/" + str(rel).replace("\\", "/")  # keep .py
+        files.append((p, remote))
+
+    if not files:
+        print(WARN(f"  ⚠  No module files found in {local_dir}"))
+        return 0, 0
+
+    print(INFO(f"\n  Found {len(files)} module file(s) in {local_dir}/"))
+    if dry_run:
+        print(BOLD("\n  📋 Dry Run - Preview (as FILES):"))
+        for local_path, remote_path in files:
+            print(f"    {local_path} → {remote_path}")
+        return len(files), 0
+
+    import io
+    w = WorkspaceClient()
+    uploaded = failed = 0
+    # Ensure parent dirs exist (mkdirs is idempotent).
+    made_dirs = set()
+    for local_path, remote_path in files:
+        parent = remote_path.rsplit("/", 1)[0]
+        if parent not in made_dirs:
+            try:
+                w.workspace.mkdirs(parent)
+            except Exception:
+                pass
+            made_dirs.add(parent)
+        try:
+            with open(local_path, "rb") as f:
+                content = f.read()
+            w.workspace.upload(
+                remote_path, io.BytesIO(content),
+                format=ImportFormat.AUTO, overwrite=True,
+            )
+            print(OK(f"  ✅ {local_path.relative_to(base)} → {remote_path}"))
+            uploaded += 1
+        except Exception as exc:
+            print(ERR(f"  ✗ Failed: {local_path.name} - {str(exc)[:80]}"))
+            failed += 1
+    return uploaded, failed
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────────────────────────────────────
@@ -225,6 +297,14 @@ def main() -> None:
         "--dry-run",
         action="store_true",
         help="Preview uploads without executing",
+    )
+    parser.add_argument(
+        "--notebooks-only", action="store_true",
+        help="Upload only notebooks (skip python module files)",
+    )
+    parser.add_argument(
+        "--modules-only", action="store_true",
+        help="Upload only python module files (skip notebooks)",
     )
     args = parser.parse_args()
 
@@ -257,19 +337,37 @@ def main() -> None:
     total_uploaded = 0
     total_failed = 0
 
-    for local_dir, workspace_path in dirs_to_upload:
-        print()
-        print(BOLD(f"── {local_dir}/ ──"))
-        print(INFO(f"  Target: {workspace_path}"))
+    if not args.modules_only:
+        for local_dir, workspace_path in dirs_to_upload:
+            print()
+            print(BOLD(f"── {local_dir}/  (notebooks) ──"))
+            print(INFO(f"  Target: {workspace_path}"))
 
-        uploaded, failed = upload_notebooks_to_databricks(
-            local_dir=local_dir,
-            workspace_path=workspace_path,
-            dry_run=args.dry_run,
-        )
+            uploaded, failed = upload_notebooks_to_databricks(
+                local_dir=local_dir,
+                workspace_path=workspace_path,
+                dry_run=args.dry_run,
+            )
+            total_uploaded += uploaded
+            total_failed += failed
 
-        total_uploaded += uploaded
-        total_failed += failed
+    # Python module files (FILES, not notebooks).
+    if not args.notebooks_only:
+        module_dirs = MODULE_DIRS
+        if args.dir:
+            module_dirs = [(l, r) for l, r in MODULE_DIRS if l.startswith(args.dir)]
+        for local_dir, workspace_path in module_dirs:
+            print()
+            print(BOLD(f"── {local_dir}/  (modules → FILES) ──"))
+            print(INFO(f"  Target: {workspace_path}"))
+
+            uploaded, failed = upload_modules_to_databricks(
+                local_dir=local_dir,
+                workspace_path=workspace_path,
+                dry_run=args.dry_run,
+            )
+            total_uploaded += uploaded
+            total_failed += failed
 
     # ── 4. Summary ───────────────────────────────────────────────────────────
     print()
