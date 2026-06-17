@@ -87,8 +87,8 @@ To join DTC with BeProduct:
 
 ```sql
 -- DTC data
-SELECT * FROM lft.beproduct.dtc_master_chart_uat
-WHERE brand = 'Wrangler Western'
+SELECT * FROM lft.beproduct.dtc_wip_ktb
+WHERE brands = 'Wrangler Western'
   AND season_code = 'SS28'
   AND lf_style_number = 'ABC123'
 
@@ -155,74 +155,74 @@ the styles table's `season` column during the join.)
 
 ## DTC Data Table Structure
 
-### Current: `lft.beproduct.dtc_master_chart_uat`
+### Pull target: `lft.beproduct.dtc_wip_<customer>`
 
-After implementing this clarification, table will include:
+`dtc/notebooks/pull_requests_to_delta.py` writes **one row per DTC sheet row**
+across all in-scope requests for a customer into a single Delta table — e.g.
+`lft.beproduct.dtc_wip_ktb` (customer lowercased). The DataFrame is built from an
+**explicit `StructType`** (`FIXED_FIELDS` in the notebook), *not* inferred, so a
+request with few rows / an all-NULL column does not trip Spark's
+`CANNOT_DETERMINE_TYPE` error.
 
-**Extraction Columns** (from request name):
-- `dtc_customer`: Customer code from DTC (e.g., "KTB")
-- `season_code`: Season code from request name (e.g., "SS28")
-- `brand`: Brand from request name (e.g., "Wrangler Western")
+**Fixed columns:**
 
-**Mapping Columns** (joined from mapping table):
-- `beproduct_season`: Mapped season (e.g., "Spring")
-- `beproduct_year`: Mapped year (e.g., 2028)
+| Column | Type | Source / purpose |
+|--------|------|------------------|
+| `customer` | STRING | `customer` widget |
+| `workspace_name` | STRING | `dtc_workspace` widget |
+| `document_name` | STRING | registry `document_name` |
+| `request_id` | STRING | DTC request ID |
+| `request_reference` | STRING | request name, e.g. `KTB FW28 Wrangler` |
+| `season_code` | STRING | registry (parsed from request name) |
+| `brands` | STRING | registry (parsed from request name) |
+| `row_id` | STRING | DTC `rowId` — key for UPDATE (PATCH) |
+| `row_index` | LONG | DTC `rowIndex` — key for INSERT / DELETE |
+| `lf_style_number` | STRING | normalized `LF Style#` (match key) |
+| `color_wash` | STRING | normalized `Color / Wash` (match key) |
+| `extracted_at` | TIMESTAMP | when pulled from the DTC API |
+| `data_json` | STRING | full DTC row as JSON (full fidelity) |
 
-**Original DTC Columns**:
-- `lf_style_number`: Unique identifier for product style (from column in DTC)
-- [110 other product columns from DTC]
+**Dynamic columns:** every DTC view column is also flattened to
+`col_<normalized_name>` as **STRING** (e.g. `Product Status` → `col_product_status`,
+value stringified). Empty view columns may be absent for a given request; the
+notebook aligns the union across requests by name and casts any missing column to
+STRING. Untyped full fidelity always remains in `data_json`.
 
-**Metadata Columns**:
-- `row_id`: DTC internal row UUID (for API operations)
-- `request_id`: DTC request ID
-- `request_reference`: Request name (for reference)
-- `document_name`: Document name
-- `request_status`: Status
-- `request_is_active`: Active flag
-- `updated_at`: Last update time in DTC
-- `fetched_at`: When pulled from DTC API
-- `sync_timestamp`: When written to Databricks
-- `sync_date`: Date of sync
+### Keys
 
-### Primary Keys
+**For DTC operations** (push): `row_id` → UPDATE via PATCH; `row_index` →
+INSERT / DELETE (PATCH cannot mix the two — separate batches).
 
-**For DTC Operations**:
-- `row_id` — Used for PATCH/DELETE in push
+**In-request match key:** `(lf_style_number, color_wash)` — season & brand are
+fixed per request, so they don't vary within it.
 
-**For BeProduct Joins**:
-- Composite: `(dtc_customer, brand, season_code, lf_style_number)`
-- Maps to BeProduct: `(customer, brand, season, year, lf_style_number)`
+**Cross-request identity:** `(customer, season_code, brands, lf_style_number,
+color_wash)`.
 
 ### Table Properties
 
-Store non-varying metadata as table properties:
-```sql
-SHOW TBLPROPERTIES lft.beproduct.dtc_master_chart_uat;
-
--- Properties:
--- workspace_name | KTB
--- document_name | KTB WIP
--- dtc_customer | KTB
--- owner_name | ...
--- owner_email | ...
-```
+The table carries **no `TBLPROPERTIES`** — per-request metadata lives in the row
+columns above and in the control table `lft.beproduct.dtc_request_registry`
+(`last_extracted`, `row_count`, etc.).
 
 ---
 
 ## Notebook Parameters
 
-All extraction parameters should be parameterized:
+`pull_requests_to_delta.py` widgets:
 
-| Parameter | Example | Purpose |
+| Parameter | Default | Purpose |
 |-----------|---------|---------|
-| `dtc_workspace_name` | `KTB` | DTC workspace to access |
-| `dtc_request_id` | `69f076f0b7247a661226be9a` | Which request to pull |
-| `dtc_environment` | `uat` | Environment (uat/prod) |
-| `dtc_customer` | `KTB` | Customer code in DTC |
-| `beproduct_customer` | `KTB` | Customer code in BeProduct |
-| `target_catalog` | `lft` | Databricks catalog |
-| `target_schema` | `beproduct` | Databricks schema |
-| `target_table` | `dtc_master_chart_uat` | Target table name |
+| `dtc_environment` | `uat` | Environment (uat/prod); selects the `dtc_api_key_<env>` secret |
+| `customer` | `KTB` | Customer; also the table suffix `dtc_wip_<customer>` |
+| `dtc_workspace` | `KTB` | DTC workspace name |
+| `catalog` | `lft` | Databricks catalog |
+| `schema` | `beproduct` | Databricks schema |
+| `write_mode` | `overwrite` | `overwrite` \| `append` |
+
+The target table name is **derived** (`dtc_wip_<customer>`), not a parameter.
+Request discovery is registry-driven (`dtc_request_registry`), so there is no
+single `request_id` parameter here.
 
 ---
 
