@@ -38,6 +38,28 @@ from datetime import datetime, timezone
 from connectors.dtc import DTCConnector
 from sync import phase1
 from pyspark.sql import functions as F
+from pyspark.sql.types import (
+    StructType, StructField, StringType, LongType, TimestampType,
+)
+
+# Explicit schema for the fixed (non-dynamic) columns. Building the DataFrame with
+# an explicit schema avoids Spark's CANNOT_DETERMINE_TYPE error, which is raised
+# when a request has few rows and a column is all-NULL (type cannot be inferred).
+FIXED_FIELDS = [
+    StructField("customer", StringType()),
+    StructField("workspace_name", StringType()),
+    StructField("document_name", StringType()),
+    StructField("request_id", StringType()),
+    StructField("request_reference", StringType()),
+    StructField("season_code", StringType()),
+    StructField("brands", StringType()),
+    StructField("row_id", StringType()),
+    StructField("row_index", LongType()),
+    StructField("lf_style_number", StringType()),
+    StructField("color_wash", StringType()),
+    StructField("extracted_at", TimestampType()),
+    StructField("data_json", StringType()),
+]
 
 dbutils.widgets.text("dtc_environment", "uat", "DTC Environment")
 dbutils.widgets.text("customer", "KTB", "Customer")
@@ -112,7 +134,7 @@ for r in reg_rows:
             "season_code": r.season_code,
             "brands": r.brands,
             "row_id": row.get("rowId"),
-            "row_index": row.get("rowIndex"),
+            "row_index": (int(row["rowIndex"]) if row.get("rowIndex") is not None else None),
             "lf_style_number": phase1.norm(row.get("LF Style#")),
             "color_wash": phase1.norm(row.get("Color / Wash")),
             "extracted_at": now,
@@ -129,7 +151,14 @@ for r in reg_rows:
                             "extracted" if rows else "extracted (empty request)"))
 
     if records:
-        all_spark_dfs.append(spark.createDataFrame(records))
+        # Dynamic col_* set is identical within a request's view; build an explicit
+        # schema (all dynamic cols are strings) so all-NULL columns don't break
+        # type inference. Feed ordered tuples to avoid dict/schema ambiguity.
+        dyn_cols = sorted({k for rec in records for k in rec if k.startswith("col_")})
+        schema = StructType(FIXED_FIELDS + [StructField(c, StringType()) for c in dyn_cols])
+        ordered = [f.name for f in schema.fields]
+        data = [tuple(rec.get(fn) for fn in ordered) for rec in records]
+        all_spark_dfs.append(spark.createDataFrame(data, schema))
 
 connector.close()
 
