@@ -51,26 +51,26 @@ Parsing and the in-scope test live in `dtc/python/sync/phase1.py`
 
 ---
 
+## Registry scan (shared)
+
+The registry is refreshed by the shared helper `sync.registry.refresh` — discover
+(`search_requests`) → enrich by-id → upsert (`mode=merge`, preserving
+`last_extracted` / `last_pushed` / `row_count`). It runs **automatically** inside
+`pull_requests_to_delta` and `dtc_request_manager` (both default
+`refresh_registry=true`), so the registry mirrors the workspace+document each run.
+`00_init_request_registry.py` is the same scan as a standalone notebook (first build
+or targeted `request_ids`); it's optional for routine runs.
+
 ## Workflow: pull DTC requests → Delta
 
-Run in order:
+**`dtc/notebooks/pull_requests_to_delta.py`** scans+refreshes the registry, then
+pulls the `WIP_ITS_USE` view of every in-scope, active request into one table per
+customer: **`lft.beproduct.dtc_wip_<customer>`** (e.g. `dtc_wip_ktb`), updating each
+request's `last_extracted` / `row_count`.
 
-1. **`dtc/notebooks/00_init_request_registry.py`** — builds/refreshes the control
-   table `lft.beproduct.dtc_request_registry`.
-   - `request_ids` **blank → auto-discover** every request in the
-     workspace+document via `DTCConnector.search_requests`; pass IDs to register a
-     specific set.
-   - `mode=merge` (default) upserts on `(environment, request_id)` and **preserves**
-     `last_extracted` / `last_pushed` / `row_count`. Out-of-scope requests are kept
-     with `in_scope = false`.
-2. **`dtc/notebooks/pull_requests_to_delta.py`** — pulls the `WIP_ITS_USE` view of
-   every in-scope, active request into one table per customer:
-   **`lft.beproduct.dtc_wip_<customer>`** (e.g. `dtc_wip_ktb`). It also updates each
-   request's `last_extracted` / `row_count` in the registry.
-
-Parameters (both): `dtc_environment` (uat|prod), `customer` (KTB), `dtc_workspace`
-(KTB), `catalog`/`schema` (lft/beproduct). The registry notebook also takes
-`dtc_document` (KTB WIP) and `mode`; the pull takes `write_mode` (overwrite|append).
+Parameters: `dtc_environment` (uat|prod), `customer` (KTB), `dtc_workspace` (KTB),
+`dtc_document` (KTB WIP), `catalog`/`schema` (lft/beproduct), `write_mode`
+(overwrite|append), `refresh_registry` (true).
 
 ### Output table
 
@@ -97,6 +97,15 @@ DTC → BeProduct direction never reverse-maps it.
   `dtc_request_manager.py` → `beproduct_to_dtc_push.py`. See `dtc/PHASE1_WORKFLOW.md`.
 - **DTC → BeProduct (Phase 2):** `dtc/notebooks/05_push_dtc_to_beproduct.py`. See
   `dtc/PHASE2_WORKFLOW.md`.
+
+### Missing-request creation
+
+`dtc_request_manager.py` **creates** missing **in-scope** DTC requests
+(`POST /v1/sheets`) in `dtc_document`, then re-scans + resolves them. Gated by
+`dry_run` (default `true` = preview/log only; set `false` to create). Names that
+don't parse as `<customer> <seasonCode> <brand>` are logged `NOT_IN_SCOPE` and never
+created. Creation/skip events are written to `beproduct_to_dtc_sync_log`
+(stage `create`).
 
 ---
 

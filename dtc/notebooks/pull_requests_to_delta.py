@@ -27,8 +27,11 @@ Parameters:
   - dtc_environment (default: uat)
   - customer (default: KTB)
   - dtc_workspace (default: KTB)
+  - dtc_document (default: KTB WIP)  -- used when refreshing the registry
   - catalog / schema (default: lft / beproduct)
   - write_mode: overwrite | append (default: overwrite)
+  - refresh_registry (default: true) -- scan workspace+document and upsert the
+    registry (via sync.registry.refresh) before pulling; set false to use as-is
 """
 
 # COMMAND ----------
@@ -40,7 +43,7 @@ import json
 from datetime import datetime, timezone
 
 from connectors.dtc import DTCConnector
-from sync import phase1
+from sync import phase1, registry
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
     StructType, StructField, StringType, LongType, TimestampType,
@@ -73,16 +76,20 @@ WIP_VIEW_NAME = "WIP_ITS_USE"
 dbutils.widgets.text("dtc_environment", "uat", "DTC Environment")
 dbutils.widgets.text("customer", "KTB", "Customer")
 dbutils.widgets.text("dtc_workspace", "KTB", "DTC Workspace")
+dbutils.widgets.text("dtc_document", "KTB WIP", "DTC Document")
 dbutils.widgets.text("catalog", "lft", "Catalog")
 dbutils.widgets.text("schema", "beproduct", "Schema")
 dbutils.widgets.text("write_mode", "overwrite", "overwrite | append")
+dbutils.widgets.text("refresh_registry", "true", "Scan + refresh registry first")
 
 environment = dbutils.widgets.get("dtc_environment").strip().lower()
 customer = dbutils.widgets.get("customer").strip()
 workspace = dbutils.widgets.get("dtc_workspace").strip()
+document = dbutils.widgets.get("dtc_document").strip()
 catalog = dbutils.widgets.get("catalog").strip()
 schema = dbutils.widgets.get("schema").strip()
 write_mode = dbutils.widgets.get("write_mode").strip().lower()
+refresh_registry = dbutils.widgets.get("refresh_registry").strip().lower() in ("true", "1", "yes", "y")
 
 registry_full = f"{catalog}.{schema}.dtc_request_registry"
 target_full = f"{catalog}.{schema}.dtc_wip_{customer.lower()}"
@@ -94,6 +101,25 @@ print(f"  Registry: {registry_full}")
 print(f"  Target:   {target_full}")
 print(f"  Source view: {WIP_VIEW_NAME} (per request, from registry)")
 print(f"  Env: {environment} | Customer: {customer} | write_mode: {write_mode}")
+print(f"  Refresh registry first: {refresh_registry}")
+
+# COMMAND ----------
+
+secret_key = f"dtc_api_key_{environment}"
+api_key = dbutils.secrets.get(scope="beproduct", key=secret_key)
+connector = DTCConnector(api_key=api_key, environment=environment, workspace_name=workspace)
+now = datetime.now(timezone.utc)
+
+# Scan the workspace+document and upsert the registry BEFORE reading it, so newly
+# created/added requests are picked up automatically (mode=merge preserves sync
+# state). Set refresh_registry=false to pull against the registry as-is.
+if refresh_registry:
+    print("\n🔄 Refreshing request registry (scan workspace+document)...")
+    registry.refresh(
+        spark, connector,
+        environment=environment, workspace=workspace, document=document,
+        customer=customer, registry_table=registry_full,
+    )
 
 # COMMAND ----------
 
@@ -106,12 +132,8 @@ reg_rows = spark.table(registry_full).where(
 
 print(f"In-scope active requests to pull: {len(reg_rows)}")
 if not reg_rows:
+    connector.close()
     dbutils.notebook.exit("NO_IN_SCOPE_REQUESTS")
-
-secret_key = f"dtc_api_key_{environment}"
-api_key = dbutils.secrets.get(scope="beproduct", key=secret_key)
-connector = DTCConnector(api_key=api_key, environment=environment, workspace_name=workspace)
-now = datetime.now(timezone.utc)
 
 # COMMAND ----------
 

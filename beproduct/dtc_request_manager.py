@@ -1,22 +1,25 @@
 # Databricks notebook source
 """
-DTC Request Resolver / Validator (Phase 1)
-==========================================
+DTC Request Resolver / Creator (Phase 1)
+========================================
 
-Phase 1 does NOT create DTC requests. Per the agreed scope:
+RESOLVES each distinct request name in the BeProduct staging table against the
+control table (dtc_request_registry) and writes the resolved mapping
+(request_id, sheet_id, view_id) consumed by the push.
 
-  "All would-be requests are pre-created by the project team. If a request that
-   BeProduct data targets does not exist (is not registered / in scope), mark an
-   error. Phase 2 will look at creating missing DTC requests."
+For request names that are **missing but in scope** (parse as
+`<customer> <seasonCode> <brand>` and the customer matches), this notebook will
+**create** the DTC request/sheet via `connector.create_sheet`, then re-scan the
+registry so they resolve. Creation is gated by `dry_run`:
+  - dry_run=true  (default): logs "would create", creates nothing.
+  - dry_run=false:           creates the request in DTC, then registers + resolves.
 
-This notebook therefore RESOLVES each distinct request name in the BeProduct
-staging table against the Phase 1 control table (dtc_request_registry) and:
-  - writes the resolved mapping (request_id, sheet_id, view_id) used by the push
-  - logs an error for every staging request that is missing / out of scope /
-    inactive / lacking a WIP_ITS_USE view  (=> those rows are NOT pushed)
+Names that are NOT in scope (e.g. a brand-less `KTB SS26`) are never created and
+are logged as errors. Inactive / WIP-view-missing requests are also logged.
 
-It never calls DTC to create anything. Run 00_init_request_registry.py first to
-populate the registry.
+Discovery scan: by default it refreshes the registry (sync.registry.refresh) at the
+start so existing DTC requests aren't mistaken for missing (avoids duplicate
+creation), and again after creating new ones.
 
 Schedule: after transform (12:00 UTC), before push.
 
@@ -25,6 +28,10 @@ Parameters:
   - staging_table (default: beproduct_to_dtc_staging)
   - dtc_environment (default: uat)
   - customer (default: KTB)
+  - dtc_workspace (default: KTB)
+  - dtc_document (default: KTB WIP)   -- document new requests are created in
+  - dry_run (default: true)           -- when true, never creates (preview only)
+  - refresh_registry (default: true)  -- scan + upsert registry before resolving
 """
 
 # COMMAND ----------
@@ -34,6 +41,9 @@ sys.path.append("/Workspace/Repos/beproduct-sync/DTC/python")
 
 import uuid
 from datetime import datetime, timezone
+
+from connectors.dtc import DTCConnector
+from sync import phase1, registry
 from pyspark.sql import functions as F
 from pyspark.sql.types import StructType, StructField, StringType, TimestampType
 
@@ -72,12 +82,20 @@ dbutils.widgets.text("schema", "beproduct", "Schema")
 dbutils.widgets.text("staging_table", "beproduct_to_dtc_staging", "Staging Table")
 dbutils.widgets.text("dtc_environment", "uat", "DTC Environment")
 dbutils.widgets.text("customer", "KTB", "In-scope customer token")
+dbutils.widgets.text("dtc_workspace", "KTB", "DTC Workspace")
+dbutils.widgets.text("dtc_document", "KTB WIP", "DTC Document (for created requests)")
+dbutils.widgets.text("dry_run", "true", "Dry run (true = never create)")
+dbutils.widgets.text("refresh_registry", "true", "Scan + refresh registry first")
 
 catalog = dbutils.widgets.get("catalog")
 schema = dbutils.widgets.get("schema")
 staging_table = dbutils.widgets.get("staging_table")
 environment = dbutils.widgets.get("dtc_environment").strip().lower()
 customer = dbutils.widgets.get("customer").strip()
+workspace = dbutils.widgets.get("dtc_workspace").strip()
+document = dbutils.widgets.get("dtc_document").strip()
+dry_run = dbutils.widgets.get("dry_run").strip().lower() in ("true", "1", "yes", "y")
+refresh_registry = dbutils.widgets.get("refresh_registry").strip().lower() in ("true", "1", "yes", "y")
 
 staging_full = f"{catalog}.{schema}.{staging_table}"
 registry_full = f"{catalog}.{schema}.dtc_request_registry"
@@ -88,13 +106,21 @@ run_id = str(uuid.uuid4())
 now = datetime.now(timezone.utc)
 
 print("=" * 80)
-print("DTC REQUEST RESOLVER / VALIDATOR (Phase 1 - no creation)")
+print("DTC REQUEST RESOLVER / CREATOR (Phase 1)")
 print("=" * 80)
 print(f"  Staging:  {staging_full}")
 print(f"  Registry: {registry_full}")
 print(f"  Mapping:  {mapping_full}")
 print(f"  Sync log: {sync_log_full}")
 print(f"  Environment: {environment} | Customer: {customer} | run_id: {run_id}")
+print(f"  Workspace/Document: {workspace} / {document}")
+print(f"  dry_run: {dry_run} (false = create missing in-scope requests) | "
+      f"refresh_registry: {refresh_registry}")
+
+# DTC connector (for the registry scan and request creation).
+secret_key = f"dtc_api_key_{environment}"
+api_key = dbutils.secrets.get(scope="beproduct", key=secret_key)
+connector = DTCConnector(api_key=api_key, environment=environment, workspace_name=workspace)
 
 # COMMAND ----------
 
@@ -122,58 +148,127 @@ for n in req_names:
 
 if not req_names:
     print("⚠️  No pending staging rows - nothing to resolve")
+    connector.close()
     dbutils.notebook.exit("NO_PENDING_ROWS")
 
-# In-scope registry entries for this environment.
-reg = spark.table(registry_full).where(
-    (F.col("environment") == environment) & (F.col("in_scope") == True)  # noqa: E712
-)
-reg_by_name = {r.request_reference: r for r in reg.collect()}
+# Scan the workspace+document and upsert the registry first, so requests that
+# already exist in DTC are present here (prevents trying to re-create them).
+if refresh_registry:
+    print("\n🔄 Refreshing request registry (scan workspace+document)...")
+    registry.refresh(
+        spark, connector,
+        environment=environment, workspace=workspace, document=document,
+        customer=customer, registry_table=registry_full,
+    )
+
+
+def load_reg_by_name():
+    reg = spark.table(registry_full).where(
+        (F.col("environment") == environment) & (F.col("in_scope") == True)  # noqa: E712
+    )
+    return {r.request_reference: r for r in reg.collect()}
+
+
+def resolve_name(name, reg_by_name):
+    """('ok', mapping_dict) | ('error', (op, reason, detail, request_id)) | ('missing', None)."""
+    entry = reg_by_name.get(name)
+    if entry is None:
+        return ("missing", None)
+    if str(entry.request_is_active).upper() not in ("Y", "TRUE", "1"):
+        return ("error", ("REQUEST_INACTIVE", "request_inactive",
+                          f"request_is_active={entry.request_is_active}", entry.request_id))
+    if not entry.view_id or entry.view_name != "WIP_ITS_USE":
+        return ("error", ("WIP_VIEW_MISSING", "wip_view_missing",
+                          f"view_name={entry.view_name}", entry.request_id))
+    return ("ok", {
+        "environment": environment, "dtc_request_name": name,
+        "request_id": entry.request_id, "sheet_id": entry.sheet_id,
+        "view_id": entry.view_id, "season_code": entry.season_code,
+        "brands": entry.brands, "resolved_at": now,
+    })
 
 # COMMAND ----------
 
+reg_by_name = load_reg_by_name()
 resolved_rows = []   # for dtc_request_mapping (rows the push will process)
-log_rows = []        # errors for unresolved requests
+log_rows = []        # errors / create events
+missing = []         # names not present in the registry
 
+# Pass 1: resolve against the current registry.
 for name in req_names:
-    entry = reg_by_name.get(name)
-    if entry is None:
-        reason = "request_not_found"
-        detail = (f"No in-scope registry entry for '{name}'. Phase 1 does not "
-                  f"create requests; register it (00_init_request_registry) or "
-                  f"have the project team pre-create it.")
+    status, payload = resolve_name(name, reg_by_name)
+    if status == "ok":
+        print(f"  ✅ {name}: resolved -> request_id={payload['request_id']}")
+        resolved_rows.append(payload)
+    elif status == "error":
+        op, reason, detail, rid = payload
         print(f"  ❌ {name}: {reason}")
-        log_rows.append((now, run_id, "resolve", environment, name, None, "REQUEST_NOT_FOUND",
+        log_rows.append((now, run_id, "resolve", environment, name, rid, op,
                          None, None, None, "error", reason, detail, None))
-        continue
+    else:
+        missing.append(name)
 
-    if str(entry.request_is_active).upper() not in ("Y", "TRUE", "1"):
-        reason = "request_inactive"
-        print(f"  ❌ {name}: {reason} (is_active={entry.request_is_active})")
-        log_rows.append((now, run_id, "resolve", environment, name, entry.request_id,
-                         "REQUEST_INACTIVE", None, None, None, "error", reason,
-                         f"request_is_active={entry.request_is_active}", None))
-        continue
+# Partition missing names: in-scope can be created; others cannot.
+to_create = [n for n in missing if phase1.is_in_scope(n, customer)]
+not_creatable = [n for n in missing if not phase1.is_in_scope(n, customer)]
 
-    if not entry.view_id or entry.view_name != "WIP_ITS_USE":
-        reason = "wip_view_missing"
-        print(f"  ❌ {name}: {reason} (view={entry.view_name})")
-        log_rows.append((now, run_id, "resolve", environment, name, entry.request_id,
-                         "WIP_VIEW_MISSING", None, None, None, "error", reason,
-                         f"view_name={entry.view_name}", None))
-        continue
+for name in not_creatable:
+    detail = (f"'{name}' does not parse as '<customer> <seasonCode> <brand>' for "
+              f"customer {customer} (e.g. missing brand) - cannot create.")
+    print(f"  ❌ {name}: not_in_scope (cannot create)")
+    log_rows.append((now, run_id, "resolve", environment, name, None, "NOT_IN_SCOPE",
+                     None, None, None, "error", "not_in_scope", detail, None))
 
-    print(f"  ✅ {name}: resolved -> request_id={entry.request_id}")
-    resolved_rows.append({
-        "environment": environment,
-        "dtc_request_name": name,
-        "request_id": entry.request_id,
-        "sheet_id": entry.sheet_id,
-        "view_id": entry.view_id,
-        "season_code": entry.season_code,
-        "brands": entry.brands,
-        "resolved_at": now,
-    })
+# COMMAND ----------
+
+# Create missing in-scope requests (gated by dry_run).
+created_any = False
+if to_create:
+    print(f"\n🛠️  Missing in-scope requests: {len(to_create)} "
+          f"({'DRY RUN - none will be created' if dry_run else 'creating in DTC'})")
+    for name in to_create:
+        if dry_run:
+            print(f"  🅓 {name}: would CREATE (dry_run)")
+            log_rows.append((now, run_id, "create", environment, name, None, "CREATE_REQUEST",
+                             None, None, None, "skipped", "dry_run",
+                             f"would create in document '{document}'", None))
+            continue
+        try:
+            resp = connector.create_sheet(workspace, document, name)
+            rid, sid = resp.get("requestId"), resp.get("sheetId")
+            created_any = True
+            print(f"  ✅ {name}: CREATED request_id={rid} sheet_id={sid}")
+            log_rows.append((now, run_id, "create", environment, name, rid, "CREATE_REQUEST",
+                             None, None, None, "created", "", f"sheet_id={sid}", None))
+        except Exception as e:
+            print(f"  ❌ {name}: create failed: {e}")
+            log_rows.append((now, run_id, "create", environment, name, None, "CREATE_REQUEST",
+                             None, None, None, "error", "create_failed", str(e)[:300], None))
+
+# Re-scan + re-resolve the newly created requests.
+if created_any:
+    print("\n🔄 Re-scanning registry to register newly created requests...")
+    registry.refresh(
+        spark, connector,
+        environment=environment, workspace=workspace, document=document,
+        customer=customer, registry_table=registry_full,
+    )
+    reg_by_name = load_reg_by_name()
+    for name in to_create:
+        status, payload = resolve_name(name, reg_by_name)
+        if status == "ok":
+            print(f"  ✅ {name}: resolved after create -> request_id={payload['request_id']}")
+            resolved_rows.append(payload)
+        elif status == "error":
+            op, reason, detail, rid = payload
+            log_rows.append((now, run_id, "resolve", environment, name, rid, op,
+                             None, None, None, "error", reason, detail, None))
+        else:
+            log_rows.append((now, run_id, "resolve", environment, name, None, "REQUEST_NOT_FOUND",
+                             None, None, None, "error", "not_found_after_create",
+                             "created but not yet discoverable", None))
+
+connector.close()
 
 # COMMAND ----------
 

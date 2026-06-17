@@ -59,16 +59,18 @@ Only BeProduct-owned columns are pushed (`Style Image` excluded). DTC-owned colu
 2. Ensure BeProduct style sync is fresh  beproduct/beproduct_style_sync.py
 3. Transform / denormalize               beproduct/beproduct_to_dtc_transform.py
                                          → lft.beproduct.beproduct_to_dtc_staging
-4. Resolve requests (validate-only)      beproduct/dtc_request_manager.py
+4. Resolve / create requests             beproduct/dtc_request_manager.py
                                          → lft.beproduct.dtc_request_mapping
 5. Upsert + push BeProduct → DTC         beproduct/beproduct_to_dtc_push.py
 ```
 
-Run `00_init_request_registry.py` to (re)build the control table. The table is
-created once and **upserted** thereafter (`mode=merge`, the default), so run it as
-step 0 of each sync to refresh the request set without losing sync state. Leave
-`request_ids` blank to auto-discover every request in the workspace+document; pass
-specific IDs only for targeted re-registration.
+The registry scan (`sync.registry.refresh`) is **shared** and runs automatically
+inside `pull_requests_to_delta` and `dtc_request_manager` (both default
+`refresh_registry=true`), so the registry mirrors the workspace+document at sync
+time. `00_init_request_registry.py` is the same scan as a standalone notebook —
+useful for the first build or targeted `request_ids`, but no longer a mandatory
+step 0 for routine runs. The table is created once and **upserted** thereafter
+(`mode=merge`), so the scan never loses sync state.
 
 ---
 
@@ -80,17 +82,33 @@ Discovery is backed by the **control table**
 in_scope, request_is_active, row_count, last_extracted, last_pushed, msgs, ...]`,
 populated by `00_init_request_registry.py`.
 
-- **Auto-discovery (default):** with `request_ids` blank, the notebook lists every
+- **Auto-discovery (default):** the shared `sync.registry.refresh` lists every
   request in the workspace+document via `DTCConnector.search_requests` (`GET
   /v1/requests` with `workspaceName`+`filters` in the **body**), then enriches each
-  by-id (`get_request` + `get_views`). The registry therefore mirrors the document
-  at sync time.
-- **Manual override:** pass `request_ids` (comma-separated) to register only those.
+  by-id (`get_request` + `get_views`). Called automatically by
+  `pull_requests_to_delta` and `dtc_request_manager`, and standalone by
+  `00_init_request_registry`.
+- **Manual override:** pass `request_ids` (comma-separated) to `00_init_request_registry`
+  to register only those.
 
 In-scope = reference parses as `<customer> <seasonCode> <brand>` AND the customer
 token matches (e.g. `KTB …` in, `KON …` out). Out-of-scope requests are still
 registered (for audit) with `in_scope = false` and ignored by pull/push. A
 request/view may be empty (0 rows).
+
+### Missing-request creation (`dtc_request_manager`)
+
+When a pending staging request name has no in-scope registry entry, the resolver
+will **create** the DTC request/sheet (`POST /v1/sheets` via
+`connector.create_sheet`) in `dtc_document`, then re-scan + resolve it:
+
+- Only **in-scope** names are created. A name that doesn't parse as
+  `<customer> <seasonCode> <brand>` (e.g. a brand-less `KTB SS26`) is logged as
+  `NOT_IN_SCOPE` and never created.
+- Creation is gated by **`dry_run`** (default `true`): dry-run logs `CREATE_REQUEST`
+  with status `dry_run` and creates nothing; set `dry_run=false` to create.
+- The start-of-run scan means requests that already exist in DTC are registered
+  first, so they resolve instead of being re-created.
 
 **Refresh semantics (`mode=merge`, default):** upsert keyed on
 `(environment, request_id)`. Matched rows refresh metadata / `request_is_active` /

@@ -96,6 +96,18 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`.
 
 ## Decisions on record
 
+- **Phase 1 now CREATES missing in-scope DTC requests (2026-06-17, reverses prior
+  scope).** The earlier rule "Phase 1 does NOT create requests; the project team
+  pre-creates them" is superseded. `dtc_request_manager` creates missing **in-scope**
+  requests (`connector.create_sheet` → `POST /v1/sheets`) in `dtc_document`, then
+  re-scans + resolves. Guardrails: only in-scope names (`<customer> <seasonCode>
+  <brand>`; brand-less names → `NOT_IN_SCOPE`, never created); gated by `dry_run`
+  (default true = preview only). The registry scan is the shared
+  `sync.registry.refresh` (discover → enrich → merge), invoked automatically by
+  `pull_requests_to_delta` and `dtc_request_manager` (default `refresh_registry=true`)
+  and standalone by `00_init_request_registry`. NOTE: `create_sheet` is a live,
+  not-easily-reversible write that still needs a UAT validation run; there is no
+  delete-request in the connector.
 - **Legacy change-tracking pipeline removed (2026-06-17).** The old single-table
   `dtc_master_chart_uat` snapshot/change-log flow (`pull_dtc_to_delta`,
   `01_create_sync_tables`, `02_create_snapshot`, `03_detect_changes`,
