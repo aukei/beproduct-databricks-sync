@@ -66,10 +66,16 @@ BOLD = lambda t: _c("1", t)  # bold
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Notebook directories to upload: (local_dir, workspace_path)
+#
+# ONLY notebooks go through this importer. The Python module packages under
+# dtc/python (`connectors`, `client`, `sync` -> phase1/phase2/...) are deployed as
+# real importable .py FILES via the git Repo (Databricks Repos pull from origin),
+# NOT as notebooks. Uploading them here would create extension-less NOTEBOOK nodes
+# that shadow/duplicate the files and are not importable. The notebooks add
+# "/Workspace/Repos/beproduct-sync/DTC/python" to sys.path and import those files.
 NOTEBOOK_DIRS = [
     ("beproduct", "/Workspace/Repos/beproduct-sync/beproduct"),
     ("dtc/notebooks", "/Workspace/Repos/beproduct-sync/DTC/notebooks"),
-    ("dtc/python/connectors", "/Workspace/Repos/beproduct-sync/DTC/python/connectors"),
 ]
 
 
