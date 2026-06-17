@@ -73,10 +73,13 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`.
 - Registry refresh is the shared `sync.registry.refresh` (used by
   `00_init_request_registry`, `pull_requests_to_delta`, `dtc_request_manager`):
   `search_requests(workspace, document_name=document)` lists requests, then it
-  **pre-filters on the listed `requestReference` and only reads/registers IN-SCOPE
-  names** by-id (`get_request`/`get_views`). Out-of-scope/foreign requests are
-  skipped entirely — NOT enriched, NOT registered — which is why `get_request` is
-  never called on them (they were the source of HTTP 400 noise). Explicit
+  **drops inactive items** (the list carries an `IsActive` flag — DTC dev confirmed
+  inactive requests 400 on get-by-id; `is_active_item` checks several spellings) and
+  **pre-filters on the listed `requestReference` so only ACTIVE + IN-SCOPE names are
+  read/registered** by-id (`get_request`/`get_views`). Inactive and
+  out-of-scope/foreign requests are skipped entirely — NOT enriched, NOT registered —
+  which is why `get_request` is never called on them (they were the HTTP 400 noise).
+  Explicit
   `request_ids` are read by-id without the pre-filter. Upsert `mode=merge` preserves
   `last_extracted`/`last_pushed`/`row_count`; `replace` wipes them.
 - Allowed columns must come from the **view definition** (`GET /v1/views/{viewId}` →

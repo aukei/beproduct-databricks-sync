@@ -20,6 +20,25 @@ from . import phase1
 
 WIP_VIEW_NAME = "WIP_ITS_USE"
 
+# The requests-list item carries an active flag (DTC dev: "IsActive"). Inactive
+# requests 400 on get-by-id, so discovery drops them. Casing in the list may differ
+# from the by-id field (`requestIsActive`), so check several spellings.
+ACTIVE_FLAG_KEYS = ("requestIsActive", "isActive", "IsActive", "active", "requestActive")
+
+
+def is_active_item(item: Dict[str, Any]) -> bool:
+    """True unless the list item carries an explicit falsey active flag.
+
+    Inactive requests (IsActive=false) 400 on get-by-id, so discovery skips them.
+    If none of the known flag keys is present, default to True so a differently
+    named field doesn't silently drop every request.
+    """
+    for k in ACTIVE_FLAG_KEYS:
+        v = item.get(k)
+        if v is not None:
+            return str(v).strip().lower() in ("y", "true", "1", "yes")
+    return True
+
 # Column order of the registry table (also the order fed to createDataFrame).
 REGISTRY_COLS = [
     "environment", "workspace_name", "document_name", "customer",
@@ -199,11 +218,13 @@ def refresh(
     (Re)discover + enrich + upsert the request registry.
 
     - `request_ids` blank/None → auto-discover requests in workspace+document, then
-      pre-filter on the listed `requestReference` so only IN-SCOPE names are read
-      by-id (`get_request`/`get_views`) and registered. Out-of-scope/foreign requests
-      are skipped entirely (no by-id call → no HTTP 400, no registry rows).
+      drop **inactive** items (IsActive=false; they 400 on get-by-id) and pre-filter
+      on the listed `requestReference` so only ACTIVE + IN-SCOPE names are read by-id
+      (`get_request`/`get_views`) and registered. Inactive and out-of-scope/foreign
+      requests are skipped entirely (no by-id call → no HTTP 400, no registry rows).
     - `request_ids` given → enrich exactly those ids (targeted; no pre-filter).
-    - Returns a summary: {discovered, skipped_out_of_scope, registered, in_scope, rows}.
+    - Returns a summary: {discovered, skipped_inactive, skipped_out_of_scope,
+      registered, in_scope, rows}.
     """
     now = now or datetime.now(timezone.utc)
     ensure_table(spark, registry_table)
@@ -215,6 +236,7 @@ def refresh(
     #    requests (which return HTTP 400) and never register them.
     discovered_n = 0
     skipped_oos = 0
+    skipped_inactive = 0
     if request_ids:
         ids_to_enrich = list(request_ids)
         if verbose:
@@ -222,15 +244,19 @@ def refresh(
     else:
         items = discover_requests(connector, workspace, document)
         discovered_n = len(items)
+        # Drop inactive requests first (they 400 on get-by-id), then out-of-scope.
+        active_items = [it for it in items if is_active_item(it)]
+        skipped_inactive = discovered_n - len(active_items)
         ids_to_enrich = [
-            it.get("requestId") for it in items
+            it.get("requestId") for it in active_items
             if phase1.is_in_scope(it.get("requestReference") or "", customer)
         ]
-        skipped_oos = discovered_n - len(ids_to_enrich)
+        skipped_oos = len(active_items) - len(ids_to_enrich)
         if verbose:
             print(f"   registry.refresh: discovered {discovered_n} in workspace={workspace!r}, "
-                  f"document={document!r}; in-scope {len(ids_to_enrich)}; "
-                  f"skipped {skipped_oos} out-of-scope")
+                  f"document={document!r}; active {len(active_items)} "
+                  f"(skipped {skipped_inactive} inactive); in-scope {len(ids_to_enrich)} "
+                  f"(skipped {skipped_oos} out-of-scope)")
 
     rows: List[Dict[str, Any]] = []
     for rid in ids_to_enrich:
@@ -247,6 +273,7 @@ def refresh(
 
     summary = {
         "discovered": discovered_n if not request_ids else len(ids_to_enrich),
+        "skipped_inactive": skipped_inactive,
         "skipped_out_of_scope": skipped_oos,
         "registered": len(rows),
         "in_scope": sum(1 for r in rows if r.get("in_scope")),
@@ -256,5 +283,6 @@ def refresh(
         merge_rows(spark, registry_table, rows, mode=mode)
     if verbose:
         print(f"   registry.refresh: registered={summary['registered']} "
-              f"in_scope={summary['in_scope']} skipped_oos={skipped_oos} (mode={mode})")
+              f"in_scope={summary['in_scope']} skipped_inactive={skipped_inactive} "
+              f"skipped_oos={skipped_oos} (mode={mode})")
     return summary

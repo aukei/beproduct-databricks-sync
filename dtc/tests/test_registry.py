@@ -100,6 +100,14 @@ in_scope = [i for i in items if i.get("requestReference", "").startswith("KTB ")
 check(len(in_scope) == 1 and items[0]["requestReference"] == "KTB FW26 Wrangler",
       "references available for pre-filter (1 KTB in-scope, 1 KON out)")
 
+print("\n[6c] is_active_item: drop only explicit-falsey active flags")
+check(registry.is_active_item({"requestIsActive": "Y"}) is True, "requestIsActive=Y active")
+check(registry.is_active_item({"IsActive": False}) is False, "IsActive=False dropped (dev's flag)")
+check(registry.is_active_item({"isActive": "false"}) is False, "isActive='false' dropped")
+check(registry.is_active_item({"active": 1}) is True, "active=1 active")
+check(registry.is_active_item({"requestReference": "KTB FW26 X"}) is True,
+      "no flag present -> kept (don't silently drop)")
+
 print("\n[7] REGISTRY_COLS matches expected 19-col schema order")
 check(len(registry.REGISTRY_COLS) == 19, "19 registry columns")
 check(registry.REGISTRY_COLS[0] == "environment" and registry.REGISTRY_COLS[4] == "request_id",
