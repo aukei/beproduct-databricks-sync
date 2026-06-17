@@ -425,6 +425,34 @@ if HAS_DATA:
         
         return color_names
 
+    def extract_colorways_detail(record: Dict) -> List[Dict]:
+        """
+        Extract colorway detail (id + name + number) from record.colorways.
+
+        Phase 2 (DTC -> BeProduct) writes the colorway-level "Lot Code"
+        (fieldId drawing_number_walmart) back to a SPECIFIC colorway, which the
+        BeProduct SDK addresses by colorway *id*. The denormalized transform only
+        carries the color *name*, so we must persist the colorway id here and
+        carry it through to the staging table.
+
+        Returns a list of {colorway_id, color_name, color_number}; serialized as
+        JSON into the 'colorways_json' column (kept as a string so the dynamic
+        Delta schema builder treats it as a plain column).
+        """
+        colorways = record.get("colorways", [])
+        if not colorways or not isinstance(colorways, list):
+            return []
+
+        detail = []
+        for cw in colorways:
+            if isinstance(cw, dict) and cw.get("colorName"):
+                detail.append({
+                    "colorway_id": cw.get("id"),
+                    "color_name": str(cw.get("colorName")),
+                    "color_number": cw.get("colorNumber"),
+                })
+        return detail
+
     def extract_bom_materials(header_data: Dict) -> Dict[str, Optional[str]]:
         """
         Extract BOM material fields by field ID.
@@ -526,6 +554,9 @@ if HAS_DATA:
         colorways = extract_colorways(record)
         row["colorways_array"] = colorways
         row["colorways_count"] = len(colorways)
+        # NEW: colorway detail (id + name + number) as JSON, so the DTC transform
+        # can carry colorway_id for Phase 2 (DTC -> BeProduct Lot# pushback).
+        row["colorways_json"] = json.dumps(extract_colorways_detail(record))
         
         # NEW: Extract BOM material fields
         bom_data = extract_bom_materials(header_data)

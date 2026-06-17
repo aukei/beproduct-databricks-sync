@@ -23,14 +23,17 @@ rows inside a request is the colorway. Hence the row identity used for matching
 is (LF Style#, Color / Wash). This is also what the transform's own duplicate
 check uses. RowIndex is therefore numbered per request (= per season+brand).
 
+Phase 1 pushes only BeProduct-OWNED columns (Product Status, Style Description,
+Class, Sub Class, Division, Brand, Garment Finish, Tech Pack Stage, Fabric Group,
+Placement; Style Image excluded). The DTC-owned columns (Legacy Code, Lot#,
+Main Vendor (Sampling), Main Factory (Sampling), Main Factory Customer ID) flow
+the other way (DTC -> BeProduct) and live in sync/phase2.py; they are NOT in
+FIELD_MAPPING so a field is never synced in both directions.
+
 All API I/O lives in connectors.dtc.DTCConnector; this module never calls it.
 The DTC column names below were validated live against the WIP_ITS_USE view
 definition on 2026-06-17 (GET /v1/views/{viewId} -> 178 dynamicFields). The
-column is "Division" (an earlier "Division?" with a trailing '?' was renamed),
-and "Garment Finish", "Tech Pack Stage", "Legacy Code" and
-"Main Vendor (Sampling)" DO exist in the view - the earlier "absent" finding was
-a false negative caused by reading columns from sheet cells (empty columns do
-not surface in sheetData) instead of from the view definition.
+column is "Division" (an earlier "Division?" with a trailing '?' was renamed).
 """
 
 from __future__ import annotations
@@ -56,7 +59,7 @@ FIELD_MAPPING: Dict[str, str] = {
     "lf_style_number": "LF Style#",
     "color": "Color / Wash",
     "brands": "Brand",            # constant per request (== request brand)
-    # --- updatable non-key fields (all confirmed in the WIP_ITS_USE view def) ---
+    # --- updatable non-key fields (BeProduct-owned, pushed BeProduct -> DTC) ---
     "product_status": "Product Status",
     "description": "Style Description",
     "product_category": "Class",
@@ -64,15 +67,22 @@ FIELD_MAPPING: Dict[str, str] = {
     "division": "Division",       # was "Division?"; the '?' column was renamed
     "garment_finish": "Garment Finish",
     "techpack_stage": "Tech Pack Stage",
-    "customer_style_number": "Legacy Code",
-    "lot_code": "Lot#",
-    "parent_vendor": "Main Vendor (Sampling)",
-    "factory": "Main Factory (Sampling)",
     "fabric_group": "Fabric Group",
     "placement": "Placement",
     # --- image (mapped for reference but EXCLUDED from every push) ---
     "front_image_url": STYLE_IMAGE_COL,
 }
+
+# DTC-owned columns: these are written DTC -> BeProduct in Phase 2 and are
+# therefore deliberately NOT in FIELD_MAPPING (we never push them BeProduct -> DTC,
+# to keep each field one-directional and avoid sync loops). See sync/phase2.py.
+#   "Legacy Code", "Lot#", "Main Vendor (Sampling)",
+#   "Main Factory (Sampling)", "Main Factory Customer ID"
+
+# Sentinel written to a stale DTC row's "Product Status" when the BeProduct style
+# behind it has moved to a different request (key change). It is intentionally NOT
+# a valid BeProduct status, so it signals the DTC user that the row is orphaned.
+REMOVED_STATUS = "(removed)"
 
 # DTC columns that form the key and must not be treated as "updatable" diffs.
 # Brand is constant per request so it is key-like for update purposes.
@@ -373,6 +383,61 @@ def norm_brand(value: Any) -> Optional[str]:
     """
     v = norm(value)
     return v.upper() if v is not None else None
+
+
+# ---------------------------------------------------------------------------
+# Orphan / moved-key handling (requirement: point 1)
+# ---------------------------------------------------------------------------
+
+def compute_orphan_marks(
+    dtc_rows: List[Dict[str, Any]],
+    bp_keys_this_request: set,
+    moved_elsewhere_keys: set,
+) -> List[UpsertOp]:
+    """
+    Find DTC rows in THIS request whose BeProduct style has moved to a DIFFERENT
+    request (its key field - LF Style#, brand or season - changed in BeProduct),
+    and produce UPDATE ops that set "Product Status" = REMOVED_STATUS ("(removed)").
+
+    This does NOT delete rows: it flags the stale row so the DTC user sees an
+    invalid status and knows the row migrated to another request. We only mark a
+    row when its (LF Style#, Color / Wash) key:
+      * is NOT present in this request's current BeProduct rows, AND
+      * IS present in BeProduct under a different request (moved_elsewhere_keys).
+    Rows that are simply user-entered / unrelated (key not seen anywhere in
+    BeProduct) are left untouched, and rows already marked are NOOP-skipped.
+
+    Args:
+        dtc_rows:             current DTC rows for this request (need rowId/rowIndex,
+                              "LF Style#", "Color / Wash", "Product Status").
+        bp_keys_this_request: set of (lf, color) keys present in BeProduct for THIS
+                              request (already norm()'d).
+        moved_elsewhere_keys: set of (lf, color) keys present in BeProduct under a
+                              DIFFERENT request (already norm()'d).
+
+    Returns:
+        List of UpsertOp(op="UPDATE", fields={"Product Status": "(removed)"}, row_id=...)
+    """
+    lf_col, color_col = MATCH_KEY_COLS
+    ops: List[UpsertOp] = []
+    for r in dtc_rows:
+        key = _match_key(r, lf_col, color_col)
+        if key == (None, None):
+            continue
+        if key in bp_keys_this_request:
+            continue  # still belongs here
+        if key not in moved_elsewhere_keys:
+            continue  # not a BeProduct-driven move; leave it alone
+        if norm(r.get("Product Status")) == norm(REMOVED_STATUS):
+            continue  # already flagged
+        row_id = r.get("rowId")
+        if not row_id:
+            continue
+        ops.append(UpsertOp(
+            op="UPDATE", match_key=key,
+            fields={"Product Status": REMOVED_STATUS},
+            row_id=row_id, row_index=r.get("rowIndex")))
+    return ops
 
 
 # ---------------------------------------------------------------------------

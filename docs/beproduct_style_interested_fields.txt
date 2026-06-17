@@ -14,6 +14,16 @@ JSONPath conventions (against a Style record from api.style.attributes_list):
     (colorName is a top-level colorway property, not inside .fields.)
   - frontImage is a header-level object: headerData.frontImage.origin
 
+Sync direction (one-way per field; see AGENTS.md "field mapping" for code locations):
+  BeProduct -> DTC (Phase 1, phase1.FIELD_MAPPING):
+    Product Status, Style Description, Class, Sub Class, Division, Brand,
+    Garment Finish, Tech Pack Stage, Fabric Group, Placement
+  DTC -> BeProduct (Phase 2, phase2.REVERSE_*):
+    Legacy Code, Lot#, Main Vendor (Sampling), Main Factory (Sampling),
+    Main Factory Customer ID (no BeProduct target yet -> skipped)
+  key (used for matching, not overwritten): LF Style#, Color / Wash
+  excluded (never pushed): Style Image
+
 DTC column                 | BeProduct field name           | fieldId                  | Location (JSONPath in Style JSON)                          | Notes
 ---------------------------+--------------------------------+--------------------------+------------------------------------------------------------+------------------------------------------------------------
 Product Status             | PRODUCT STATUS                 | style_status             | headerData.fields[id="style_status"].value                 |

@@ -148,9 +148,22 @@ def log(rows, name, request_id, operation, key, status, reason="", detail="", pa
 
 log_rows = []
 totals = {"requests": 0, "updates": 0, "inserts": 0, "noops": 0, "exceptions": 0,
-          "pushed_ok": 0, "push_failed": 0}
+          "orphan_marks": 0, "pushed_ok": 0, "push_failed": 0}
 pushed_keys = {}    # request_name -> set of (lf,color) that reached DTC (or would, dry_run)
 error_keys = {}     # request_name -> set of (lf,color) with exceptions
+
+# Global live-key map for orphan / moved-key detection (requirement: point 1).
+# Built from the FULL staging (all live BeProduct rows, NOT delta-filtered) so we
+# can tell when a (LF Style#, Color) key has MOVED to a different request because
+# a key field (LF Style#, brand or season) changed in BeProduct. A DTC row left
+# behind in the old request is then flagged Product Status="(removed)".
+key_to_requests = {}
+for r in (spark.table(staging_full)
+          .select("dtc_request_name", "lf_style_number", "color").collect()):
+    k = (phase1.norm(r["lf_style_number"]), phase1.norm(r["color"]))
+    if k == (None, None):
+        continue
+    key_to_requests.setdefault(k, set()).add(r["dtc_request_name"])
 
 for name, m in mapping.items():
     totals["requests"] += 1
@@ -159,17 +172,8 @@ for name, m in mapping.items():
     last_pushed = getattr(reg_entry, "last_pushed", None) if reg_entry else None
     print(f"\n--- {name}  (request_id={request_id}) ---")
 
-    # Staging rows for this request (optionally delta-filtered).
-    sdf = df_staging.where(F.col("dtc_request_name") == name)
-    if delta_only and last_pushed is not None:
-        sdf = sdf.where(F.col("beproduct_modified_at") > F.lit(last_pushed))
-    bp_rows = [r.asDict() for r in sdf.collect()]
-    print(f"  BeProduct rows considered: {len(bp_rows)}"
-          + (f" (delta since {last_pushed})" if (delta_only and last_pushed) else ""))
-    if not bp_rows:
-        continue
-
-    # Current DTC rows (live) from the WIP_ITS_USE view.
+    # Current DTC rows (live) from the WIP_ITS_USE view. Read for EVERY resolved
+    # request (even with no BeProduct delta) so moved-out orphans are detected.
     try:
         sheet = connector.get_sheet(sheet_id, view_id)
         dtc_rows = sheet.get("sheetData", [])
@@ -180,58 +184,92 @@ for name, m in mapping.items():
         totals["push_failed"] += 1
         continue
 
-    scope = {"season_code": m.season_code, "brand": m.brands}
-    plan = phase1.compute_upsert(scope, dtc_rows, bp_rows, allowed_cols=allowed)
-    s = plan.summary()
-    totals["updates"] += s["updates"]; totals["inserts"] += s["inserts"]
-    totals["noops"] += s["noops"]; totals["exceptions"] += s["exceptions"]
-    print(f"  plan: {s}")
-
     pushed_keys.setdefault(name, set())
     error_keys.setdefault(name, set())
 
-    # Log exceptions (3c / 4d).
-    for ex in plan.exceptions:
-        log(log_rows, name, request_id, "EXCEPTION", ex.match_key, "error", ex.reason, ex.detail)
-        error_keys[name].add(ex.match_key)
-    # NOOPs (informational) + count as already-synced.
-    for op in plan.noops:
-        log(log_rows, name, request_id, "NOOP", op.match_key, "ok", "no_field_changes")
-        pushed_keys[name].add(op.match_key)
+    # Staging rows for this request (optionally delta-filtered) -> upsert source.
+    sdf = df_staging.where(F.col("dtc_request_name") == name)
+    if delta_only and last_pushed is not None:
+        sdf = sdf.where(F.col("beproduct_modified_at") > F.lit(last_pushed))
+    bp_rows = [r.asDict() for r in sdf.collect()]
+    print(f"  BeProduct rows considered: {len(bp_rows)}"
+          + (f" (delta since {last_pushed})" if (delta_only and last_pushed) else ""))
 
-    # ---- UPDATES (PATCH by rowId, batched) ----
-    upd_sd = phase1.update_sheet_data(plan)
-    for chunk_ops, chunk_sd in zip(phase1.chunked(plan.updates, batch_size),
-                                   phase1.chunked(upd_sd, batch_size)):
-        try:
-            if not dry_run:
-                connector.patch_rows(sheet_id, view_id, chunk_sd)
-            for op in chunk_ops:
-                log(log_rows, name, request_id, "UPDATE", op.match_key, "ok",
-                    "dry_run" if dry_run else "", "", op.fields)
-                pushed_keys[name].add(op.match_key); totals["pushed_ok"] += 1
-        except Exception as e:
-            for op in chunk_ops:
-                log(log_rows, name, request_id, "UPDATE", op.match_key, "error",
-                    "patch_failed", str(e)[:300], op.fields)
-                error_keys[name].add(op.match_key); totals["push_failed"] += 1
+    s = {"updates": 0, "inserts": 0, "noops": 0, "exceptions": 0}
+    if bp_rows:
+        scope = {"season_code": m.season_code, "brand": m.brands}
+        plan = phase1.compute_upsert(scope, dtc_rows, bp_rows, allowed_cols=allowed)
+        s = plan.summary()
+        totals["updates"] += s["updates"]; totals["inserts"] += s["inserts"]
+        totals["noops"] += s["noops"]; totals["exceptions"] += s["exceptions"]
+        print(f"  plan: {s}")
 
-    # ---- INSERTS (PATCH by rowIndex, batched) ----
-    ins_sd = phase1.insert_sheet_data(plan)
-    for chunk_ops, chunk_sd in zip(phase1.chunked(plan.inserts, batch_size),
-                                   phase1.chunked(ins_sd, batch_size)):
-        try:
-            if not dry_run:
-                connector.patch_rows(sheet_id, view_id, chunk_sd)
-            for op in chunk_ops:
-                log(log_rows, name, request_id, "INSERT", op.match_key, "ok",
-                    "dry_run" if dry_run else "", f"rowIndex={op.row_index}", op.fields)
-                pushed_keys[name].add(op.match_key); totals["pushed_ok"] += 1
-        except Exception as e:
-            for op in chunk_ops:
-                log(log_rows, name, request_id, "INSERT", op.match_key, "error",
-                    "patch_failed", str(e)[:300], op.fields)
-                error_keys[name].add(op.match_key); totals["push_failed"] += 1
+        # Log exceptions (3c / 4d).
+        for ex in plan.exceptions:
+            log(log_rows, name, request_id, "EXCEPTION", ex.match_key, "error", ex.reason, ex.detail)
+            error_keys[name].add(ex.match_key)
+        # NOOPs (informational) + count as already-synced.
+        for op in plan.noops:
+            log(log_rows, name, request_id, "NOOP", op.match_key, "ok", "no_field_changes")
+            pushed_keys[name].add(op.match_key)
+
+        # ---- UPDATES (PATCH by rowId, batched) ----
+        upd_sd = phase1.update_sheet_data(plan)
+        for chunk_ops, chunk_sd in zip(phase1.chunked(plan.updates, batch_size),
+                                       phase1.chunked(upd_sd, batch_size)):
+            try:
+                if not dry_run:
+                    connector.patch_rows(sheet_id, view_id, chunk_sd)
+                for op in chunk_ops:
+                    log(log_rows, name, request_id, "UPDATE", op.match_key, "ok",
+                        "dry_run" if dry_run else "", "", op.fields)
+                    pushed_keys[name].add(op.match_key); totals["pushed_ok"] += 1
+            except Exception as e:
+                for op in chunk_ops:
+                    log(log_rows, name, request_id, "UPDATE", op.match_key, "error",
+                        "patch_failed", str(e)[:300], op.fields)
+                    error_keys[name].add(op.match_key); totals["push_failed"] += 1
+
+        # ---- INSERTS (PATCH by rowIndex, batched) ----
+        ins_sd = phase1.insert_sheet_data(plan)
+        for chunk_ops, chunk_sd in zip(phase1.chunked(plan.inserts, batch_size),
+                                       phase1.chunked(ins_sd, batch_size)):
+            try:
+                if not dry_run:
+                    connector.patch_rows(sheet_id, view_id, chunk_sd)
+                for op in chunk_ops:
+                    log(log_rows, name, request_id, "INSERT", op.match_key, "ok",
+                        "dry_run" if dry_run else "", f"rowIndex={op.row_index}", op.fields)
+                    pushed_keys[name].add(op.match_key); totals["pushed_ok"] += 1
+            except Exception as e:
+                for op in chunk_ops:
+                    log(log_rows, name, request_id, "INSERT", op.match_key, "error",
+                        "patch_failed", str(e)[:300], op.fields)
+                    error_keys[name].add(op.match_key); totals["push_failed"] += 1
+
+    # ---- ORPHAN MARKS: DTC rows whose BeProduct key moved to another request ----
+    # Runs for every request (independent of the delta filter): a moved style
+    # leaves a stale row here and inserts into the new request elsewhere.
+    bp_keys_here = {k for k, reqs in key_to_requests.items() if name in reqs}
+    moved_elsewhere = {k for k, reqs in key_to_requests.items() if name not in reqs}
+    orphan_ops = phase1.compute_orphan_marks(dtc_rows, bp_keys_here, moved_elsewhere)
+    if orphan_ops:
+        print(f"  orphan marks (key moved away): {len(orphan_ops)}")
+        orphan_sd = [{**op.fields, "rowId": op.row_id} for op in orphan_ops]
+        for chunk_ops, chunk_sd in zip(phase1.chunked(orphan_ops, batch_size),
+                                       phase1.chunked(orphan_sd, batch_size)):
+            try:
+                if not dry_run:
+                    connector.patch_rows(sheet_id, view_id, chunk_sd)
+                for op in chunk_ops:
+                    log(log_rows, name, request_id, "ORPHAN_MARK", op.match_key, "ok",
+                        "dry_run" if dry_run else "", "Product Status=(removed)", op.fields)
+                    totals["orphan_marks"] += 1; totals["pushed_ok"] += 1
+            except Exception as e:
+                for op in chunk_ops:
+                    log(log_rows, name, request_id, "ORPHAN_MARK", op.match_key, "error",
+                        "patch_failed", str(e)[:300], op.fields)
+                    totals["push_failed"] += 1
 
     # Update registry last_pushed/msgs for this request (skip in dry_run).
     if not dry_run:

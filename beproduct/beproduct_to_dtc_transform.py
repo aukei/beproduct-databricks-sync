@@ -39,9 +39,12 @@ print("=" * 80)
 
 from pyspark.sql.functions import (
     explode, col, lit, concat, concat_ws, current_timestamp, 
-    current_date, array, when, coalesce, upper, trim, size, right, substring
+    current_date, array, when, coalesce, upper, trim, size, right, substring,
+    from_json
 )
-from pyspark.sql.types import StructType, StructField, StringType, TimestampType
+from pyspark.sql.types import (
+    StructType, StructField, StringType, TimestampType, ArrayType
+)
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -145,30 +148,46 @@ print("Step 2: Explode Colorways")
 print("=" * 80)
 
 try:
-    print(f"🔄 Exploding colorways array...")
-    
+    print(f"🔄 Exploding colorway detail (id + name)...")
+
+    # Parse colorways_json (array of {colorway_id, color_name, color_number}).
+    # We explode the DETAIL (not the names-only colorways_array) so each row
+    # carries the colorway_id needed for Phase 2 DTC -> BeProduct Lot# pushback.
+    cw_schema = ArrayType(StructType([
+        StructField("colorway_id", StringType()),
+        StructField("color_name", StringType()),
+        StructField("color_number", StringType()),
+    ]))
+    df_parsed = df_source.withColumn("cw_detail", from_json(col("colorways_json"), cw_schema))
+
     # Filter out styles with no colorways
-    df_with_colors_raw = df_source.where(size(col("colorways_array")) > 0)
-    styles_with_colors = df_with_colors_raw.count()
-    
-    print(f"   Styles with colorways: {styles_with_colors} / {source_count}")
-    
-    # Explode colorways array to create one row per color
-    df_exploded_colors = df_with_colors_raw.withColumn(
-        "color", 
-        explode(col("colorways_array"))
+    df_with_colors_raw = df_parsed.where(
+        col("cw_detail").isNotNull() & (size(col("cw_detail")) > 0)
     )
-    
+    styles_with_colors = df_with_colors_raw.count()
+
+    print(f"   Styles with colorways: {styles_with_colors} / {source_count}")
+
+    # Explode to one row per color, carrying color name + colorway_id.
+    df_exploded_colors = (
+        df_with_colors_raw
+        .withColumn("cw", explode(col("cw_detail")))
+        .withColumn("color", col("cw.color_name"))
+        .withColumn("colorway_id", col("cw.colorway_id"))
+        .drop("cw", "cw_detail")
+    )
+
     exploded_count = df_exploded_colors.count()
     print(f"✅ Exploded to {exploded_count} rows (style × color)")
-    print(f"   Avg colors per style: {exploded_count / styles_with_colors:.1f}")
-    
+    if styles_with_colors:
+        print(f"   Avg colors per style: {exploded_count / styles_with_colors:.1f}")
+
     # Show sample
     print(f"\n   Sample after colorway explosion:")
     df_exploded_colors.select(
-        "lf_style_number", "brands", "color", "main_material_content"
+        "lf_style_number", "brands", "color", "colorway_id", "main_material_content"
     ).show(5, truncate=50)
-    
+
 except Exception as e:
     print(f"❌ Failed to explode colorways: {e}")
     raise
@@ -383,6 +402,7 @@ try:
         col("dtc_request_name"),
         col("lf_style_number"),
         col("color"),
+        col("colorway_id"),          # carried for Phase 2 DTC -> BeProduct Lot# pushback
         col("fabric_group"),
         col("placement"),
         

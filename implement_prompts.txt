@@ -1,10 +1,33 @@
+# bootstrapping
+@docs/requirements.md
+
+# Phase 1  $15
+Base on latest DTC admin guidelines: 
+- For phase 1, Customer = KTB (user param), workspace = ${custome}> = KTB (no change), Document = "${customer} WIP" = "KTB WIP" (no change), view = "WIP_ITS_USE" (no change, user param)
+- All "Requests" in scope are named "${customer} ${DTC seasoncode} ${brands}" e.g. "KTB FW26 Wrangler". There are many requests of the same Document of other names convention in the workspace, ignore them.
+- Tentative flow:
+    1. Upload all Requests to Databricks, 1 table for each ${workspace} + ${customer}, so the Databricks DTC table contains additional [Request ref, Seasoncode, Brands] cols.
+        1a. Perhaps an extra control table that stores [request ID, view id, customer, seasoncode, brands, last_extracted, msgs] for sync control
+        1b. A Request / View can be empty i.e. no rows
+    2. Ensure BeProduct Style is synced - at least last last_extracted should be of same day.
+    3. Data massage - reference "docs/beproduct_style_interested_fields.txt"
+        3a. BeProduct -> DTC: perform upsert on DTC table using BeProduct transformed table on (LF Style#, Seasoncode, Brand), update all indicated non-key fields EXCEPT "Style Image", or write new rows with key fields.
+        3b. RowIndex: it is effectively the row_number() over (partition by Seasoncode, Brands) but DTC allow sparse rowIndex. Therefore in case of update, keep original RowIndex. In case of insert, assign coalesce(max(RowIndex) over (partition by Seasoncode, Brands) + 1,1)
+        3c. log exceptions to sync log table.
+    4. Push back massaged DTC data
+        4a. Require delta push. Updated / new rows should have a modified timestamp > last_extracted tracking
+        4b. for each update row, use PATCH api to push all non key fields. 
+        4c. for each new row, use PATCH api to push all field all fields, with calculated RowIndex value.
+        4d. log detail exceptions to sync log table.
+    5. No push back to BeProduct in this phase.
+
+# phase 1 continue
 how is the sync between DTC and Databricks being handled in current code?
 Read instructions @dtc/PHASE1_WORKFLOW.md and highlight gap.
 
 Implement those missing pieces. Ask for clarification if in any doubt. given 1. always validate with live data. DTC / Databricks / Beproduct credentials are all setup in databricks. 2. use local test first before putting into notebook if unclear about API usage. 3. Sync control is a quick braindump, deliberate proper handling with ref to real data. 4. In case BeProduct data should be written to a DTC request that is not exist, log error in phase1. Phase 2 will look at way to create missing DTC request.
 
-# Clarifications
-
+## Clarifications
 
 
 Request listing/search fails with this UAT key (400 on /v1/requests?workspaceName=KTB; 403 on workspace/document listing). How should in-scope 'KTB <seasoncode> <brands>' requests be discovered in Phase 1?
@@ -17,8 +40,7 @@ For validating the push (PATCH writes mutate live DTC data), how should I procee
 all would-be requests should have been pre-created by project team, and they ought to be empty. if they are not empty, treat as sacrificial (honor the upsert logic anyway). if request does not exist then mark error.
 
 
-
-# TODO
+## TODO
 The implementation is complete and validated against live DTC data. Here's the summary.
 
 What I did
@@ -43,3 +65,21 @@ Notebooks (Spark/Databricks) compile-check clean but can't be executed locally �
 implement_prompts.txt and dtc/PHASE1_WORKFLOW.md show as untracked (pre-existing in your tree).
 Suggested next step: register real in-scope request IDs via 00_init_request_registry.py, then run the push with dry_run=true to inspect the plan in beproduct_to_dtc_sync_log before going live.
 
+# Phase 2  $28
+Phase 2 DTC -> BeProduct seems trivial at this point, maybe add together. In this phase:
+1. cater rows that have key fields updated in beproduct causing DTC rows fall into different request.
+2. these DTC values updated to BeProduct corresponding style and push back to beproduct: "Legacy Code", "Lot#", "Main Vendor (Sampling)", "Main Factory (Sampling)", "Main Factory Customer ID"
+3. High level flow:   BeProduct sync to Databricks + transform, DTC sync to Databricks, Use Beproduct transform to update DTC, use DTC to update BeProduct transformed (*1), Push back DTC, Push back BeProduct.
+4. (*1) BeProduct Transformed is denormalized by color & (To be) material. Since at least "Lot#" is on colorway array, so may need a reverse transform to BeProduct raw style before push back. Evaluate whether a direct from transformed table pushback or this make more sense.
+
+## Clarifications
+The interested-fields doc lists 'Main Factory Customer ID' with a BLANK BeProduct source — there is no mapped BeProduct field. Where should DTC's value be written on pushback?
+Skip it for now
+Point 1: when a BeProduct key field (LF Style#, brand, or season) changes, the row's DTC request changes (e.g. brand Wrangler→Lee moves it to a different request). The new request gets an INSERT. What about the now-stale row left in the OLD request?
+mark stale DTC row "Product Status" to "(removed)" - this is not a valid BeProduct value, so act as a signal to DTC user .
+
+# Tidy up 2026/06/17
+1. rewrite  @dtc/PHASE1_WORKFLOW.md  similar to PHASE2_WORKFLOW documenting BeProduct to DTC dataflow. I have backup its original content to @implement_prompts.txt  for my own future reference. 
+2. what is the best way to refactory docs / agent notes so that subsequent changes to field mapping via another kilo agent can pick up all the previous discovery?
+3. commit and update databricks notebook. 
+4. give a summary of steps to run the 2 workflows.

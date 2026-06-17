@@ -49,24 +49,27 @@ for bad in ["KTB Wrangler", "KTB SPRING Wrangler", ""]:
     except ValueError:
         check(True, f"invalid reference {bad!r} raises")
 
-print("\n[3] build_target_payload() - Style Image excluded, view-def filtering")
+print("\n[3] build_target_payload() - Style Image excluded, DTC-owned fields not pushed")
 bp = {
     "lf_style_number": "WMG-J876-263 001", "color": "Croc print", "brands": "Wrangler",
     "product_status": "Production", "description": "DESC", "division": "Modern Global",
     "front_image_url": "http://img", "garment_finish": "X", "techpack_stage": "Y",
-    "customer_style_number": "LEG123", "parent_vendor": "VEND",
+    # DTC-owned (Phase 2) source columns - must NOT be pushed BeProduct -> DTC:
+    "customer_style_number": "LEG123", "parent_vendor": "VEND", "lot_code": "L9",
+    "factory": "FAC",
 }
-# All of these now exist in the live WIP_ITS_USE view definition.
 allowed = {"LF Style#", "Color / Wash", "Brand", "Product Status",
            "Style Description", "Division", "Garment Finish", "Tech Pack Stage",
-           "Legacy Code", "Main Vendor (Sampling)", STYLE_IMAGE_COL}
+           "Legacy Code", "Main Vendor (Sampling)", "Lot#", "Main Factory (Sampling)",
+           STYLE_IMAGE_COL}
 pl = build_target_payload(bp, allowed_cols=allowed, include_keys=True)
 check(STYLE_IMAGE_COL not in pl, "Style Image excluded from payload")
 check(pl.get("Division") == "Modern Global", "division -> 'Division' (renamed, no '?')")
 check(pl.get("Garment Finish") == "X" and pl.get("Tech Pack Stage") == "Y",
-      "Garment Finish / Tech Pack Stage now mapped & included")
-check(pl.get("Legacy Code") == "LEG123" and pl.get("Main Vendor (Sampling)") == "VEND",
-      "Legacy Code / Main Vendor (Sampling) mapped & included")
+      "BeProduct-owned Garment Finish / Tech Pack Stage included")
+check(not any(c in pl for c in ("Legacy Code", "Main Vendor (Sampling)", "Lot#",
+              "Main Factory (Sampling)")),
+      "DTC-owned fields NOT pushed BeProduct->DTC (one-way partition)")
 # allowed_cols still filters out columns absent from a given view.
 pl_filtered = build_target_payload(
     bp, allowed_cols={"LF Style#", "Color / Wash", "Brand", "Product Status"},
@@ -153,6 +156,28 @@ try:
     check(False, "patch_rows should reject mixed rowId/rowIndex")
 except ValueError:
     check(True, "patch_rows rejects mixed rowId/rowIndex batch")
+
+print("\n[10] compute_orphan_marks() - moved-key rows flagged '(removed)'")
+dtc_rows_o = [
+    # stale: key moved to a different request (in moved_elsewhere) -> mark
+    {"rowId": "o1", "rowIndex": 2, "LF Style#": "S1", "Color / Wash": "Black",
+     "Product Status": "Production"},
+    # still in this request -> leave
+    {"rowId": "o2", "rowIndex": 3, "LF Style#": "S2", "Color / Wash": "Blue",
+     "Product Status": "Proto"},
+    # user-entered / unknown key (not in BeProduct anywhere) -> leave
+    {"rowId": "o3", "rowIndex": 4, "LF Style#": "USER", "Color / Wash": "Red",
+     "Product Status": "Proto"},
+    # already flagged -> skip (NOOP)
+    {"rowId": "o4", "rowIndex": 5, "LF Style#": "S9", "Color / Wash": "Green",
+     "Product Status": "(removed)"},
+]
+bp_here = {("S2", "Blue")}
+moved = {("S1", "Black"), ("S9", "Green")}
+omarks = phase1.compute_orphan_marks(dtc_rows_o, bp_here, moved)
+check(len(omarks) == 1 and omarks[0].row_id == "o1", "only the moved, unflagged row is marked")
+check(omarks[0].fields == {"Product Status": phase1.REMOVED_STATUS},
+      "mark sets Product Status='(removed)'")
 
 print("\n" + "=" * 70)
 if _failures:
