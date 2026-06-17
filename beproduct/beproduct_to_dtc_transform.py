@@ -272,27 +272,35 @@ try:
     
     df_season_mapping.show(truncate=False)
     
+    # Rename mapping columns to non-colliding names. The styles side already has a
+    # `season` column, and Spark matches names case-insensitively, so joining
+    # against a mapping column also named SEASON makes `col("season")` AMBIGUOUS.
+    df_map = (df_season_mapping
+              .withColumnRenamed("CUSTOMER", "map_customer")
+              .withColumnRenamed("SEASON", "map_season")
+              .withColumnRenamed("DTCCODE", "map_dtccode"))
+    
     # Join with denormalized data on (CUSTOMER, SEASON), case-insensitive.
     # The mapping is on the season *prefix* only; the year supplies the YY suffix.
     print(f"\n🔄 Joining with season mapping...")
     print(f"   Match on: CUSTOMER={customer_code}, SEASON=season (case-insensitive)")
     
     df_with_season = df_denormalized.join(
-        df_season_mapping,
+        df_map,
         on=[
-            (upper(lit(customer_code)) == upper(df_season_mapping.CUSTOMER)),
-            (upper(col("season")) == upper(df_season_mapping.SEASON))
+            (upper(lit(customer_code)) == upper(col("map_customer"))),
+            (upper(col("season")) == upper(col("map_season")))
         ],
         how="left"
     )
     
     # Derive DTC SeasonCode = DTCCODE + last 2 digits of year
     # (e.g. 'SS' + '28' = 'SS28'). `year` is a STRING, so right() is applied
-    # directly; rows with no mapping match (DTCCODE NULL) stay NULL.
+    # directly; rows with no mapping match (map_dtccode NULL) stay NULL.
     df_with_season = df_with_season.withColumn(
         "season_code",
-        when(col("DTCCODE").isNotNull() & col("year").isNotNull(), 
-             concat(col("DTCCODE"), right(col("year"), 2)))
+        when(col("map_dtccode").isNotNull() & col("year").isNotNull(), 
+             concat(col("map_dtccode"), right(col("year"), 2)))
         .otherwise(lit(None))
     )
     
