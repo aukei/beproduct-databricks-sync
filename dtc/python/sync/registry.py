@@ -52,11 +52,21 @@ REGISTRY_COLS = [
 # Pure helpers (no Spark) - unit-testable
 # ---------------------------------------------------------------------------
 
-def discover_requests(connector, workspace: str, document: str) -> List[Dict[str, Any]]:
+# Server-side list filter: only return active requests (DTC dev: inactive requests
+# 400 on get-by-id, so exclude them at the source).
+ACTIVE_LIST_FILTER = {"requestIsActive": "Y"}
+
+
+def discover_requests(
+    connector, workspace: str, document: str, *, active_only: bool = True
+) -> List[Dict[str, Any]]:
     """Return the distinct raw request dicts (deduped by requestId) from
-    search_requests. Each carries at least requestId + requestReference, which lets
-    callers pre-filter to in-scope names BEFORE doing any by-id read."""
-    discovered = connector.search_requests(workspace, document_name=document)
+    search_requests. With active_only (default) the list is filtered server-side to
+    active requests (`requestIsActive=Y`). Each item carries at least requestId +
+    requestReference, letting callers pre-filter to in-scope names before any by-id
+    read."""
+    filters = dict(ACTIVE_LIST_FILTER) if active_only else None
+    discovered = connector.search_requests(workspace, document_name=document, filters=filters)
     out: List[Dict[str, Any]] = []
     seen = set()
     for r in discovered:
@@ -242,9 +252,10 @@ def refresh(
         if verbose:
             print(f"   registry.refresh: enriching {len(ids_to_enrich)} explicit request id(s)")
     else:
+        # Server-side filter already excludes inactive (requestIsActive=Y); the
+        # client-side is_active_item below is a cheap guard in case it's ignored.
         items = discover_requests(connector, workspace, document)
         discovered_n = len(items)
-        # Drop inactive requests first (they 400 on get-by-id), then out-of-scope.
         active_items = [it for it in items if is_active_item(it)]
         skipped_inactive = discovered_n - len(active_items)
         ids_to_enrich = [

@@ -78,15 +78,18 @@ class FakeConn:
     def __init__(self, items):
         self.items = items
         self.called_with = None
+        self.filters = None
 
-    def search_requests(self, ws, document_name=None):
+    def search_requests(self, ws, document_name=None, filters=None):
         self.called_with = (ws, document_name)
+        self.filters = filters
         return self.items
 
 conn = FakeConn([{"requestId": "a"}, {"requestId": "a"}, {"requestId": "b"}, {}, {"requestId": None}])
 ids = registry.discover_request_ids(conn, "KTB", "KTB WIP")
 check(ids == ["a", "b"], f"deduped/ordered ids == ['a','b'] (got {ids})")
 check(conn.called_with == ("KTB", "KTB WIP"), "search_requests called with workspace+document")
+check(conn.filters == {"requestIsActive": "Y"}, "active filter sent server-side (requestIsActive=Y)")
 
 print("\n[6b] discover_requests keeps full dicts (for reference pre-filter)")
 conn2 = FakeConn([

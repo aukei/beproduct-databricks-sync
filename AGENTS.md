@@ -72,9 +72,10 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`.
   **request body** (not query params; query param → 400 "Invalid workspaceName").
 - Registry refresh is the shared `sync.registry.refresh` (used by
   `00_init_request_registry`, `pull_requests_to_delta`, `dtc_request_manager`):
-  `search_requests(workspace, document_name=document)` lists requests, then it
-  **drops inactive items** (the list carries an `IsActive` flag — DTC dev confirmed
-  inactive requests 400 on get-by-id; `is_active_item` checks several spellings) and
+  `search_requests(workspace, document_name=document, filters={"requestIsActive":"Y"})`
+  lists **active** requests (server-side filter — DTC dev confirmed inactive requests
+  400 on get-by-id; field is `requestIsActive`). A client-side `is_active_item` guard
+  remains as cheap insurance. It then
   **pre-filters on the listed `requestReference` so only ACTIVE + IN-SCOPE names are
   read/registered** by-id (`get_request`/`get_views`). Inactive and
   out-of-scope/foreign requests are skipped entirely — NOT enriched, NOT registered —
