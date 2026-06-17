@@ -52,6 +52,26 @@ class RestClient:
         logger.info(f"RestClient initialized for {base_url}")
 
     @staticmethod
+    def _log_error_body(e: Exception) -> None:
+        """Log the response body from an HTTPError, if present.
+
+        ``raise_for_status()`` raises ``requests.exceptions.HTTPError`` which
+        carries a ``response`` attribute.  For 4xx/5xx replies the API usually
+        returns a JSON or text body that explains *why* the request was rejected
+        — surface it so callers don't have to re-run with a debugger.
+        """
+        resp = getattr(e, "response", None)
+        if resp is None:
+            return
+        body = ""
+        try:
+            body = resp.json()
+        except Exception:
+            body = resp.text or ""
+        if body:
+            logger.error(f"  response body: {body}")
+
+    @staticmethod
     def _parse_body(resp) -> Dict[str, Any]:
         """
         Parse a response body, tolerating empty bodies (e.g. HTTP 204 No Content,
@@ -112,6 +132,7 @@ class RestClient:
             return resp.json()
         except requests.exceptions.RequestException as e:
             logger.error(f"GET {url} failed: {e}")
+            self._log_error_body(e)
             raise
 
     def post(
@@ -145,6 +166,7 @@ class RestClient:
             return self._parse_body(resp)
         except requests.exceptions.RequestException as e:
             logger.error(f"POST {url} failed: {e}")
+            self._log_error_body(e)
             raise
 
     def post_multipart(
@@ -198,6 +220,7 @@ class RestClient:
             return self._parse_body(resp)
         except requests.exceptions.RequestException as e:
             logger.error(f"POST (multipart) {url} failed: {e}")
+            self._log_error_body(e)
             raise
 
     def patch(
@@ -231,6 +254,7 @@ class RestClient:
             return self._parse_body(resp)
         except requests.exceptions.RequestException as e:
             logger.error(f"PATCH {url} failed: {e}")
+            self._log_error_body(e)
             raise
 
     def put(
@@ -264,6 +288,7 @@ class RestClient:
             return self._parse_body(resp)
         except requests.exceptions.RequestException as e:
             logger.error(f"PUT {url} failed: {e}")
+            self._log_error_body(e)
             raise
 
     def delete(
@@ -301,6 +326,7 @@ class RestClient:
             return resp.json() if resp.content else None
         except requests.exceptions.RequestException as e:
             logger.error(f"DELETE {url} failed: {e}")
+            self._log_error_body(e)
             raise
 
     def close(self):

@@ -609,7 +609,7 @@ class DTCConnector:
         payload = {
             "workspaceName": workspace_name,
             "documentName": document_name,
-            "requestName": request_name,
+            "requestReference": request_name,
             "requestDescription": request_description,
             **kwargs
         }
