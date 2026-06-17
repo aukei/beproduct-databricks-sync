@@ -49,19 +49,30 @@ for bad in ["KTB Wrangler", "KTB SPRING Wrangler", ""]:
     except ValueError:
         check(True, f"invalid reference {bad!r} raises")
 
-print("\n[3] build_target_payload() - Style Image excluded, real cols only")
+print("\n[3] build_target_payload() - Style Image excluded, view-def filtering")
 bp = {
     "lf_style_number": "WMG-J876-263 001", "color": "Croc print", "brands": "Wrangler",
     "product_status": "Production", "description": "DESC", "division": "Modern Global",
     "front_image_url": "http://img", "garment_finish": "X", "techpack_stage": "Y",
+    "customer_style_number": "LEG123", "parent_vendor": "VEND",
 }
+# All of these now exist in the live WIP_ITS_USE view definition.
 allowed = {"LF Style#", "Color / Wash", "Brand", "Product Status",
-           "Style Description", "Division?", STYLE_IMAGE_COL}
+           "Style Description", "Division", "Garment Finish", "Tech Pack Stage",
+           "Legacy Code", "Main Vendor (Sampling)", STYLE_IMAGE_COL}
 pl = build_target_payload(bp, allowed_cols=allowed, include_keys=True)
 check(STYLE_IMAGE_COL not in pl, "Style Image excluded from payload")
-check(pl.get("Division?") == "Modern Global", "division -> 'Division?' (real col)")
-check("Garment Finish" not in pl and "Tech Pack Stage" not in pl,
-      "unmapped/absent cols dropped (no 400)")
+check(pl.get("Division") == "Modern Global", "division -> 'Division' (renamed, no '?')")
+check(pl.get("Garment Finish") == "X" and pl.get("Tech Pack Stage") == "Y",
+      "Garment Finish / Tech Pack Stage now mapped & included")
+check(pl.get("Legacy Code") == "LEG123" and pl.get("Main Vendor (Sampling)") == "VEND",
+      "Legacy Code / Main Vendor (Sampling) mapped & included")
+# allowed_cols still filters out columns absent from a given view.
+pl_filtered = build_target_payload(
+    bp, allowed_cols={"LF Style#", "Color / Wash", "Brand", "Product Status"},
+    include_keys=True)
+check("Division" not in pl_filtered and "Garment Finish" not in pl_filtered,
+      "cols not in allowed view are dropped (no 400)")
 pl_nokey = build_target_payload(bp, allowed_cols=allowed, include_keys=False)
 check("LF Style#" not in pl_nokey and "Brand" not in pl_nokey,
       "include_keys=False drops key+brand cols")

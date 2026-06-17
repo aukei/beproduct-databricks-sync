@@ -537,12 +537,17 @@ The job updates **all extracted fields** (compulsory + interested) for changed r
 - Product Category
 - Product Sub Category
 - Division
-- Brands
+- Brands (`brands_multi`, MultiSelect; read `value[0]` — single-selection guaranteed)
 - Garment Finish
 - Techpack Stage
-- Lot Code
+- Lot Code (now a COLORWAY field `colorways[].fields.drawing_number_walmart`; filled by
+  the DTC→BeProduct Phase 2 push, so empty/not header-extracted today — do not read the
+  deprecated header-level value)
 - Parent Vendor
 - Factory
+
+See `docs/beproduct_style_interested_fields.txt` for the canonical field names,
+fieldIds and JSONPaths.
 
 **Note:** We update all these fields for simplicity and reliability. Trying to detect which specific field changed is complex and error-prone.
 

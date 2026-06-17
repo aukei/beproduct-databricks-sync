@@ -80,6 +80,7 @@ class RestClient:
         self,
         endpoint: str,
         params: Optional[Dict[str, Any]] = None,
+        data: Optional[Dict[str, Any]] = None,
         headers: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """
@@ -88,6 +89,9 @@ class RestClient:
         Args:
             endpoint: API endpoint (e.g., "/v1/requests/123")
             params: Query parameters
+            data: Optional JSON request body. Some DTC list endpoints expect a
+                  body on GET (e.g. /v1/requests reads {"workspaceName", "filters"}
+                  from the body, not query params).
             headers: Additional headers to merge with defaults
 
         Returns:
@@ -100,8 +104,9 @@ class RestClient:
 
         logger.debug(f"GET {url}")
         try:
-            resp = self.session.get(
-                url, params=params, headers=req_headers, timeout=self.timeout
+            resp = self.session.request(
+                "GET", url, params=params, json=data,
+                headers=req_headers, timeout=self.timeout,
             )
             resp.raise_for_status()
             return resp.json()
@@ -211,6 +216,7 @@ class RestClient:
     def delete(
         self,
         endpoint: str,
+        data: Optional[Dict[str, Any]] = None,
         headers: Optional[Dict[str, str]] = None,
     ) -> Optional[Dict[str, Any]]:
         """
@@ -218,6 +224,8 @@ class RestClient:
 
         Args:
             endpoint: API endpoint
+            data: Optional JSON request body. Some DTC delete endpoints require a
+                  body (e.g. removing sheet rows takes {"rowIndexes": [...]}).
             headers: Additional headers
 
         Returns:
@@ -231,7 +239,7 @@ class RestClient:
         logger.debug(f"DELETE {url}")
         try:
             resp = self.session.delete(
-                url, headers=req_headers, timeout=self.timeout
+                url, json=data, headers=req_headers, timeout=self.timeout
             )
             resp.raise_for_status()
             # DELETE may return 204 No Content

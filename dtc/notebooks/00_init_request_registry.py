@@ -7,11 +7,15 @@ Creates and populates the Phase 1 control table (requirement 1a):
 
     lft.beproduct.dtc_request_registry
 
-The DTC API key used by this project CANNOT list requests (GET /v1/requests
-returns 400 "Invalid workspaceName."; /v1/workspaces and /v1/documents are 403).
-Request discovery is therefore registry-driven: an admin seeds the in-scope
+Request discovery is registry-driven by design: an admin seeds the in-scope
 request IDs here, and this notebook enriches each one via by-id reads
-(get_request + get_views), which ARE permitted.
+(get_request + get_views). This gives an explicit, auditable in-scope list and
+keeps out-of-scope developer requests (e.g. "KON ...") out of the pipeline.
+
+(Listing IS available if needed: GET /v1/requests works when workspaceName +
+filters are sent in the JSON BODY - see DTCConnector.search_requests(). An
+earlier note here claimed the key could not list; that was a client bug from
+sending workspaceName as a query param, not an API/permission limitation.)
 
 In scope == request reference parses as "<customer> <seasonCode> <brand>" AND its
 customer token equals `customer` (e.g. "KTB FW26 Wrangler"). Developer test

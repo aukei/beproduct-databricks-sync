@@ -96,19 +96,22 @@ if ins_row:
     check(phase1.norm(ins_row.get("Style Description")) == "phase1 live test", "insert carried mapped field")
 
 # ---- revert / cleanup ----
+# UPDATE is reverted via PATCH; the INSERTed sentinel row is removed via the
+# real DELETE /rows endpoint (validated 2026-06-17), keying off its rowIndex.
 print("Reverting ...")
-revert = [{"rowId": target["rowId"], "Product Status": orig_status if orig_status is not None else ""}]
-if ins_row:
-    revert.append({"rowId": ins_row["rowId"], "LF Style#": "", "Color / Wash": "",
-                   "Product Status": "", "Style Description": "", "Brand": ""})
-c.patch_rows(sid, vid, revert)
+c.patch_rows(sid, vid, [
+    {"rowId": target["rowId"], "Product Status": orig_status if orig_status is not None else ""}
+])
+if ins_row and ins_row.get("rowIndex") is not None:
+    resp_d = c.delete_rows(sid, vid, [ins_row["rowIndex"]])
+    check(resp_d.get("status_code") == 204, "DELETE /rows removed inserted sentinel (204)")
 time.sleep(2)
 final = c.get_sheet(sid, vid)["sheetData"]
 rb = next((r for r in final if r.get("rowId") == target["rowId"]), None)
 check(rb is not None and phase1.norm(rb.get("Product Status")) == phase1.norm(orig_status),
       "update reverted to original Product Status")
 check(not any(phase1.norm(r.get("LF Style#")) == SENTINEL_LF for r in final),
-      "inserted sentinel neutralized")
+      "inserted sentinel deleted")
 
 print("\n" + "=" * 70)
 if failures:

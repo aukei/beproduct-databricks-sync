@@ -297,7 +297,7 @@ class DTCConnector:
     # ------------------------------------------------------------------
     # WRITE CONTRACT (validated live against DTC UAT on 2026-06-17)
     # ------------------------------------------------------------------
-    # The sheet write API is a single endpoint:
+    # The sheet upsert API is a single endpoint:
     #
     #     PATCH /v1/sheets/{sheetId}/views/{viewId}
     #     body: {"sheetData": [ <rowObject>, ... ]}        -> HTTP 204 on success
@@ -305,16 +305,23 @@ class DTCConnector:
     # Each <rowObject> is a flat dict of {<DTC column display name>: value}, plus:
     #   - "rowId":   <uuid>  -> UPDATE that existing row
     #   - "rowIndex": <int>  -> INSERT a new row at that index
-    # Provide exactly one of rowId / rowIndex per row object.
+    # Provide exactly one of rowId / rowIndex per row object. A single PATCH must
+    # not mix rowId and rowIndex keys; send updates and inserts as separate calls.
     #
     # IMPORTANT: every key in the row object MUST be a column that exists in the
     # view's mapping, otherwise the whole call fails with HTTP 400:
     #     "'<col>' is not found in the mapping."
-    # Use get_view_column_names() to filter payloads before sending.
+    # Use get_view_column_names() (which reads the VIEW DEFINITION, not just the
+    # populated sheet cells) to filter payloads before sending.
     #
-    # There is NO row DELETE endpoint exposed to this API key (all variants 404),
-    # and the older {"columnValues": ...} body shape is REJECTED ("sheetData is
-    # required."). Phase 1 only performs INSERT/UPDATE, so delete is unsupported.
+    # Rows ARE deletable (validated live 2026-06-17 by inserting then removing a
+    # dummy row on the sacrificial KTB FW26 Wrangler request):
+    #
+    #     DELETE /v1/sheets/{sheetId}/views/{viewId}/rows
+    #     body: {"rowIndexes": [1, 2, 3, 4]}               -> HTTP 204 on success
+    #
+    # Note deletes key off rowIndex (not rowId). The older {"columnValues": ...}
+    # PATCH body shape is REJECTED ("sheetData is required.").
     # ------------------------------------------------------------------
 
     def create_row(
@@ -405,32 +412,106 @@ class DTCConnector:
         resp.setdefault("rows", len(sheet_data))
         return resp
 
-    def delete_row(self, sheet_id: str, row_id: str) -> Dict[str, Any]:
+    def delete_rows(
+        self, sheet_id: str, view_id: str, row_indexes: List[int]
+    ) -> Dict[str, Any]:
         """
-        Not supported: the DTC API exposes no row-delete endpoint to this key
-        (all known variants return 404), and Phase 1 performs no deletes.
-        """
-        raise NotImplementedError(
-            "DTC API exposes no row-delete endpoint; deletes are out of scope "
-            "for Phase 1 (upsert only)."
-        )
+        Delete one or more rows from a sheet by their rowIndex.
 
-    def get_view_column_names(self, sheet_id: str, view_id: str) -> List[str]:
-        """
-        Return the set of column display names available in a view's mapping.
+        Validated live against DTC UAT (2026-06-17):
+            DELETE /v1/sheets/{sheetId}/views/{viewId}/rows
+            body: {"rowIndexes": [...]}   -> HTTP 204 No Content
 
-        Derived from the keys present in the view's sheet data (excluding the
-        rowId / rowIndex control keys). For an empty sheet this returns [] - in
-        that case callers should fall back to a known column list for the
-        Document, since the column set is a Document/view-level property.
+        Note: the DTC delete endpoint keys off rowIndex, NOT rowId. Callers that
+        only have rowIds should resolve them to rowIndex first (e.g. from the
+        current sheet data).
 
         Args:
             sheet_id: DTC sheet ID
+            view_id: DTC view ID
+            row_indexes: list of rowIndex values to delete
+
+        Returns:
+            {"status_code": 204, "rows": <n>} on success.
+        """
+        if not row_indexes:
+            return {"status_code": 204, "rows": 0}
+        logger.info(
+            f"DELETE rows on sheet {sheet_id} view {view_id}: {row_indexes}"
+        )
+        self.client.delete(
+            f"/v1/sheets/{sheet_id}/views/{view_id}/rows",
+            data={"rowIndexes": list(row_indexes)},
+        )
+        return {"status_code": 204, "rows": len(row_indexes)}
+
+    def delete_row(self, sheet_id: str, view_id: str, row_index: int) -> Dict[str, Any]:
+        """Delete a single row by rowIndex (thin wrapper over delete_rows())."""
+        return self.delete_rows(sheet_id, view_id, [row_index])
+
+    def get_view_definition(self, view_id: str) -> Dict[str, Any]:
+        """
+        Get a single view record (its schema), including dynamicFields.
+
+        GET /v1/views/{viewId}
+
+        Args:
+            view_id: DTC view ID
+
+        Returns:
+            View dict (with a "dynamicFields" list of {fieldName, type, ...}).
+        """
+        logger.info(f"Fetching view definition: {view_id}")
+        resp = self.client.get(f"/v1/views/{view_id}")
+        data = resp.get("data", resp) if isinstance(resp, dict) else resp
+        if isinstance(data, list):
+            data = data[0] if data else {}
+        return data or {}
+
+    def get_view_column_names(
+        self, sheet_id: str, view_id: str
+    ) -> List[str]:
+        """
+        Return the column display names defined in a view's mapping.
+
+        IMPORTANT: this reads the authoritative VIEW DEFINITION
+        (GET /v1/views/{viewId} -> dynamicFields[].fieldName), NOT the populated
+        sheet cells. Deriving columns from sheet data badly under-reports the set
+        because columns that happen to be empty across every row do not appear in
+        the row objects (validated 2026-06-17: WIP_ITS_USE has 178 view columns
+        but only ~96 surfaced in sheetData). Filtering payloads against the sheet
+        view would silently drop valid-but-empty columns such as "Garment Finish",
+        "Tech Pack Stage", "Legacy Code" and "Main Vendor (Sampling)".
+
+        Falls back to scanning sheet data only if the view definition cannot be
+        read (so an unexpected schema response never hard-fails a sync).
+
+        Args:
+            sheet_id: DTC sheet ID (used only for the fallback scan)
             view_id: DTC view ID
 
         Returns:
             Sorted list of column display names.
         """
+        try:
+            view = self.get_view_definition(view_id)
+            cols = {
+                f.get("fieldName")
+                for f in view.get("dynamicFields", [])
+                if f.get("fieldName")
+            }
+            if cols:
+                return sorted(cols)
+            logger.warning(
+                f"View {view_id} definition had no dynamicFields; "
+                "falling back to sheet-data column scan"
+            )
+        except Exception as e:
+            logger.warning(
+                f"Could not read view definition for {view_id} ({e}); "
+                "falling back to sheet-data column scan"
+            )
+
         sheet = self.get_sheet(sheet_id, view_id)
         cols = set()
         for row in sheet.get("sheetData", []):
@@ -483,36 +564,57 @@ class DTCConnector:
     def search_requests(
         self,
         workspace_name: str,
-        document_name: str = None
+        document_name: str = None,
+        filters: Optional[Dict[str, Any]] = None,
+        pending_only: str = "N",
+        request_only: str = "N",
     ) -> List[Dict]:
         """
-        Search for requests in a workspace via GET /v1/requests.
+        Search/list requests in a workspace via GET /v1/requests.
 
-        NOTE (validated 2026-06-17): this collection endpoint is NOT usable with
-        the current API key. It returns HTTP 400 "Invalid workspaceName." for
-        every workspace value tried (KTB, Kontoor), and the related
-        /v1/workspaces and /v1/documents/{id}/requests endpoints return 403.
+        NOTE (corrected 2026-06-17): this endpoint reads workspaceName + filters
+        from the JSON request BODY, not from query parameters. The earlier
+        conclusion that "the key cannot list requests" was a client bug - sending
+        workspaceName as a query param returns HTTP 400 "Invalid workspaceName.",
+        whereas the documented body shape works. Validated live: body
+        {"workspaceName":"KTB","filters":{}} returns 824 requests.
 
-        Phase 1 therefore does NOT rely on live listing for request discovery.
-        In-scope requests are resolved from a maintained control/registry table
-        (see dtc/notebooks/00_init_request_registry.py and get_request_scope()).
-        This method is retained for environments/keys where listing is permitted.
+        Request discovery may use this directly; the registry table
+        (dtc/notebooks/00_init_request_registry.py) remains a valid design choice
+        for an explicit, auditable in-scope list but is no longer forced by an API
+        limitation.
 
         Args:
             workspace_name: DTC workspace name (the exact registered name)
-            document_name: Optional document name to filter
+            document_name: Optional document name (added to filters as documentName)
+            filters: Optional additional filter dict (per spec: requestReference,
+                     requestDescription, documentName, collectionName, ownerEmail,
+                     assigneeEmail, requestStatusName, requestIsActive, ...)
+            pending_only: "Y"/"N" - filter to pending records only
+            request_only: "Y"/"N" - filter to my-request records only
 
         Returns:
             List of request dicts with requestId, requestReference, etc.
         """
-        logger.info(f"Searching requests: workspace={workspace_name}, document={document_name}")
+        logger.info(
+            f"Searching requests: workspace={workspace_name}, document={document_name}"
+        )
 
-        params = {"workspaceName": workspace_name}
+        body_filters: Dict[str, Any] = dict(filters or {})
         if document_name:
-            params["documentName"] = document_name
+            body_filters["documentName"] = document_name
 
-        response = self.client.get("/v1/requests", params=params)
-        requests = response.get("data", []) if isinstance(response, dict) else (response or [])
+        body = {
+            "pendingOnly": pending_only,
+            "requestOnly": request_only,
+            "workspaceName": workspace_name,
+            "filters": body_filters,
+        }
+
+        response = self.client.get("/v1/requests", data=body)
+        requests = (
+            response.get("data", []) if isinstance(response, dict) else (response or [])
+        )
 
         logger.info(f"Found {len(requests)} requests")
         return requests

@@ -24,10 +24,13 @@ is (LF Style#, Color / Wash). This is also what the transform's own duplicate
 check uses. RowIndex is therefore numbered per request (= per season+brand).
 
 All API I/O lives in connectors.dtc.DTCConnector; this module never calls it.
-The DTC column names below were validated live against the WIP_ITS_USE view on
-2026-06-17 (e.g. the real column is "Division?" - with a question mark - not
-"Division"; "Garment Finish"/"Tech Pack Stage"/"Legacy Code"/"Main Vendor
-(Sampling)" do NOT exist in the view and must not be pushed).
+The DTC column names below were validated live against the WIP_ITS_USE view
+definition on 2026-06-17 (GET /v1/views/{viewId} -> 178 dynamicFields). The
+column is "Division" (an earlier "Division?" with a trailing '?' was renamed),
+and "Garment Finish", "Tech Pack Stage", "Legacy Code" and
+"Main Vendor (Sampling)" DO exist in the view - the earlier "absent" finding was
+a false negative caused by reading columns from sheet cells (empty columns do
+not surface in sheetData) instead of from the view definition.
 """
 
 from __future__ import annotations
@@ -53,13 +56,17 @@ FIELD_MAPPING: Dict[str, str] = {
     "lf_style_number": "LF Style#",
     "color": "Color / Wash",
     "brands": "Brand",            # constant per request (== request brand)
-    # --- updatable non-key fields ---
+    # --- updatable non-key fields (all confirmed in the WIP_ITS_USE view def) ---
     "product_status": "Product Status",
     "description": "Style Description",
     "product_category": "Class",
     "product_sub_category": "Sub Class",
-    "division": "Division?",      # NOTE: real column has a trailing '?'
+    "division": "Division",       # was "Division?"; the '?' column was renamed
+    "garment_finish": "Garment Finish",
+    "techpack_stage": "Tech Pack Stage",
+    "customer_style_number": "Legacy Code",
     "lot_code": "Lot#",
+    "parent_vendor": "Main Vendor (Sampling)",
     "factory": "Main Factory (Sampling)",
     "fabric_group": "Fabric Group",
     "placement": "Placement",
@@ -266,10 +273,10 @@ def compute_upsert(
                        'rowId' and 'rowIndex' plus DTC column display names.
         bp_rows:       BeProduct staging rows (denormalized) targeting THIS
                        request. Keys are BeProduct staging column names.
-        allowed_cols:  set of column names present in the live view; payloads
+        allowed_cols:  set of column names defined in the live view; payloads
                        are filtered to these. Pass the result of
-                       DTCConnector.get_view_column_names() (falls back to the
-                       known set for empty sheets).
+                       DTCConnector.get_view_column_names(), which reads the view
+                       DEFINITION (all view columns, not just populated cells).
         enforce_scope: if True, bp rows whose season/brand disagree with the
                        request are recorded as exceptions instead of processed.
 

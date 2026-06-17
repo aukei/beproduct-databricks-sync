@@ -1,21 +1,53 @@
-DTC label                           BeProduct Field
-"Product Status"                    headerData.fields."PRODUCT STATUS"
-"Style Image"                       headerData.frontImage.origin
-"LF Style#"                         headerData.fields."LF Style Number"
-"Active / Dropped"                  (blank)
-"Legacy Code"                       headerData.fields."CUSTOMER STYLE NUMBER / PLM#"
-"Style Description"                 headerData.fields."DESCRIPTION"
-"Class"                             headerData.fields."PRODUCT CATEGORY"
-"Sub Class"                         headerData.fields."PRODUCT SUB CATEGORY"
-"Division"                          headerData.fields."Division"
-"Brand"                             headerData.fields."Brands"[0]
-"Color / Wash"                      colorways[].colorName
-"Garment Finish"                    headerData.fields."GARMENT FINISH"
-"LP Ref#"                           (blank)
-"Tech Pack Stage"                   headerData.fields."TECHPACK STAGE"
-"Lot#"                              headerData.fields."Lot Code"
-"Main Vendor (Sampling)"            headerData.fields."PARENT VENDOR"
-"Main Factory (Sampling)"           headerData.fields."FACTORY"
-"Main Factory Customer ID"          (blank)
-"Fabric Group"                      "MAIN MATERIAL CONTENT"
-"Placement"                         headerData.fields."MAIN MATERIAL CONTENT"
+BeProduct Style -> DTC field mapping (interested fields)
+========================================================
+Verified live against the BeProduct "KTB" folder schema on 2026-06-17
+(api.style.folder_schema / folder_colorway_schema, folder id
+37dcc63a-4754-4bb8-8d34-8c07a4145fcd).
+
+JSONPath conventions (against a Style record from api.style.attributes_list):
+  - Header fields live in an ARRAY: headerData.fields[] = [{id, name, type, value}, ...]
+    Select by the stable fieldId, e.g.   headerData.fields[id="style_status"].value
+    (Prefer id over name: names are inconsistently cased and some have trailing
+    spaces, e.g. "CUSTOMER STYLE NUMBER / PLM #".)
+  - Colorway fields live in a MAP keyed by fieldId, one per colorway:
+    colorways[].fields.<fieldId>
+    (colorName is a top-level colorway property, not inside .fields.)
+  - frontImage is a header-level object: headerData.frontImage.origin
+
+DTC column                 | BeProduct field name           | fieldId                  | Location (JSONPath in Style JSON)                          | Notes
+---------------------------+--------------------------------+--------------------------+------------------------------------------------------------+------------------------------------------------------------
+Product Status             | PRODUCT STATUS                 | style_status             | headerData.fields[id="style_status"].value                 |
+Style Image                | (front image)                  | -                        | headerData.frontImage.origin                               | excluded from Phase 1 push
+LF Style#                  | LF Style Number                | header_number            | headerData.fields[id="header_number"].value                | match key
+Active / Dropped           | (blank)                        | -                        | (not sourced from BeProduct)                               |
+Legacy Code                | CUSTOMER STYLE NUMBER / PLM #  | customer_style_number    | headerData.fields[id="customer_style_number"].value        | name has a trailing space before "#"
+Style Description          | DESCRIPTION                    | header_name              | headerData.fields[id="header_name"].value                  |
+Class                      | PRODUCT CATEGORY               | product_category         | headerData.fields[id="product_category"].value             |
+Sub Class                  | PRODUCT SUB CATEGORY           | product_sub_category     | headerData.fields[id="product_sub_category"].value         |
+Division                   | Division                       | division_hk              | headerData.fields[id="division_hk"].value                  | name is mixed-case "Division" (not "DIVISION")
+Brand                      | BRANDS                         | brands_multi             | headerData.fields[id="brands_multi"].value[0]              | MultiSelect; value is a list of plain STRINGS. Setup
+                           |                                |                          |                                                            | guarantees exactly 1 selection -> take [0] (NOT [0].value).
+                           |                                |                          |                                                            | Guard for empty list ([] occurs on some styles).
+Color / Wash               | COLOR NAME                     | color_name               | colorways[].colorName                                      | match key; exposed as top-level colorName per colorway
+Garment Finish             | GARMENT FINISH                 | garment_finish           | headerData.fields[id="garment_finish"].value               |
+LP Ref#                    | (blank)                        | -                        | (not sourced from BeProduct)                               |
+Tech Pack Stage            | TECHPACK STAGE                 | techpack_stage           | headerData.fields[id="techpack_stage"].value               |
+Lot#                       | Lot Code                       | drawing_number_walmart   | colorways[].fields.drawing_number_walmart                  | COLORWAY-level field (id "drawing_number_walmart",
+                           |                                |    (COLORWAY field)      |                                                            | name "Lot Code"). Populated DTC -> BeProduct in Phase 2,
+                           |                                |                          |                                                            | so it is empty for all BeProduct rows today (expected).
+                           |                                |                          |                                                            | IGNORE the legacy headerData.fields[id="drawing_number_walmart"]
+                           |                                |                          |                                                            | (not in current header schema; carries stale junk e.g. "2027").
+Main Vendor (Sampling)     | PARENT VENDOR                  | parent_vendor            | headerData.fields[id="parent_vendor"].value                | type PartnerDropDown
+Main Factory (Sampling)    | FACTORY                        | factory                  | headerData.fields[id="factory"].value                      | type PartnerDropDown
+Main Factory Customer ID   | (blank)                        | -                        | (not sourced from BeProduct)                               |
+Fabric Group               | MAIN MATERIAL CONTENT          | core_main_material       | headerData.fields[id="core_main_material"].value           | type LabelMaterial (value is structured, not a plain string)
+Placement                  | MAIN MATERIAL CONTENT          | core_main_material       | headerData.fields[id="core_main_material"].value           | same source field as Fabric Group (confirm intended)
+
+Last-minute schema changes captured here (2026-06-17):
+  1. BRANDS (and CUSTOMER) are MultiSelect lists of plain strings; with the
+     one-selection setup guarantee, read value[0] (not value[0].value).
+     Match by fieldId (brands_multi / sold_to_customer), not by display name.
+  2. "Lot Code" moved to the COLORWAY schema as fieldId "drawing_number_walmart"
+     (colorways[].fields.drawing_number_walmart). It is filled by the DTC->BeProduct
+     Phase 2 push, hence empty in BeProduct now. The old header-level "Lot Code" is
+     deprecated and must not be read.
