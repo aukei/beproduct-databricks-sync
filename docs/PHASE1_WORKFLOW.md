@@ -3,11 +3,14 @@
 **Status**: Implemented ✅ (core unit-tested + live-verified on UAT)
 
 Phase 1 pushes **BeProduct-owned** style fields into the matching DTC request
-("upsert"). It never writes back to BeProduct (that is Phase 2) and never creates
-DTC requests (missing requests are logged as errors).
+("upsert"). It never writes back to BeProduct (that is `PHASE2_WORKFLOW.md`) and
+never uploads the Style Image (that is `PHASE3_WORKFLOW.md`). Missing **in-scope**
+requests are **created** (and shared) by `dtc_request_manager` — see
+"Missing-request creation" below.
 
 > The original braindump spec for this phase is preserved in
 > `implement_prompts.txt` (section "# Phase 1") for reference.
+> Data model for every table named here: `docs/ARCHITECTURE.md`.
 
 ---
 
@@ -111,6 +114,17 @@ will **create** the DTC request/sheet (`POST /v1/sheets` via
   with status `dry_run` and creates nothing; set `dry_run=false` to create.
 - The start-of-run scan means requests that already exist in DTC are registered
   first, so they resolve instead of being re-created.
+- **Sharing (gated by `share_on_create`, default true):** a freshly created request
+  is visible only to its creator (the API identity). Immediately after a successful
+  create, `dtc_request_manager` shares it: **all views → `aiagentwip@lifung.com`**
+  (AI Agent WIP) and the **Full Version** view → the **Fabric Group** user group.
+  Share events are logged to `beproduct_to_dtc_sync_log` (stage `share`).
+  Already-created requests can be (re-)shared idempotently with the standalone
+  `beproduct/dtc_share_requests.py` notebook.
+
+Validated `POST /v1/sheets` body (HTTP 201): `requestReference` (NOT `requestName`),
+non-empty `requestDescription`, `viewName`, and `requestAssigneeSharingViewNames`/
+`sheetData` present as arrays (empty `[]` accepted).
 
 **Refresh semantics (`mode=merge`, default):** upsert keyed on
 `(environment, request_id)`. Matched rows refresh metadata / `request_is_active` /
@@ -163,9 +177,9 @@ request are marked. Core: `phase1.compute_orphan_marks`, wired in
 
 ## Missing requests, exceptions & logging
 
-- Requests that BeProduct targets but are **missing / out-of-scope / inactive / lack
-  WIP_ITS_USE** are logged as errors by `dtc_request_manager.py` and excluded from
-  the push (Phase 1 never creates requests).
+- Missing **in-scope** requests are **created** by `dtc_request_manager.py`
+  (`dry_run=false`) and then resolve normally. Requests that are **out-of-scope /
+  inactive / lack WIP_ITS_USE** are logged as errors and excluded from the push.
 - Per-row results/exceptions (scope mismatch, dup keys, missing rowId, PATCH
   failures, orphan marks) are written to `lft.beproduct.beproduct_to_dtc_sync_log`.
 - `beproduct_to_dtc_push.py` supports `dry_run=true` (compute + log, no PATCH) and
@@ -177,9 +191,16 @@ request are marked. Core: `phase1.compute_orphan_marks`, wired in
 
 - Upsert: `PATCH /v1/sheets/{sheetId}/views/{viewId}` body `{"sheetData":[{...,"rowId"|"rowIndex":..}]}` → 204
 - Delete: `DELETE /v1/sheets/{sheetId}/views/{viewId}/rows` body `{"rowIndexes":[...]}` → 204
+- Create request/sheet: `POST /v1/sheets` (body shape above) → 201; response nests ids
+  under `data` with a capital-S `SheetId`.
+- Share request: `POST /v1/requests/{requestId}/shares/{userEmail}` and
+  `.../shares/usergroups/{userGroupName}` body `{"viewNames":[...],"message":"...","sendEmail":"Y|N"}` → 201.
 - Allowed columns come from the **view definition** (`GET /v1/views/{viewId}`,
   `DTCConnector.get_view_column_names`); payloads are filtered to it so a PATCH never
   trips `'<col>' is not found in the mapping`.
+
+Full endpoint detail + the BeProduct/DTC data model live in `docs/ARCHITECTURE.md`
+and `docs/DTC_GUIDE.md`.
 
 ---
 

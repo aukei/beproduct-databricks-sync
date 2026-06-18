@@ -2,6 +2,11 @@
 
 Guide for connecting to BeProduct API and reading master data (styles, colors, brands, etc.) using SDK and REST API.
 
+> For this project's current BeProduct usage (jobs, field extraction, type-aware
+> push-back) and the BeProduct tables on Databricks, follow `docs/BEPRODUCT_GUIDE.md`
+> and `docs/ARCHITECTURE.md`; verified schema quirks live in `AGENTS.md`. The SDK
+> snippets below remain a valid general reference.
+
 ## When to Use This Skill
 
 Use this skill when you need to:
@@ -1088,6 +1093,6 @@ class OAuth2Client:
 
 ### Project Files
 
-- SDK notebooks: `beproduct/beproduct_style_sync.py`, `beproduct/beproduct_style_push.py`
+- SDK notebooks: `beproduct/beproduct_style_sync.py`, `standalone/beproduct_style_push.py`
 - Master data: `beproduct/beproduct_master_data_sync.py`
-- Documentation: `MASTER_DATA_SETUP.md`, `PUSH_SETUP.md`, `QUICK_REFERENCE.md`
+- Documentation: `docs/BEPRODUCT_GUIDE.md`, `docs/ARCHITECTURE.md`, `AGENTS.md`

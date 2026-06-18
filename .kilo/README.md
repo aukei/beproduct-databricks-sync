@@ -165,19 +165,18 @@ See: `beproduct/beproduct_style_sync.py`
 5. Push updates to BeProduct
 6. Log results
 
-See: `beproduct/beproduct_style_push.py`
+See: `standalone/beproduct_style_push.py`
 
 ## Project Documentation
 
 Additional documentation in the repository:
-- `README.md` - Project overview and architecture
-- `QUICK_START.md` - Setup and first run
-- `QUICK_REFERENCE.md` - All jobs and parameters
-- `dtc/README.md` - DTC sync platform details
-- `dtc/DATA_MODEL.md` - DTC data model
-- `dtc/CHANGE_TRACKING_DESIGN.md` - Change tracking design
-- `MASTER_DATA_SETUP.md` - BeProduct master data setup
-- `PUSH_SETUP.md` - BeProduct push configuration
+- `README.md` - Project overview and structure
+- `QUICK_START.md` - Setup, how to use, which notebook to run
+- `docs/ARCHITECTURE.md` - Components, data flow, and the full ADB data model
+- `docs/PHASE1_WORKFLOW.md` / `docs/PHASE2_WORKFLOW.md` / `docs/PHASE3_WORKFLOW.md` - Per-phase flows
+- `docs/BEPRODUCT_GUIDE.md` / `docs/DTC_GUIDE.md` - Per-component API/SDK + ADB tables
+- `docs/beproduct_style_interested_fields.txt` - Field-mapping SSOT
+- `AGENTS.md` - Verified API behaviour & invariants
 
 ## Support
 

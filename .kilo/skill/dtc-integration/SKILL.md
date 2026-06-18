@@ -5,10 +5,19 @@ Guide for connecting to DTC (Data Collaboration Tool) and reading worksheet data
 > ⚠️ **Partially superseded.** The DTC **connector** usage below is current, but
 > the snapshot / change-detection / `dtc_master_chart_uat` change-log examples
 > describe a **removed** pipeline. The current model pulls the `WIP_ITS_USE` view
-> of registry-discovered requests into `lft.beproduct.dtc_wip_<customer>` and pushes
-> via Phase 1 / Phase 2. Follow `docs/DTC_GUIDE.md`, `dtc/DATA_MODEL.md`,
-> `dtc/PHASE1_WORKFLOW.md`, `dtc/PHASE2_WORKFLOW.md`, and `AGENTS.md` — not the
+> of registry-discovered requests into `lft.beproduct.dtc_wip_<customer>` and syncs
+> via Phase 1 (BeProduct→DTC, incl. request **create** + **share**), Phase 2
+> (DTC→BeProduct), and Phase 3 (image upload). Authoritative docs:
+> `docs/DTC_GUIDE.md`, `docs/ARCHITECTURE.md`, `docs/PHASE1_WORKFLOW.md`,
+> `docs/PHASE2_WORKFLOW.md`, `docs/PHASE3_WORKFLOW.md`, and `AGENTS.md` — not the
 > change-tracking snippets in this file.
+>
+> **Current DTC write contracts** (validated, see `AGENTS.md`): upsert
+> `PATCH /v1/sheets/{sheetId}/views/{viewId}` (204); create `POST /v1/sheets`
+> (201; `requestReference` + non-empty `requestDescription` + array fields);
+> share `POST /v1/requests/{id}/shares/{userEmail}` and `.../shares/usergroups/{group}`
+> (201); image `POST /v1/sheets/{sheetId}/views/{viewId}/images?rowindex=..&columnname=Style Image`
+> (multipart, file part `file`; webp rejected → transcode to PNG).
 
 ## When to Use This Skill
 
@@ -133,16 +142,16 @@ season = request.get('season', 'Unknown')
 
 **Parse request name for business logic:**
 ```python
-# Parse request reference to extract brand
-# Format: "BRAND - SEASON - Description"
-parsed = dtc.parse_request_name(request['requestReference'])
+# In-scope DTC request reference format: "<customer> <seasonCode> <brand>"
+#   seasonCode = 2 letters + 2 digits (e.g. FW26); brand = everything after it.
+# Authoritative parsing / in-scope test: dtc/python/sync/phase1.py
+from sync.phase1 import parse_request_reference, is_in_scope
 
-print(f"Brand: {parsed['brand']}")
-print(f"Season: {parsed.get('season', 'N/A')}")
-print(f"Description: {parsed.get('description', 'N/A')}")
+parsed = parse_request_reference(request['requestReference'])
+# Example: "KTB FW26 Wrangler Western"
+# Returns: {'customer': 'KTB', 'season_code': 'FW26', 'brand': 'Wrangler Western'}
 
-# Example: "Wrangler - SS26 - Master Chart"
-# Returns: {'brand': 'Wrangler', 'season': 'SS26', 'description': 'Master Chart'}
+in_scope = is_in_scope(request['requestReference'], customer="KTB")  # True/False
 ```
 
 ### 2. Get Available Views
@@ -731,4 +740,4 @@ class DTCConnector:
 - Connector: `dtc/python/connectors/dtc.py`
 - REST Client: `dtc/python/client/rest_client.py`
 - Notebook: `dtc/notebooks/pull_requests_to_delta.py` (+ `00_init_request_registry.py`)
-- Documentation: `docs/DTC_GUIDE.md`, `dtc/DATA_MODEL.md`, `dtc/PHASE1_WORKFLOW.md`, `dtc/PHASE2_WORKFLOW.md`
+- Documentation: `docs/DTC_GUIDE.md`, `docs/ARCHITECTURE.md`, `docs/PHASE1_WORKFLOW.md`, `docs/PHASE2_WORKFLOW.md`, `docs/PHASE3_WORKFLOW.md`

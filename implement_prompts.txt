@@ -199,7 +199,7 @@ Tackle image. Since image API is an operation on existing row, it cannot be hand
 2.2 Body is retrieved from front_image_url (e.g. curl), then put into request body in binary format as multipart/form-data
 
 
-# Checkpoint clean up 1
+# Checkpoint clean up 1 on docs $12
 - move PHASE*WORKFLOW to docs, update if necessary
 - add PHASE 3 WORKFLOW
 - ensure AGENTS.md, README.md correctly describe repo
@@ -207,4 +207,12 @@ Tackle image. Since image API is an operation on existing row, it cannot be hand
 - revise docs/ARCHITECTURE.md to cover components & data flow & data model on ADB - merge BEPRODUCT_TO_DTC_GUIDE.md, dtc/README.md, dtc/DATA_MODEL.md
 - i combined docs/requirements.md into /implement_prompts.txt
 - refactor docs/DTC_GUIDE.md BEPRODUCT_GUIDE.md so each cover that component's relevant API/SDK that jobs used, as well as relevant data model on ADB. 
-- suggest other project structure cleanup that is worthy
+- suggest other project structure cleanup that is worthy. DO NOT modify py/notebook scripts at this point.
+
+# Checkpoint clean up 2 on scripts
+- upload_to_databricks.py - bin it
+- beproduct_style_push - move to standalone/ with accompany notes
+- sure refresh kilo skills
+- kilo plan - superseded by docs. bin it
+- implement_prompts - keep at /, but create a docs/prompts/opus_revision.md about the implementation (exclude task log elements) base on your understand of the prompt plus proj status, and write it in agent friendly way.
+- keep DTC API doc as is.

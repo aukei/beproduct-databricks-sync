@@ -1,406 +1,232 @@
-# BeProduct to DTC Integration - Implementation Summary
+# Architecture — BeProduct ⇄ DTC Sync on Databricks
 
-**Date:** 2026-06-09  
-**Status:** ✅ **COMPLETE**  
-**Version:** 1.0.0
+Bi-directional synchronization between **BeProduct** (style PLM) and **DTC**
+("Data Collab" sheets), staged through **Databricks / Delta** under Unity Catalog
+schema `lft.beproduct`.
 
----
+This document is the single reference for **components**, **data flow**, and the
+**data model on Azure Databricks (ADB)**. It merges what used to live in
+`BEPRODUCT_TO_DTC_GUIDE.md`, `dtc/README.md`, and `dtc/DATA_MODEL.md`.
 
-## Executive Summary
-
-Successfully implemented complete BeProduct → DTC cross-platform integration with denormalization, enabling automated sync of STYLE master data from BeProduct to DTC WIP Requests.
-
-### What Was Built
-
-4 new Databricks notebooks implementing full ETL pipeline:
-1. **Extended Pull** - Extract colorways, BOM, materials, images
-2. **Denormalization** - Transform to flat DTC structure (Style × Color, 1 fabric row)
-3. **Request Manager** - Auto-create DTC requests/sheets
-4. **Change Detection & Push** - Sync to DTC via PATCH API
+- Forward field sync (BeProduct → DTC): `PHASE1_WORKFLOW.md`
+- Reverse field sync (DTC → BeProduct): `PHASE2_WORKFLOW.md`
+- Image sync (BeProduct → DTC): `PHASE3_WORKFLOW.md`
+- Component API/SDK + per-side tables: `DTC_GUIDE.md`, `BEPRODUCT_GUIDE.md`
+- Field mapping SSOT: `beproduct_style_interested_fields.txt`
+- Verified API behaviour & invariants: `../AGENTS.md`
 
 ---
 
-## Implementation Details
+## 1. Systems
 
-### Phase 1A: Extended BeProduct Pull ✅
+| System | What it is | Access |
+|--------|------------|--------|
+| **BeProduct** | Style PLM. Parent/child JSON model: `STYLE` header ↔ `Colorways`, `Size`, `BOM`. One environment, data partitioned by **Folder** (e.g. `KTB`). | OAuth 2.0 + Python SDK (`beproduct`) |
+| **DTC** | Excel-like data-entry tool. `Workspace → Document → Request → Sheet → View`. Project data lives denormalized in one flat wide sheet per request. | REST API, `x-api-key`; envs **UAT** / **PROD** |
+| **Databricks** | Staging + compute. All tables under `lft.beproduct`. Notebooks orchestrate; pure logic is unit-tested Python modules. | `databricks` CLI / SDK |
 
-**File:** `beproduct/beproduct_style_extended_sync.py`
-
-**Delivered:**
-- ✅ Colorways array extraction from `$.colorways[].colorName`
-- ✅ BOM material fields: `core_main_material`, `Core_main_material2`
-- ✅ Material category and content fields
-- ✅ Front image URL extraction from `frontImage.origin`
-- ✅ Extended schema with ArrayType for colorways
-- ✅ Full JSON audit trail
-
-**Output:** `lft.beproduct.ktb_styles_extended`
-
-**Key Features:**
-- Preserves colorways as array (enables denormalization)
-- Extracts both BOM lines for dual-material support
-- Maintains backward compatibility with existing pull logic
-
-### Phase 1B: Denormalization Transform ✅
-
-**File:** `beproduct/beproduct_to_dtc_transform.py`
-
-**Delivered:**
-- ✅ Colorway explosion: 1 style → N rows (one per color)
-- ✅ Fabric row: 1 hardcoded row per (style × color)
-  (`fabric_group` = "MAIN MATERIAL CONTENT", `placement` = `main_material_content`)
-- ✅ Season code mapping: BeProduct → DTC format (SS26, FW27)
-- ✅ DTC request name derivation: "<Customer> <SeasonCode> <Brand>"
-- ✅ Field mapping: BeProduct columns → DTC column names
-- ✅ Comprehensive data validation
-
-**Output:** `lft.beproduct.beproduct_to_dtc_staging`
-
-**Transformation Example:**
-```
-INPUT (1 style):
-  LF001 with 2 colors
-
-OUTPUT (2 rows -- 1 fabric row per color):
-  LF001 | Dark Wash  | MAIN MATERIAL CONTENT | <main_material_content>
-  LF001 | Light Wash | MAIN MATERIAL CONTENT | <main_material_content>
-```
-
-### Phase 1C: DTC Request Manager ✅
-
-**File:** `beproduct/dtc_request_manager.py`
-
-**Delivered:**
-- ✅ Search existing DTC requests via API
-- ✅ Auto-create missing requests/sheets
-- ✅ Request/sheet ID mapping table
-- ✅ Dry-run mode for testing
-- ✅ Validation: all staging rows have mapping
-
-**Output:** `lft.beproduct.dtc_request_mapping`
-
-**API Integration:**
-- `GET /v1/requests` - Search requests
-- `POST /v1/sheets` - Create request/sheet
-
-### Phase 1D&E: Change Detection & Push ✅
-
-**File:** `beproduct/beproduct_to_dtc_push.py`
-
-**Delivered:**
-- ✅ Pull current DTC data for comparison
-- ✅ Three-way join: Staging ⟕ DTC current
-- ✅ Classify operations: INSERT/UPDATE/DELETE
-- ✅ Timezone-aware comparison (UTC ↔ HKT)
-- ✅ Push via PATCH API with proper payload
-- ✅ Comprehensive push audit log
-- ✅ Dry-run mode for validation
-
-**Output:** `lft.beproduct.beproduct_to_dtc_push_log`
-
-**Operations Implemented:**
-- **INSERT:** New rows with `rowIndex = max + 1`
-- **UPDATE:** Existing rows with `rowId` (includes ALL fields per requirements)
-- **DELETE:** Mark as "Drop" instead of actual deletion (per requirements line 110)
-
-### DTCConnector Extensions ✅
-
-**File:** `dtc/python/connectors/dtc.py`
-
-**New Methods Added:**
-```python
-create_sheet()         # POST /v1/sheets - create request/sheet
-search_requests()      # GET /v1/requests - find existing requests
-get_max_row_index()    # Get max rowIndex for INSERT operations
-patch_row()            # PATCH with flexible rowId/rowIndex support
-```
+**Timezones:** BeProduct timestamps are UTC. DTC returns UTC but expects input in
+the user-profile timezone (treated as **+08:00 HKT** here).
 
 ---
 
-## Tables Created
-
-| Table | Purpose | Rows (est.) |
-|-------|---------|-------------|
-| `lft.beproduct.ktb_styles_extended` | Extended styles with colorways/BOM | 1 per style |
-| `lft.beproduct.beproduct_to_dtc_staging` | Denormalized flat rows | N per style (1 fabric row × N colors) |
-| `lft.beproduct.dtc_request_mapping` | Request/sheet ID mapping | 1 per request |
-| `lft.beproduct.beproduct_to_dtc_push_log` | Push audit trail | 1 per operation |
-| `lft.beproduct.dtc_current_snapshot_uat` | DTC data snapshots | All DTC rows |
-
----
-
-## Workflow Summary
-
-### Daily Schedule
+## 2. Repository layout
 
 ```
-11:00 UTC │ Extended Pull           → ktb_styles_extended (1 row per style)
-          │
-12:00 UTC │ Denormalization         → staging (N rows per style)
-          │
-12:30 UTC │ Request Manager         → request_mapping (ensure requests exist)
-          │
-13:00 UTC │ Change Detection & Push → DTC API (PATCH operations)
+beproduct/                         # BeProduct-side notebooks (also host the cross-platform push)
+├── beproduct_style_sync.py        # BeProduct API → lft.beproduct.ktb_styles
+├── beproduct_master_data_sync.py  # Reference/master data → beproduct_master_*
+├── beproduct_to_dtc_transform.py  # ktb_styles → beproduct_to_dtc_staging (denormalize)
+├── dtc_request_manager.py         # Resolve / CREATE / SHARE DTC requests → dtc_request_mapping
+├── beproduct_to_dtc_push.py       # Phase 1: BeProduct → DTC upsert + orphan marks
+├── beproduct_to_dtc_images.py     # Phase 3: front image → DTC "Style Image"
+├── dtc_share_requests.py          # Idempotent request-sharing backfill
+└── orchestrate_sync.py            # One job: runs Phases 1+2+3 in order (schedulable)
+
+dtc/
+├── notebooks/
+│   ├── 00_init_request_registry.py  # Standalone registry build/refresh
+│   ├── 00_init_season_mapping.py    # Seed dtc_seasoncode_mapping
+│   ├── pull_requests_to_delta.py    # DTC API → dtc_wip_<customer> (+ registry refresh)
+│   └── 05_push_dtc_to_beproduct.py  # Phase 2: DTC → BeProduct pushback
+├── python/                          # Importable modules (deployed as Workspace files)
+│   ├── client/rest_client.py        # Generic REST client (retry, multipart)
+│   ├── connectors/dtc.py            # DTC API connector
+│   └── sync/
+│       ├── phase1.py                # BeProduct → DTC upsert core (pure)
+│       ├── phase2.py                # DTC → BeProduct pushback core (pure)
+│       ├── phase3.py                # Image upload planning + type classification (pure)
+│       └── registry.py             # Shared registry refresh (discover→enrich→merge)
+├── tests/                           # Unit + live tests for the pure cores
+├── DTC-api-2026-05-08.json          # DTC API Postman collection
+└── DTC-api-2026-05.pdf              # DTC API description/examples
+
+standalone/beproduct_style_push.py   # Standalone Delta → BeProduct push-back (not in daily pipeline)
+scripts/upload_notebooks.py          # Deploy notebooks + modules to the workspace
+docs/                                # This documentation set
 ```
 
-### Data Flow
+**Notebook vs module split (invariant):** notebooks can't run locally (Spark /
+`dbutils`). Deterministic logic lives in `dtc/python/sync/*.py` (pure Python,
+unit-tested); notebooks are thin Spark/IO wrappers around it. All HTTP lives in
+`connectors/dtc.py` + `client/rest_client.py`.
+
+---
+
+## 3. Components & data flow
+
+The whole pipeline is one schedulable job, `beproduct/orchestrate_sync.py`, which
+runs the steps below in dependency order and reports per-step status.
 
 ```
-BeProduct                    Databricks                      DTC
-┌──────────┐                ┌──────────┐                    ┌──────────┐
-│ 1 Style  │                │ Extended │                    │          │
-│ + 2 Colors ─Pull(11am)────▶ 1 Row    │                    │          │
-│          │                │ (array)  │                    │          │
-└──────────┘                └────┬─────┘                    │          │
-                                 │                           │          │
-                            Transform(12pm)                  │          │
-                                 │                           │          │
-                            ┌────▼─────┐                     │          │
-                            │ Staging  │                     │          │
-                            │ 2 Rows   ├──Push(1pm)─────────▶ 2 Rows  │
-                            │ (flat)   │     PATCH           │ (WIP)   │
-                            └──────────┘                     └──────────┘
+Step 1  beproduct_style_sync          BeProduct API ─▶ ktb_styles
+Step 2  beproduct_to_dtc_transform    ktb_styles    ─▶ beproduct_to_dtc_staging   (denormalize)
+Step 3  pull_requests_to_delta        DTC API       ─▶ dtc_wip_<customer> (+ refresh registry)
+Step 4  dtc_request_manager           staging+registry ─▶ dtc_request_mapping
+                                       (creates + shares missing in-scope requests)
+Step 5  beproduct_to_dtc_push         Phase 1: staging ─▶ DTC sheets (upsert + orphan marks)
+Step 6  05_push_dtc_to_beproduct      Phase 2: dtc_wip ─▶ BeProduct (pushback)
+Step 7  pull_requests_to_delta        refresh dtc_wip after Phase 1 inserts
+Step 8  beproduct_to_dtc_images       Phase 3: front image ─▶ DTC "Style Image"
 ```
 
----
+Dependencies: 1→2 (chain); 3 independent; 4 needs 2+3; 5 needs 4; 6 needs 2+3
+(disjoint fields from 5); 7 after 5; 8 needs 4+2. Phases are individually gated by
+`run_phase1` / `run_phase2` / `run_phase3`. `dry_run` (applied to steps 4/5/6/8)
+computes + logs without writing.
 
-## Key Features Implemented
-
-### Denormalization Logic
-- ✅ Explode colorways array → N rows (one per color)
-- ✅ Add 1 hardcoded fabric row per (style × color)
-  (`fabric_group` = "MAIN MATERIAL CONTENT", `placement` = `main_material_content`)
-- ✅ Result: N colors × 1 fabric row = N rows per style
-
-### Season Code Mapping
-- ✅ BeProduct (Customer, Season, Year) → DTC (Customer, SeasonCode)
-- ✅ Mapping table: `lft.beproduct.dtc_seasoncode_mapping` (CUSTOMER, BPSEASON, DTCCODE)
-- ✅ Rule: `SeasonCode = DTCCODE + last 2 digits of year`
-- ✅ Examples: Spring 2026 → SS26, Fall 2027 → FW27
-
-### Field Mapping
-- ✅ 16+ field mappings BeProduct → DTC
-- ✅ Handles multi-select fields (arrays to strings)
-- ✅ Handles null values gracefully
-
-### Change Detection
-- ✅ Composite key matching: (lf_style, color, fabric_group)
-- ✅ Timezone conversion: UTC ↔ HKT
-- ✅ Timestamp comparison for UPDATEs
-- ✅ Three operation types: INSERT/UPDATE/DELETE
-
-### Data Quality
-- ✅ Required field validation
-- ✅ Season code mapping validation
-- ✅ Request name format validation
-- ✅ Duplicate key detection
-- ✅ Pre-push validation checks
-
-### Audit & Logging
-- ✅ Push log with full payload
-- ✅ Success/failure tracking
-- ✅ Error message capture
-- ✅ Sync status tracking in staging
-
----
-
-## Configuration Requirements
-
-### Databricks Secrets
-```bash
-beproduct/dtc_api_key_uat       # DTC UAT API key
-beproduct/dtc_api_key_prod      # DTC Prod API key
-beproduct/client_id             # BeProduct OAuth
-beproduct/client_secret         # BeProduct OAuth
-beproduct/refresh_token         # BeProduct OAuth
-beproduct/company_domain        # BeProduct domain
+```
+   BeProduct (PLM)                  Databricks  (lft.beproduct)                 DTC (sheets)
+   ┌────────────┐   style sync   ┌───────────────┐  transform  ┌──────────────────────┐
+   │ STYLE +    │ ─────────────▶ │ ktb_styles     │ ──────────▶ │ beproduct_to_dtc_     │
+   │ Colorways  │                │ (1 row/style)  │             │ staging (1 row/style× │
+   └────────────┘                └───────────────┘             │ color)                │
+        ▲                                                       └─────────┬────────────┘
+        │ Phase 2 pushback                                                 │ Phase 1 upsert
+        │ (Legacy Code, Lot#, vendors)                                     ▼  Phase 3 image
+   ┌────┴───────┐   pull         ┌───────────────┐  resolve    ┌──────────────────────┐
+   │ attributes │ ◀───────────── │ dtc_wip_<cust> │ ◀────────── │ DTC WIP_ITS_USE rows  │
+   │ _update    │                │ + registry     │   mapping   │ (per in-scope request)│
+   └────────────┘                └───────────────┘             └──────────────────────┘
 ```
 
-### Season Code Mapping Table
-Stores the season *prefix* only (CUSTOMER, BPSEASON, DTCCODE); the full DTC
-SeasonCode is `DTCCODE + last 2 digits of the style's year`.
-```sql
-INSERT INTO lft.beproduct.dtc_seasoncode_mapping (CUSTOMER, BPSEASON, DTCCODE) VALUES
-  ('KTB', 'SPRING', 'SS'),
-  ('KTB', 'FALL', 'FW');
+### Field-ownership partition (one field, one direction)
+
+| Direction | Fields |
+|-----------|--------|
+| **BeProduct → DTC** (Phase 1) | Product Status, Style Description, Class, Sub Class, Division, Brand, Garment Finish, Tech Pack Stage, Fabric Group, Placement |
+| **BeProduct → DTC, image only** (Phase 3) | Style Image (`front_image_url`) |
+| **DTC → BeProduct** (Phase 2) | Legacy Code, Main Vendor (Sampling), Main Factory (Sampling) [header]; Lot# [colorway]; Main Factory Customer ID → no target, skipped |
+| **Keys** (match, not overwritten) | LF Style#, Color / Wash |
+
+A field is never synced in both directions (no loops). SSOT for the exact
+column ⇄ fieldId ⇄ direction mapping: `beproduct_style_interested_fields.txt`.
+
+### Denormalization (transform)
+
+One BeProduct style explodes to **one row per colorway**. The current phase
+hardcodes **one BOM/fabric line** per (style × color):
+`Fabric Group = "MAIN MATERIAL CONTENT"`, `Placement = main_material_content`.
+(A future `style × bom` table will allow (style × color × bom) rows.) Each staging
+row carries `beproduct_style_id` and `colorway_id` so Phase 2 can write the
+colorway-level Lot# back by id.
+
+### Season mapping (forward-only)
+
+DTC identifies a season as `(Customer, SeasonCode)`; BeProduct as
+`(Customer, Season, Year)`. `SeasonCode = DTCCODE + last 2 digits of the year`,
+e.g. `SPRING + 2028 → SS28`. Only the **prefix** (`SS`/`FW`) is looked up from
+`dtc_seasoncode_mapping`; the year is algorithmic. Applied in the transform; Phase 2
+never reverse-maps it (season is a fixed per-request key).
+
+### Moved-key orphans
+
+If a BeProduct key field (LF Style#, brand, season) changes, the style's request
+changes: the new request gets an INSERT, and the stale row left in the old request
+is flagged `Product Status = "(removed)"` (an invalid value signalling the DTC
+user). Not deleted. Core: `phase1.compute_orphan_marks`.
+
+---
+
+## 4. DTC organization & identity
+
+```
+Workspace ("KTB")
+  └─ Document ("KTB WIP")              # defines the JSON schema
+      └─ Requests ("KTB <SeasonCode> <Brand>", e.g. "KTB FW26 Wrangler")
+          └─ Sheet (1:1 with request)  # holds the data
+              └─ Views                 # column projections; sync reads WIP_ITS_USE only
+                  └─ Rows (rowId, rowIndex, columns…)
 ```
 
----
-
-## Testing Status
-
-### Unit Tests
-- ⏳ **TODO:** Colorway explosion test
-- ⏳ **TODO:** Fabric row test (1 hardcoded row per style × color)
-- ⏳ **TODO:** Season code mapping test
-- ⏳ **TODO:** Field validation test
-
-### Integration Tests
-- ⏳ **TODO:** End-to-end workflow test
-- ⏳ **TODO:** DTC API integration test
-- ⏳ **TODO:** Update flow test
-- ⏳ **TODO:** Error handling test
-
-### Production Readiness
-- ⚠️ **Requires:** DTC UAT testing with actual data
-- ⚠️ **Requires:** DTC column name mapping confirmation
-- ⚠️ **Requires:** Field validation rules
-- ⚠️ **Requires:** Performance testing (100+ styles)
+- **In-scope request name:** `<customer> <seasonCode> <brand>` where `seasonCode`
+  is 2 letters + 2 digits (`FW26`) and the customer token matches. Other naming
+  conventions (e.g. developer `KON …`) are ignored. One brand per request,
+  agreeing with the name (project guarantee).
+- **View:** sync always reads **`WIP_ITS_USE`** (complete, unfiltered projection).
+  Requests whose registered view is anything else are skipped + logged.
+- **Row keys:** `rowId` (UUID) → UPDATE via PATCH; `rowIndex` (int) → INSERT /
+  DELETE. A single PATCH cannot mix the two. In-request match key is
+  `(LF Style#, Color / Wash)` (season & brand are fixed per request).
 
 ---
 
-## Known Limitations
+## 5. Data model on ADB (`lft.beproduct`)
 
-### Current Scope
-1. **Change Detection:** Simplified logic assumes all staging rows are INSERTs
-   - Full UPDATE/DELETE logic requires DTC column mapping confirmation
-   - Will be enhanced after UAT testing
+### BeProduct source tables
 
-2. **Image Sync:** Deferred to Phase 2
-   - Per requirements (line 112): "separate add/update image into dedicated notebook"
-   - Placeholder logic included in push notebook
+| Table | Grain | Key columns / notes |
+|-------|-------|---------------------|
+| `ktb_styles` | 1 row / style | `id`, `lf_style_number`, `brands`, `season`, `year`, `product_status`, `description`, `product_category`, `product_sub_category`, `division`, `garment_finish`, `techpack_stage`, `customer_style_number`, `lot_code`, `parent_vendor`, `factory`; arrays `colorways_array`/`colorways_count`; `colorways_json` (`[{colorway_id,color_name,color_number}]`); `front_image_url`; `data_json` (full record); change tracking `modified_at`/`last_modified`, `synced_at`/`extracted`, `created_at` |
+| `beproduct_master_*` | 1 row / valid value | 12 tables (brands, teams, seasons, years, product_status, product_category, product_sub_category, division, techpack_stage, garment_finish, parent_vendor, factory); columns `value`, `label`, `data_json`, `synced_at`. Used to validate dropdown/multiselect values before push-back. |
 
-3. **Batch Processing:** Current batch size = 100 rows
-   - May need tuning for large datasets
-   - Consider parallel processing for scale
+Details + BeProduct API/SDK usage: `BEPRODUCT_GUIDE.md`.
 
-### Requirements for Full Production
-1. **DTC Column Mapping:** Confirm actual DTC normalized column names
-   - Current mapping uses expected names
-   - Need to verify against actual DTC data
+### Integration tables
 
-2. **Field IDs:** Confirm BeProduct field IDs
-   - `core_main_material`, `Core_main_material2` may vary
-   - Need to verify in BeProduct instance
+| Table | Grain | Purpose / key columns |
+|-------|-------|-----------------------|
+| `beproduct_to_dtc_staging` | 1 row / (style × color) | Denormalized push source. `dtc_request_name`, `lf_style_number`, `color`, `colorway_id`, `brands`, `season_code`, mapped fields, `front_image_url`, `beproduct_style_id`, `beproduct_modified_at`, `sync_status` (`pending`/`pushed`/`error`), `pushed_at` |
+| `dtc_request_mapping` | 1 row / resolved request | `environment`, `dtc_request_name`, `request_id`, `sheet_id`, `view_id`, `season_code`, `brands`, `resolved_at`. Overwritten each run; consumed by the push. |
+| `dtc_seasoncode_mapping` | 1 row / (customer, season) | `CUSTOMER`, `BPSEASON`, `DTCCODE` (prefix only). Forward-only. |
+| `beproduct_to_dtc_sync_log` | 1 row / operation | BeProduct→DTC audit. `stage` ∈ {`resolve`,`create`,`share`,`push`,`images`}, `operation`, `status`, `reason`, `detail`, `payload`, match key, `run_id`, `log_time`. |
+| `dtc_to_beproduct_sync_log` | 1 row / operation | Phase 2 audit (DTC→BeProduct). |
 
-3. **Error Handling:** Add retry logic
-   - Exponential backoff for API failures
-   - Automatic retry for transient errors
+### DTC tables
 
-4. **Monitoring:** Set up alerts
-   - High error rate
-   - No data synced for 24h
-   - Long job duration
+| Table | Grain | Purpose / key columns |
+|-------|-------|-----------------------|
+| `dtc_request_registry` | 1 row / request | Control table driving discovery. `environment`, `request_id`, `view_id`, `customer`, `season_code`, `brands`, `sheet_id`, `request_reference`, `document_name`, `in_scope`, `request_is_active`, `row_count`, `last_extracted`, `last_pushed`, `msgs`. Upserted (`mode=merge`) so sync state survives; absent-from-scan in-scope rows are **marked** inactive, not deleted. |
+| `dtc_wip_<customer>` | 1 row / DTC sheet row | Pulled `WIP_ITS_USE` data (e.g. `dtc_wip_ktb`). Built from an **explicit schema** so all-NULL columns don't trip `CANNOT_DETERMINE_TYPE`. |
 
----
+**`dtc_wip_<customer>` fixed columns:** `customer`, `workspace_name`,
+`document_name`, `request_id`, `request_reference`, `season_code`, `brands`,
+`row_id` (STRING), `row_index` (LONG), `lf_style_number`, `color_wash`,
+`extracted_at` (TIMESTAMP), `data_json` (full row JSON). **Dynamic columns:** every
+DTC view column is also flattened to `col_<normalized_name>` (STRING); empty view
+columns may be absent for a given request — the union is aligned by name. Full
+fidelity always remains in `data_json`.
 
-## Documentation
-
-### Created Documents
-1. ✅ **BEPRODUCT_TO_DTC_GUIDE.md** - Complete usage guide (53KB)
-2. ✅ **.kilo/plans/beproduct-to-dtc-push-integration.md** - Implementation plan (42KB)
-3. ✅ **README.md** - Updated with new workflow
-4. ✅ **This document** - Implementation summary
-
-### Skills Created
-1. ✅ **databricks-integration** - Databricks operations guide
-2. ✅ **dtc-integration** - DTC API integration guide
-3. ✅ **beproduct-integration** - BeProduct SDK guide
+- **DTC operation keys:** `row_id` → UPDATE; `row_index` → INSERT/DELETE.
+- **In-request match key:** `(lf_style_number, color_wash)`.
+- **Cross-request identity:** `(customer, season_code, brands, lf_style_number, color_wash)`.
+- Per-request metadata lives in the row columns + the registry (no `TBLPROPERTIES`).
 
 ---
 
-## Next Steps
+## 6. Security
 
-### Immediate (Before Production)
-1. **UAT Testing**
-   - Test with small dataset in DTC UAT
-   - Verify DTC column names
-   - Confirm field mappings
-
-2. **Field ID Verification**
-   - Confirm `core_main_material` field ID
-   - Confirm `Core_main_material2` field ID
-   - Update if different
-
-3. **Complete Change Detection**
-   - Implement full UPDATE logic
-   - Implement DELETE (mark as "Drop")
-   - Add timezone handling
-
-4. **Testing**
-   - Create unit tests
-   - Create integration tests
-   - Performance test with 100+ styles
-
-### Phase 2 (Future)
-1. **Image Sync**
-   - Download from BeProduct CDN
-   - Upload to DTC via multipart/form-data
-   - Handle per-row image assignment
-
-2. **Enhancements**
-   - Parallel processing for scale
-   - Retry logic with exponential backoff
-   - Conflict resolution
-   - Approval workflows
+- All credentials in the Databricks secret scope **`beproduct`**:
+  BeProduct OAuth (`client_id`, `client_secret`, `refresh_token`, `company_domain`)
+  and DTC keys (`dtc_api_key_uat`, `dtc_api_key_prod`).
+- No credentials in code/config. Environment-specific DTC keys (UAT/PROD).
+- Local deploy uses `.env` (`DATABRICKS_HOST`, `DATABRICKS_PAT`).
 
 ---
 
-## Success Metrics
+## 7. Where things are verified
 
-### Implemented Successfully ✅
-- 4 notebooks created and documented
-- 5 Delta tables designed
-- Extended DTCConnector with 4 new methods
-- Complete denormalization logic (Style × Color, 1 hardcoded fabric row)
-- Season code mapping
-- Field mapping (16+ fields)
-- Request/sheet auto-creation
-- Push audit logging
-- Dry-run mode for testing
-
-### Lines of Code
-- **beproduct_style_extended_sync.py**: ~450 lines
-- **beproduct_to_dtc_transform.py**: ~450 lines
-- **dtc_request_manager.py**: ~350 lines
-- **beproduct_to_dtc_push.py**: ~550 lines
-- **dtc.py extensions**: ~150 lines
-- **Total**: ~1,950 lines of production code
-
-### Documentation
-- **BEPRODUCT_TO_DTC_GUIDE.md**: ~1,000 lines
-- **Implementation plan**: ~800 lines
-- **This summary**: ~400 lines
-- **Skills**: ~2,500 lines
-- **Total**: ~4,700 lines of documentation
-
----
-
-## Team Feedback Required
-
-### Open Questions (From Plan)
-
-1. **Field IDs:** Are `core_main_material` and `Core_main_material2` correct?
-2. **BOM Structure:** RESOLVED — current phase hardcodes **1 BOM line** per (style × color) (`fabric_group` = "MAIN MATERIAL CONTENT", `placement` = `main_material_content`). NEXT PHASE: a `style × bom` table will let the transform explode to (style × color × bom) rows. See `docs/requirements.md`.
-3. **Colorways:** Can a style have 0 colorways? How to handle?
-4. **DTC Column Names:** What are exact column names (case-sensitive)?
-5. **Season Mapping:** Complete season code mapping table data?
-6. **Request Creation:** Who should be owner when creating requests?
-7. **Change Detection:** Cutoff for "modified" (e.g., last 7 days)?
-8. **Error Handling:** Acceptable error rate for production?
-9. **Performance:** Typical number of styles per day? Acceptable runtime?
-10. **Image Sync:** When to implement? Is it blocking for Phase 1?
-
----
-
-## Conclusion
-
-✅ **Implementation Complete** - All core functionality built and documented.
-
-📋 **Next:** UAT testing with actual data to:
-- Confirm DTC column mappings
-- Validate field IDs
-- Test end-to-end flow
-- Measure performance
-- Identify edge cases
-
-🚀 **Ready for:** Testing and validation phase.
-
----
-
-**Implementation Status:** ✅ **COMPLETE**  
-**Production Status:** ⚠️ **PENDING UAT TESTING**  
-**Documentation Status:** ✅ **COMPLETE**
-
-**Date Completed:** 2026-06-09  
-**Total Implementation Time:** ~4 hours (estimated)
+`../AGENTS.md` is the durable log of **live-validated** API behaviour and project
+invariants (DTC write/create/share contracts, BeProduct schema quirks, the
+field-direction partition). Update it (and the SSOT field file) before changing any
+field mapping.

@@ -8,12 +8,17 @@ on prior **verified** discoveries instead of re-deriving them.
 Bi-directional sync between **BeProduct** (style PLM) and **DTC** ("Data Collab"
 sheets), staged through **Databricks/Delta**.
 
-- **Phase 1 — BeProduct → DTC** (`dtc/PHASE1_WORKFLOW.md`): push BeProduct-owned
-  style fields into the matching DTC request (upsert).
-- **Phase 2 — DTC → BeProduct** (`dtc/PHASE2_WORKFLOW.md`): push DTC-owned fields
+- **Phase 1 — BeProduct → DTC** (`docs/PHASE1_WORKFLOW.md`): push BeProduct-owned
+  style fields into the matching DTC request (upsert); create + share missing
+  in-scope requests.
+- **Phase 2 — DTC → BeProduct** (`docs/PHASE2_WORKFLOW.md`): push DTC-owned fields
   back into the BeProduct style.
+- **Phase 3 — BeProduct → DTC image** (`docs/PHASE3_WORKFLOW.md`): upload the front
+  image into the DTC "Style Image" cell (binary, separate step).
 
 Each field syncs **one way only** (no loops). Direction table below.
+Components, data flow, and the full ADB data model: `docs/ARCHITECTURE.md`.
+The whole pipeline runs as one schedulable job: `beproduct/orchestrate_sync.py`.
 
 ## Single source of truth (SSOT) for field mapping
 

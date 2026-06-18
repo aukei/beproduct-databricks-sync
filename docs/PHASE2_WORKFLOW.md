@@ -5,6 +5,9 @@
 Phase 2 adds the reverse leg (DTC → BeProduct) on top of Phase 1 (BeProduct → DTC),
 giving a clean **one-way-per-field** bidirectional sync with no loops.
 
+> Forward flow: `PHASE1_WORKFLOW.md`. Image sync: `PHASE3_WORKFLOW.md`.
+> Data model for every table named here: `docs/ARCHITECTURE.md`.
+
 ---
 
 ## Field ownership (direction partition)
@@ -28,7 +31,7 @@ Each field syncs in exactly ONE direction. A field is never pushed both ways.
 | **Main Factory (Sampling)**|**DTC → BeProduct**| header `factory`                              |
 | **Lot#**                  | **DTC → BeProduct**| **colorway `drawing_number_walmart`**         |
 | **Main Factory Customer ID**| DTC → BeProduct  | *no BeProduct field yet → skipped + logged*   |
-| Style Image               | excluded           | (never pushed in Phase 1)                     |
+| Style Image               | BeProduct → DTC (image only) | `front_image_url` → DTC "Style Image" (Phase 3, binary upload — see `PHASE3_WORKFLOW.md`) |
 
 The DTC-owned columns are deliberately absent from Phase 1 `FIELD_MAPPING`
 (`dtc/python/sync/phase1.py`) and handled by Phase 2 (`dtc/python/sync/phase2.py`).

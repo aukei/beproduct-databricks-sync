@@ -152,7 +152,12 @@ w.workspace.import_(
 
 **Using upload helper script (project-specific):**
 ```python
-# Based on scripts/upload_to_databricks.py pattern
+# The project deploy script is scripts/upload_notebooks.py — it auto-discovers
+# notebooks (beproduct/, dtc/notebooks/) and modules (dtc/python/) and uploads them.
+#   python scripts/upload_notebooks.py            # all
+#   python scripts/upload_notebooks.py --dry-run  # preview
+#   python scripts/upload_notebooks.py --modules-only
+# The snippet below shows the underlying WorkspaceClient pattern it uses.
 import os
 from databricks.sdk import WorkspaceClient
 
@@ -755,7 +760,8 @@ job = w.jobs.create(
 - Unity Catalog: https://docs.databricks.com/unity-catalog/
 
 ### Project-Specific Patterns
-- Upload script: `scripts/upload_to_databricks.py`
+- Deploy script: `scripts/upload_notebooks.py` (notebooks + `dtc/python` modules)
+- Orchestrator job: `beproduct/orchestrate_sync.py` (runs Phases 1+2+3)
 - DTC connector: `dtc/python/connectors/dtc.py`
 - BeProduct notebooks: `beproduct/*.py`
-- Documentation: `README.md`, `QUICK_START.md`, `QUICK_REFERENCE.md`
+- Documentation: `README.md`, `QUICK_START.md`, `docs/ARCHITECTURE.md`
