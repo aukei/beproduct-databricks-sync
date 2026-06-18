@@ -37,6 +37,10 @@ __all__ = [
     "ImageSkip",
     "ImagePlan",
     "compute_image_uploads",
+    "DTC_NATIVE_IMAGE_TYPES",
+    "CONVERTIBLE_IMAGE_TYPES",
+    "ImageEncoding",
+    "classify_image_type",
 ]
 
 
@@ -67,6 +71,85 @@ def is_valid_image_url(url: Any) -> bool:
     if v is None:
         return False
     return v.lower().startswith(("http://", "https://"))
+
+
+# ---------------------------------------------------------------------------
+# Image-type policy (Phase 3 webp/etc. handling)
+# ---------------------------------------------------------------------------
+# DTC's sheet image endpoint accepts jpg/png directly (validated 2026-06-17:
+# 41 jpg/png uploads OK) but REJECTS webp with HTTP 400. So before upload we
+# classify the downloaded image and transcode anything that isn't natively
+# accepted but is a raster format we can decode; vector/unknown types are
+# skipped (cannot be rasterised here).
+
+# Types the DTC images endpoint accepts as-is.
+DTC_NATIVE_IMAGE_TYPES = {"image/jpeg", "image/png"}
+
+# Raster types we can transcode to PNG (Pillow-decodable) before upload.
+CONVERTIBLE_IMAGE_TYPES = {
+    "image/webp", "image/gif", "image/bmp", "image/x-ms-bmp",
+    "image/tiff", "image/x-tiff",
+}
+
+# Vector / explicitly-unsupported types: cannot rasterise in this pipeline.
+_VECTOR_TYPES = {"image/svg+xml"}
+
+_EXT_TO_TYPE = {
+    "jpg": "image/jpeg", "jpeg": "image/jpeg", "jpe": "image/jpeg",
+    "png": "image/png",
+    "webp": "image/webp", "gif": "image/gif", "bmp": "image/bmp",
+    "tif": "image/tiff", "tiff": "image/tiff", "svg": "image/svg+xml",
+}
+
+
+@dataclass
+class ImageEncoding:
+    """How to handle a downloaded image before upload."""
+    action: str          # 'upload' (as-is) | 'convert' (-> PNG) | 'skip'
+    content_type: Optional[str]  # the type to SEND (None when skip)
+    reason: str = ""     # populated for skip / convert (informational)
+
+
+def _ext_from_url(url: Optional[str]) -> Optional[str]:
+    if not url:
+        return None
+    path = str(url).split("?", 1)[0].split("#", 1)[0]
+    if "." not in path.rsplit("/", 1)[-1]:
+        return None
+    return path.rsplit(".", 1)[-1].strip().lower() or None
+
+
+def classify_image_type(content_type: Any, url: Optional[str] = None) -> ImageEncoding:
+    """
+    Decide whether a downloaded image can be uploaded as-is, must be transcoded
+    to PNG, or should be skipped.
+
+    Resolution order: trust the HTTP Content-Type first; if it is missing or
+    generic (e.g. application/octet-stream), fall back to the URL/file extension.
+
+    Returns an ImageEncoding:
+      * action='upload'  -> send as-is with content_type (jpg/png)
+      * action='convert' -> transcode to PNG before sending (content_type=image/png)
+      * action='skip'    -> unsupported (vector/unknown); content_type=None
+    """
+    ct = (str(content_type or "").split(";")[0].strip().lower()) or None
+    if ct in DTC_NATIVE_IMAGE_TYPES:
+        return ImageEncoding("upload", ct)
+    if ct in CONVERTIBLE_IMAGE_TYPES:
+        return ImageEncoding("convert", "image/png", f"transcode {ct} -> png")
+    if ct in _VECTOR_TYPES:
+        return ImageEncoding("skip", None, f"unsupported_vector_image:{ct}")
+
+    # Content-Type unhelpful (None / octet-stream / text) -> use the extension.
+    ext_type = _EXT_TO_TYPE.get(_ext_from_url(url))
+    if ext_type in DTC_NATIVE_IMAGE_TYPES:
+        return ImageEncoding("upload", ext_type)
+    if ext_type in CONVERTIBLE_IMAGE_TYPES:
+        return ImageEncoding("convert", "image/png", f"transcode {ext_type} -> png")
+    if ext_type in _VECTOR_TYPES:
+        return ImageEncoding("skip", None, f"unsupported_vector_image:{ext_type}")
+
+    return ImageEncoding("skip", None, f"unsupported_image_type:{ct or ext_type or 'unknown'}")
 
 
 # ---------------------------------------------------------------------------

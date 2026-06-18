@@ -44,14 +44,24 @@ Parameters:
 # COMMAND ----------
 
 import sys
+import subprocess
+
+# Pillow is needed to transcode non-native images (e.g. webp -> png) since DTC's
+# image endpoint rejects webp. Install quietly if missing.
+try:
+    from PIL import Image  # noqa: F401
+except Exception:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "Pillow"])
+
 sys.path.append("/Workspace/Repos/beproduct-sync/DTC/python")
 
+import io
 import json
 import uuid
-import mimetypes
 from datetime import datetime, timezone
 
 import requests
+from PIL import Image
 
 from connectors.dtc import DTCConnector
 from sync import phase1, phase3
@@ -160,22 +170,54 @@ def log(rows, name, request_id, operation, key, status, reason="", detail="", pa
 
 
 def download_image(url, timeout):
-    """Fetch image bytes from the BeProduct CDN; infer filename + content-type."""
+    """Fetch image bytes from the BeProduct CDN; return (bytes, content_type)."""
     resp = requests.get(url, timeout=timeout)
     resp.raise_for_status()
-    content = resp.content
-    ctype = (resp.headers.get("Content-Type") or "").split(";")[0].strip() or "image/jpeg"
-    # Derive a sensible filename/extension from the content-type (fallback .jpg).
-    ext = mimetypes.guess_extension(ctype) or ".jpg"
-    if ext == ".jpe":
-        ext = ".jpg"
-    return content, ctype, f"image{ext}"
+    ctype = (resp.headers.get("Content-Type") or "").split(";")[0].strip() or None
+    return resp.content, ctype
+
+
+_CT_EXT = {"image/jpeg": "image.jpg", "image/png": "image.png"}
+
+def prepare_for_dtc(img_bytes, content_type, url):
+    """
+    Decide + produce the bytes to upload, honoring DTC's accepted types.
+
+    Returns (out_bytes, out_content_type, filename, note) on success, or
+    (None, None, None, reason) to SKIP. DTC accepts jpg/png natively; webp/gif/
+    bmp/tiff are transcoded to PNG; vector/unknown are skipped.
+    """
+    enc = phase3.classify_image_type(content_type, url)
+    if enc.action == "skip":
+        return None, None, None, enc.reason
+
+    if enc.action == "upload":
+        # Trust classification but guard against a mislabeled/corrupt payload.
+        try:
+            im = Image.open(io.BytesIO(img_bytes)); im.load()
+        except Exception as e:
+            return None, None, None, f"decode_failed:{str(e)[:80]}"
+        return img_bytes, enc.content_type, _CT_EXT.get(enc.content_type, "image.png"), ""
+
+    # action == 'convert' -> transcode to PNG.
+    try:
+        im = Image.open(io.BytesIO(img_bytes)); im.load()
+    except Exception as e:
+        return None, None, None, f"decode_failed:{str(e)[:80]}"
+    out = io.BytesIO()
+    try:
+        im.save(out, format="PNG")
+    except Exception:
+        # palette/CMYK/LA etc. -> normalise to RGBA then save
+        im.convert("RGBA").save(out, format="PNG")
+    return out.getvalue(), "image/png", "image.png", enc.reason
 
 # COMMAND ----------
 
 log_rows = []
-totals = {"requests": 0, "uploads_ok": 0, "uploads_failed": 0,
-          "skipped": 0, "already_imaged_rows": 0, "download_failed": 0}
+totals = {"requests": 0, "uploads_ok": 0, "uploads_failed": 0, "converted": 0,
+          "skipped": 0, "already_imaged_rows": 0, "download_failed": 0,
+          "unsupported_type": 0}
 uploaded_count = 0  # respects max_uploads cap
 cap_reached = False
 
@@ -221,12 +263,23 @@ for name, m in mapping.items():
 
         # Download from BeProduct CDN.
         try:
-            img_bytes, ctype, fname = download_image(op.image_url, http_timeout)
+            raw_bytes, ctype = download_image(op.image_url, http_timeout)
         except Exception as e:
             log(log_rows, name, request_id, "IMAGE_UPLOAD", op.match_key, "error",
                 "download_failed", str(e)[:300], {"url": op.image_url})
             totals["download_failed"] += 1
             continue
+
+        # Classify + transcode (webp/etc -> png); skip vector/unknown types.
+        img_bytes, out_ctype, fname, note = prepare_for_dtc(raw_bytes, ctype, op.image_url)
+        if img_bytes is None:
+            log(log_rows, name, request_id, "IMAGE_UPLOAD", op.match_key, "skipped",
+                "unsupported_type", note, {"url": op.image_url, "content_type": ctype})
+            totals["unsupported_type"] += 1
+            continue
+        converted = note.startswith("transcode")
+        if converted:
+            totals["converted"] += 1
 
         # Upload to DTC.
         try:
@@ -234,11 +287,12 @@ for name, m in mapping.items():
                 connector.upload_row_image(
                     sheet_id, view_id, op.row_index, img_bytes,
                     column_name=phase1.STYLE_IMAGE_COL,
-                    filename=fname, content_type=ctype,
+                    filename=fname, content_type=out_ctype,
                 )
             log(log_rows, name, request_id, "IMAGE_UPLOAD", op.match_key, "ok",
-                "dry_run" if dry_run else "",
-                f"rowIndex={op.row_index} bytes={len(img_bytes)} type={ctype}",
+                "dry_run" if dry_run else ("converted" if converted else ""),
+                f"rowIndex={op.row_index} bytes={len(img_bytes)} type={out_ctype}"
+                + (f" ({note})" if converted else ""),
                 {"url": op.image_url, "rowIndex": op.row_index})
             uploaded_count += 1
             totals["uploads_ok"] += 1

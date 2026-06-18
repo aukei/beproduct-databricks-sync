@@ -1,8 +1,142 @@
 # bootstrapping
-@docs/requirements.md
 
-# Phase 1  $15
-Base on latest DTC admin guidelines: 
+## General info
+
+### Background
+- Prepare pipeline that sync data between BeProduct and DTC
+- Both BeProduct and DTC are SaaS with RESTful API - sparsely documented
+- BeProduct has a python SDK further abstracting part of its API
+
+### SDK & API specs
+- BeProduct SDK: https://python.beproduct.com/ (doc) https://github.com/BeProduct/BeProduct.Python.SDK (implementation)
+- BeBroduct API: https://developers.beproduct.com/swagger/v1/swagger.json  (Swagger JSON)
+- BeProduct environmnts to consider: only 1 environment, data split by Folder
+- DTC API & endpoints: ./dtc/DTC-api-2026-05-08.json (postman API project dump), ./dtc/DTC-api-2025-05.pdf (description and example)
+- DTC environments to consider: UAT, PRD
+
+## Basic assumptions
+- BeProduct, DTC are JSON stores
+- BeProduct roughly follows a Parent - Child data model. "STYLE" is the header, link with "Size", "Colorways", "BOM" that store details
+- DTC is a Excel-like genric data entry tool. In this project relavent data are store denormalized in a flat wide worksheet.
+
+## General directions
+- DTC prefer patch API (=update)to push API (=overwrite)
+    - "Document" defines Json schema
+    - "Request" instantiate "Documents", hold metadata e.g. RequestName, Owner etc
+    - "Sheet" hold actual data of a "Request". As of today, All Requests have 1-to-1 relationship to a Sheet.
+    - "View" is subset of fields of a "Document" applicable to any "Request"/"Sheet" of that same type.
+    - Document identified by document_id
+    - Data identified by (request_id + sheet_id)
+    - View identifed by view_id
+    
+- BeProduct data domains: Styles, Materials, Colors, Images, Blocks, Directory, MasterData
+- If Databricks is involved, tables to be put under Unity Catalog lft.beproduct
+    - Access ADB with 'databricks' CLI
+
+- BeProduct has full timestamp with timezone (UTC). DTC output timestamp as UTC (on retrieve). DTC expects input timestamp in user profile timezone, treat as +0800 HKT in current setup.
+
+# Phase 1 $25
+
+## Objectives
+- Sync selected fields from BeProduct "Style" to DTC "WIP" Requests
+- Customer to focus on = KTB
+- On DTC, denormalized to STYLE x COLOR x BOM
+- The integration workflow to be scheduled and run entirely in Databricks as job
+- Data that should be synced
+    - Read from BeProduct: [Product Status, Image, LF Style number, Description, Product Category, Product Sub Category, Division, Brand, Color, Garment Finish, Tech Pack Stage, Group, Fabric Placement, Fabric Article]
+    - Upsert to corresponding sheet/row in DTC: [Product Status, Style Image, LF Style#, Style Description, Class, Sub Class, Division, Brand, Color / Wash, Garment Finish, Tech Pack Stage,Fabric Group, Placement, Mill Fabric Article #]
+    
+    
+## known data structure and access patterns
+- BeProduct: Reference streamlit application implementation in ./app/ui/main.py
+    - BeProduct to Databricks: project artifacts in ./databricks/
+    - A style is uniquely identified by Customer + Brand + LFStyle# + Season
+        - Customer = Folder Name
+        - Brand = $."headerData"."fields"[name ="brand"]
+        - LFStyle# = $."headerData"."fields"[name = "LF Style Number"]
+        - Season = $."headerData"."fields"[name = "SEASON"]
+    - 1 Style link with 1 Colorway
+        - Data are in $."headerData"."fields"
+        - A Colorway can contain more than 1 color name
+            - Array $."colorways"
+            - Interested in $."colorways"[]."colorName"
+        - i.e. 1 style : n color = n DTC rows
+    - 1 Style link with 1 BOM
+        - Each BOM is a datagrid of Material (i.e. Fabric) + Color
+        - There is currently NO direct API to retrieve BOM data
+        - CURRENT PHASE: hard code each style to have **1 BOM line** per (style × color):
+          (Fabric Group, Placement) = ("MAIN MATERIAL CONTENT", value of $.headerData[id="main_material_content"].value)
+          - i.e. 1 style : n color : 1 BOM = n DTC rows
+        - NEXT PHASE: introduce a `style × bom` table; the transform will then explode
+          to (style × color × bom) rows instead of the single hardcoded BOM line.
+        
+
+- DTC: Reference ./EXPLORATION_SUMMARY.md, ./databricks/dtc/README.md
+    - DTC to Databrricks: project artifacts in ./databricks/dtc/    
+    - This phrase primarily focus on Requests of the type "WIP" document using the "WIP_ITS_USE" view (i.e. complete data)
+        - Workspace = "<Customer>", i.e. "KTB"
+        - Document = "<Customer> WIP", i.e. "KTB WIP" in this instance 
+    - DTC Requests are named "<Customer> <SeasonCode> <Brand>"
+        - SeasonCode is always 4 character string, e.g. SS26, SS27, FW28
+        - Brand is everything after SeasonCode including spaces
+        - SeasonCode = SSYY = 2-characters season + 2-digit year.
+            - use databricks lft.beproduct.dtc_seacode_mapping (customer, BeProduct Season, DTCcode)            
+            - DTC season = SSYY; BeProduct "Year" = 20YY
+            - all other season code log errors
+    - Use DTC "patch" API for existing (style + color + material)   >> keep "sheetId" / "rowIndex". "rowID" can be used in lieu of "rowIndex" 
+        - put in all fields of that row, even if the value is unchanged
+        - ref page 18 of pdf: PATCH /v1/sheets/{sheetId}/views/{viewId}
+
+    - Use DTC "patch" API also for new (style + color + material)  >> assign a new rowIndex (max(rowIndex) of current sheet + 1)
+        - put in all fields of that row that have value
+        
+    
+    - Retrieve DTC data: get_requests(workspace + document), returns ALL matching (request ID + sheet ID)
+    - Patch data: patch(sheet id + view ID [+ rowIndex] + delta data), preferably only affected row (i.e. with rowIndex or rowID)
+
+- Mapping process 
+    - match [customer + brand + style# + season + color + material]    
+    - new Seasoncode / Brand: need new DTC Sheet
+        - Create sheet () return request id + sheet id
+        - Then use Patch api to INSERT (dense_rank() over partition by brand/customer/seasonId)
+        - For each row do ImageInsert flow below
+        - "create sheet" API on p.15 - POST /v1/sheets. This should return both requestId and sheetId on success.
+    - new rows on existing sheet:
+        - patch api require assign rowIndex (max(DTC sheet)+1)
+        - For each of these rows, do ImageInsert flow
+    - Update existing row:
+        - BeProduct_Style_modifiedAt > DTC_row_Updated_at *beware of timezone*
+        - keep request ID, sheet ID, row ID, row Index
+        - Non image fields: assign those interested to DTC row
+        - Image:  separate from and after row CRUD, for each row updated
+            - if DTC.Style_Image is blank, do ImageInsert flow
+            - else next row - assume Front image will not change
+            "headerData"."frontImage" only. 
+             
+    - In case BeProduct rows < DTC rows, *"mark (extra DTC rows) Product Status = Drop"*, do not "DELETE rowid"
+    
+    - **separate add / update image into dedicated notebook** so we can tackle it later.
+
+    - ImageInsert flow
+        - If BP "headerData"."frontImage"."origin" is a proper url, use DTC API /v1/sheets/{sheetId}/views/{viewId}/images?rowindex={number}&columnname={text} to push binary into DTC
+        - Take "origin" from BeProduct CDN. Treat as binary data.
+        - "add sheet image" API on p.16 - POST /v1/sheets/{sheetId}/views/{viewId}/images?rowindex={number}&columnname={text} using multipart/form-data.
+        
+
+        
+## Tentative flow
+- Batch based
+1. download BeProduct: Masters + Style + ColorWay
+2. download DTC: all WIP Document of <workspace>. Decode Request name & Keep track of "sheetID - <brand> <session>" mapping
+3. Join (1) to form full view of current BeProduct Image
+4. Compare (2) to (1):
+    4.1. For those "1" not matching any "2" > mark for PUSH
+        4.1.1. Determine if the DTC Request exists. If not, LOG ERROR
+        4.1.2. If exist, push the rows to that Request
+    4.2: For those "1" that has matching row(S) in "2", mark for Patch
+        4.2.1. For each ROW, call a patch on that Request_id + row_id
+
+## Revised tentative flow Base on latest DTC admin guidelines: 
 - For phase 1, Customer = KTB (user param), workspace = ${custome}> = KTB (no change), Document = "${customer} WIP" = "KTB WIP" (no change), view = "WIP_ITS_USE" (no change, user param)
 - All "Requests" in scope are named "${customer} ${DTC seasoncode} ${brands}" e.g. "KTB FW26 Wrangler". There are many requests of the same Document of other names convention in the workspace, ignore them.
 - Tentative flow:
@@ -21,51 +155,23 @@ Base on latest DTC admin guidelines:
         4d. log detail exceptions to sync log table.
     5. No push back to BeProduct in this phase.
 
-# phase 1 continue
-how is the sync between DTC and Databricks being handled in current code?
-Read instructions @dtc/PHASE1_WORKFLOW.md and highlight gap.
+## Phase 1 Checking & Clarifications 
 
-Implement those missing pieces. Ask for clarification if in any doubt. given 1. always validate with live data. DTC / Databricks / Beproduct credentials are all setup in databricks. 2. use local test first before putting into notebook if unclear about API usage. 3. Sync control is a quick braindump, deliberate proper handling with ref to real data. 4. In case BeProduct data should be written to a DTC request that is not exist, log error in phase1. Phase 2 will look at way to create missing DTC request.
+- valid IN-SCOPE 'KTB ...' UAT request ID (sacrificial requestId) = 6a26581854e92e7acd8fa71b
+- Within a single in-scope request (e.g. 'KTB FW26 Wrangler'), can the per-row 'Brand' column contain multiple brands, or is it exactly one brand per request? (The KON sample mixes Modern/Wrangler/Lee, but that's out of scope.) This determines the (LF Style#, SeasonCode, Brand) match semantics.
+    - The project team assure me that this col Brand will be read only from user and is only populated by this suite of scripts. therefore only 1 brand per request, and it must agree with the request name. KON are developer test case without catering data consistency.
+- For validating the push (PATCH writes mutate live DTC data), how should I proceed in this phase?
+    - *Revised* all would-be requests to be created and share right assigned (see ENHANCEMENT)
+    - *original scope* should have been pre-created by project team, and they ought to be empty. if they are not empty, treat as sacrificial (honor the upsert logic anyway). if request does not exist then mark error.
 
-## Clarifications
-
-
-Request listing/search fails with this UAT key (400 on /v1/requests?workspaceName=KTB; 403 on workspace/document listing). How should in-scope 'KTB <seasoncode> <brands>' requests be discovered in Phase 1?
-please see if "workspaceName=Kontoor" return anything?
-Please provide a valid IN-SCOPE 'KTB ...' UAT request ID (and confirm this UAT API key can read it) so I can validate the upsert/push against real in-scope data. The only ID I have (69f076f0b7247a661226be9a) is the out-of-scope KON request.
-6a26581854e92e7acd8fa71b
-Within a single in-scope request (e.g. 'KTB FW26 Wrangler'), can the per-row 'Brand' column contain multiple brands, or is it exactly one brand per request? (The KON sample mixes Modern/Wrangler/Lee, but that's out of scope.) This determines the (LF Style#, SeasonCode, Brand) match semantics.
-The project team assure me that this col Brand will be read only from user and is only populated by this suite of scripts. therefore only 1 brand per request, and it must agree with the request name. KON are developer test case without catering data consistency.
-For validating the push (PATCH writes mutate live DTC data), how should I proceed in this phase?
-all would-be requests should have been pre-created by project team, and they ought to be empty. if they are not empty, treat as sacrificial (honor the upsert logic anyway). if request does not exist then mark error.
+## Enhancement 2026/06/18
+Enhancement to DTC sheet creation: from DTC developer, system assign full right to sheet creator at create time. for data to be visible to team, need to "Share" it to others (p.5-6 of pdf spec = POST POST /v1/requests/{requestId}/shares/{userEmail} , POST/v1/requests/{requestId}/shares/usergroups/{userGroupName})
+1. Share all views to "AI Agent WIP <aiagentwip@lifung.com>"
+2. Share "Full Version" view to "Fabric Group"
+3. Patch previous requests created during test.
 
 
-## TODO
-The implementation is complete and validated against live DTC data. Here's the summary.
-
-What I did
-I validated everything against the live DTC UAT API before/while coding (per your instruction #1/#2), and the validation caught several real bugs that would have broken the pipeline.
-
-Critical discoveries from live validation
-The connector's write contract was wrong: it sent {"columnValues": ...}, but the API requires PATCH /v1/sheets/{sheetId}/views/{viewId} with {"sheetData":[{...}]} (insert→rowIndex, update→rowId, both return 204). It also passed json= to RestClient methods that only accept data=.
-A single PATCH cannot mix rowId and rowIndex — updates/inserts must be separate batches.
-No row-DELETE endpoint exists (all variants 404) — fine, Phase 1 is upsert-only.
-Request listing is not permitted with this key (400/403) → discovery must be registry-driven.
-The interested-fields doc maps to columns that don't exist in the view (Division is really Division?; Garment Finish, Tech Pack Stage, Legacy Code, Main Vendor (Sampling) are absent) — pushing them would 400. The core now maps only to the 99 real columns and filters by the live view.
-Changes (matched to your 4 directives)
-Live-validated every read/write; ran a reversible insert→update→delete-neutralize against the sacrificial KTB FW26 Wrangler request.
-Local-first: dtc/python/sync/phase1.py is pure-Python with dtc/tests/test_phase1.py (unit) + dtc/tests/test_phase1_live.py (live, reversible). All pass.
-Sync control deliberated against real data: 00_init_request_registry.py creates the control table dtc_request_registry [request_id, view_id, customer, season_code, brands, last_extracted, last_pushed, row_count, msgs, in_scope, ...], populated by-id (no listing). Match key is (LF Style#, Color/Wash) within a request (season+brand fixed per request, confirmed one-brand-per-request); RowIndex preserved on UPDATE, sparse max+1 on INSERT; Style Image excluded; delta push via last_pushed; detailed exception logging to beproduct_to_dtc_sync_log.
-Missing requests → error, no creation: dtc_request_manager.py is now a validate-only resolver (missing/out-of-scope/inactive → logged error, excluded from push); beproduct_to_dtc_push.py only pushes resolved requests.
-Files
-New: phase1.py, 00_init_request_registry.py, pull_requests_to_delta.py, test_phase1.py, test_phase1_live.py
-Reworked: beproduct_to_dtc_push.py, dtc_request_manager.py, connectors/dtc.py, client/rest_client.py, sync/__init__.py, and realigned Phase 2's 04_push_changes.py to the corrected contract.
-Caveats
-Notebooks (Spark/Databricks) compile-check clean but can't be executed locally — only the connector + core were run live. The sacrificial UAT request has a few leftover blank rows (inserts can't be deleted, only neutralized); compute_upsert ignores fully-blank rows so they won't interfere.
-implement_prompts.txt and dtc/PHASE1_WORKFLOW.md show as untracked (pre-existing in your tree).
-Suggested next step: register real in-scope request IDs via 00_init_request_registry.py, then run the push with dry_run=true to inspect the plan in beproduct_to_dtc_sync_log before going live.
-
-# Phase 2  $128
+# Phase 2  $148
 Phase 2 DTC -> BeProduct seems trivial at this point, maybe add together. In this phase:
 1. cater rows that have key fields updated in beproduct causing DTC rows fall into different request.
 2. these DTC values updated to BeProduct corresponding style and push back to beproduct: "Legacy Code", "Lot#", "Main Vendor (Sampling)", "Main Factory (Sampling)", "Main Factory Customer ID"
@@ -84,9 +190,21 @@ mark stale DTC row "Product Status" to "(removed)" - this is not a valid BeProdu
 3. commit and update databricks notebook. 
 4. give a summary of steps to run the 2 workflows.
 
-# Phase 3 Image
+
+# Phase 3 Image $44
 Tackle image. Since image API is an operation on existing row, it cannot be handled at record insert time. Therefore tentatively:
 1. as an independent step after beproduct_to_dtc_push, reload all in-scope request/sheet rows from dtc ie. refresh dtc_wip_ktb, noting "Style Image" of each row is populated or not.
 2. if  the row "Style image" attribute is not populated, and corresponding BeProduct row has valid "front_image_url", then use p.16 "POST /v1/sheets/{sheetId}/views/{viewId}/images?rowindex={number}&columnname={text}" API to add image to the row.
 2.1 {columnname} should be "Style Image"
 2.2 Body is retrieved from front_image_url (e.g. curl), then put into request body in binary format as multipart/form-data
+
+
+# Checkpoint clean up 1
+- move PHASE*WORKFLOW to docs, update if necessary
+- add PHASE 3 WORKFLOW
+- ensure AGENTS.md, README.md correctly describe repo
+- ensure QUICK_START.md describe "setup, how to use, which notebook to run"
+- revise docs/ARCHITECTURE.md to cover components & data flow & data model on ADB - merge BEPRODUCT_TO_DTC_GUIDE.md, dtc/README.md, dtc/DATA_MODEL.md
+- i combined docs/requirements.md into /implement_prompts.txt
+- refactor docs/DTC_GUIDE.md BEPRODUCT_GUIDE.md so each cover that component's relevant API/SDK that jobs used, as well as relevant data model on ADB. 
+- suggest other project structure cleanup that is worthy

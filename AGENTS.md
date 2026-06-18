@@ -74,15 +74,23 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
   rowId (update) and rowIndex (insert) — send separate batches.
 - Row delete EXISTS: `DELETE /v1/sheets/{sheetId}/views/{viewId}/rows` body
   `{"rowIndexes":[...]}` → 204 (keys off rowIndex, not rowId).
-- Cell image upload (Phase 3, **NOT yet live-validated**):
+- Cell image upload (Phase 3, **LIVE-VALIDATED 2026-06-17**, 41 uploads OK):
   `POST /v1/sheets/{sheetId}/views/{viewId}/images?rowindex={int}&columnname=Style Image`
   with the image bytes as a **multipart/form-data** file part (binary). Operates
   on an EXISTING row (keys off lowercase `rowindex`), so it must run AFTER Phase 1
-  creates the rows. The JSON sheetData PATCH cannot set images. The multipart
-  file PART NAME (`file`) and success status are still **unverified** — confirm
-  against the sacrificial UAT request before a non-dry-run prod run. Connector:
+  creates the rows. The JSON sheetData PATCH cannot set images. **Confirmed**: the
+  multipart file PART NAME is **`file`**, `columnname="Style Image"` and the
+  `rowindex` query param all work (jpg + png uploaded successfully). Connector:
   `DTCConnector.upload_row_image` → `RestClient.post_multipart` (the only client
   method that sends `files=`/`params=` and does NOT force `application/json`).
+  **DTC REJECTS `webp` with HTTP 400** (3/3 webp rows failed; jpg/png accepted).
+  `beproduct_to_dtc_images` now classifies via `phase3.classify_image_type` and
+  **transcodes webp/gif/bmp/tiff → PNG (Pillow) before upload**; jpg/png upload
+  as-is; vector/unknown (svg, pdf, ...) are skipped with `unsupported_type`.
+  Separately, a subset of BeProduct CDN `frontImage.origin` URLs return **HTTP 403**
+  on download (Azure SAS auth — "signature" error) even within the SAS validity
+  window; affects only some files (36 png succeeded, 53 png failed), so it is a
+  per-file BeProduct CDN/SAS issue, NOT a Phase 3 code defect. Still open.
 - Request listing works via `GET /v1/requests` with `workspaceName`+`filters` in the
   **request body** (not query params; query param → 400 "Invalid workspaceName").
 - Registry refresh is the shared `sync.registry.refresh` (used by
@@ -134,7 +142,10 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
   `test_phase3.py`); idempotent (already-imaged rows skipped). The orchestrator
   (`orchestrate_sync.py`) runs it as Step 8, gated by `run_phase3`, preceded by a
   Step 7 re-pull of `dtc_wip_<customer>` so the table reflects Phase 1 inserts.
-  Still needs a UAT validation run (multipart part name + status unverified).
+  **Validated live 2026-06-17** (UAT full run): 41 uploads succeeded; open
+  follow-ups are DTC rejecting `webp` (400) and a subset of BeProduct CDN URLs
+  failing download with 403 (SAS auth) — both data/CDN-side, not core-logic bugs.
+  webp is now auto-transcoded to PNG (`phase3.classify_image_type` + Pillow).
 - **Phase 1 now CREATES missing in-scope DTC requests (2026-06-17, reverses prior
   scope).** The earlier rule "Phase 1 does NOT create requests; the project team
   pre-creates them" is superseded. `dtc_request_manager` creates missing **in-scope**
@@ -145,8 +156,30 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
   `sync.registry.refresh` (discover → enrich → merge), invoked automatically by
   `pull_requests_to_delta` and `dtc_request_manager` (default `refresh_registry=true`)
   and standalone by `00_init_request_registry`. NOTE: `create_sheet` is a live,
-  not-easily-reversible write that still needs a UAT validation run; there is no
-  delete-request in the connector.
+  not-easily-reversible write; there is no delete-request in the connector.
+  **`POST /v1/sheets` body shape VALIDATED LIVE 2026-06-18 (HTTP 201)** after the
+  first prod attempt 400'd on all 4 requests. The correct body is
+  `{workspaceName, documentName, requestReference (NOT requestName),
+  requestDescription (MUST be non-empty), viewName,
+  requestAssigneeSharingViewNames:[], sheetData:[]}`. Omitting the two arrays
+  crashes the server with 400 "Cannot read properties of undefined (reading
+  'map')"; empty arrays are accepted. Optional: `requestStatusName`
+  (e.g. "Factory Allocation"), `requestAssigneeEmail`. Success response nests ids
+  under `data` with a CAPITAL-S `SheetId`: `{"data":{"requestId":..,"SheetId":..}}`
+  — `create_sheet` now normalises this to flat `{requestId, sheetId, raw}`.
+- **Request sharing VALIDATED LIVE 2026-06-18 (HTTP 201).** A freshly created
+  request grants FULL rights to its CREATOR (the API identity) ONLY; the data is
+  invisible to the team until SHARED. `POST /v1/requests/{requestId}/shares/{userEmail}`
+  and `POST /v1/requests/{requestId}/shares/usergroups/{userGroupName}` (path
+  segments URL-encoded — group names have spaces), body
+  `{"viewNames":[...],"message":"...","sendEmail":"Y"|"N"}` → 201 (empty body).
+  Read current shares via `GET .../shares` and `.../shares/usergroups` (used for
+  idempotency). Connector: `share_request_with_user`, `share_request_with_usergroup`,
+  `get_request_shares`, `get_request_share_usergroups`. Project policy: share ALL
+  views with `aiagentwip@lifung.com` (AI Agent WIP) and the **Full Version** view
+  with the **Fabric Group** user group. Applied automatically by
+  `dtc_request_manager` at create time (`share_on_create=true`, `send_email=N`)
+  and backfillable via the idempotent `beproduct/dtc_share_requests` notebook.
 - **Legacy change-tracking pipeline removed (2026-06-17).** The old single-table
   `dtc_master_chart_uat` snapshot/change-log flow (`pull_dtc_to_delta`,
   `01_create_sync_tables`, `02_create_snapshot`, `03_detect_changes`,

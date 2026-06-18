@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "python"))
 
 from sync.phase3 import (
     is_image_populated, is_valid_image_url, compute_image_uploads,
+    classify_image_type,
 )
 
 _failures = []
@@ -102,6 +103,29 @@ dtc_rows = [{"LF Style#": " S1 ", "Color / Wash": "Blue ", "rowId": "r1", "rowIn
 bp_rows = [{"lf_style_number": "S1", "color": "Blue", "front_image_url": "https://cdn/s1.jpg"}]
 plan = compute_image_uploads(dtc_rows, bp_rows)
 check(len(plan.uploads) == 1, "whitespace-different keys still match")
+
+print("\n[11] classify_image_type() - native jpg/png upload as-is")
+e = classify_image_type("image/jpeg", "https://cdn/x.jpg")
+check(e.action == "upload" and e.content_type == "image/jpeg", "jpeg -> upload")
+e = classify_image_type("image/png; charset=binary", "https://cdn/x.png")
+check(e.action == "upload" and e.content_type == "image/png", "png (with params) -> upload")
+
+print("\n[12] classify_image_type() - webp/gif/bmp/tiff convert to png")
+for ct in ["image/webp", "image/gif", "image/bmp", "image/tiff"]:
+    e = classify_image_type(ct, None)
+    check(e.action == "convert" and e.content_type == "image/png", f"{ct} -> convert png")
+
+print("\n[13] classify_image_type() - svg/unknown skipped")
+check(classify_image_type("image/svg+xml", "https://cdn/x.svg").action == "skip", "svg -> skip")
+check(classify_image_type("application/pdf", "https://cdn/x.pdf").action == "skip", "pdf -> skip")
+
+print("\n[14] classify_image_type() - falls back to URL extension when CT generic")
+e = classify_image_type("application/octet-stream", "https://cdn/pic.webp?sig=abc")
+check(e.action == "convert" and e.content_type == "image/png", "octet-stream + .webp -> convert")
+e = classify_image_type(None, "https://cdn/pic.JPG?x=1")
+check(e.action == "upload" and e.content_type == "image/jpeg", "no CT + .JPG -> upload jpeg")
+e = classify_image_type("", "https://cdn/logo.svg")
+check(e.action == "skip", "no CT + .svg -> skip")
 
 # ---------------------------------------------------------------------------
 print("\n" + "=" * 60)

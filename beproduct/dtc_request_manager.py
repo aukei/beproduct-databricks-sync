@@ -86,6 +86,12 @@ dbutils.widgets.text("dtc_workspace", "KTB", "DTC Workspace")
 dbutils.widgets.text("dtc_document", "KTB WIP", "DTC Document (for created requests)")
 dbutils.widgets.text("dry_run", "true", "Dry run (true = never create)")
 dbutils.widgets.text("refresh_registry", "true", "Scan + refresh registry first")
+# Sharing: a freshly created request is visible only to its creator until shared.
+dbutils.widgets.text("share_on_create", "true", "Share newly created requests")
+dbutils.widgets.text("share_user_email", "aiagentwip@lifung.com", "Share-all-views user email")
+dbutils.widgets.text("share_user_group", "Fabric Group", "User group (blank = skip)")
+dbutils.widgets.text("group_view_names", "Full Version", "Views shared to group (CSV)")
+dbutils.widgets.text("send_email", "N", "Email share recipients (Y/N)")
 
 catalog = dbutils.widgets.get("catalog")
 schema = dbutils.widgets.get("schema")
@@ -96,6 +102,11 @@ workspace = dbutils.widgets.get("dtc_workspace").strip()
 document = dbutils.widgets.get("dtc_document").strip()
 dry_run = dbutils.widgets.get("dry_run").strip().lower() in ("true", "1", "yes", "y")
 refresh_registry = dbutils.widgets.get("refresh_registry").strip().lower() in ("true", "1", "yes", "y")
+share_on_create = dbutils.widgets.get("share_on_create").strip().lower() in ("true", "1", "yes", "y")
+share_user_email = dbutils.widgets.get("share_user_email").strip()
+share_user_group = dbutils.widgets.get("share_user_group").strip()
+group_view_names = [v.strip() for v in dbutils.widgets.get("group_view_names").split(",") if v.strip()]
+send_email = dbutils.widgets.get("send_email").strip().upper() or "N"
 
 staging_full = f"{catalog}.{schema}.{staging_table}"
 registry_full = f"{catalog}.{schema}.dtc_request_registry"
@@ -240,6 +251,38 @@ if to_create:
             print(f"  ✅ {name}: CREATED request_id={rid} sheet_id={sid}")
             log_rows.append((now, run_id, "create", environment, name, rid, "CREATE_REQUEST",
                              None, None, None, "created", "", f"sheet_id={sid}", None))
+
+            # Share the new request so it is visible to the team (creator-only
+            # by default). All views -> service user; group views -> user group.
+            if share_on_create and rid:
+                try:
+                    views = connector.get_views(rid)
+                    all_views = [v.get("viewName") for v in views if v.get("viewName")]
+                except Exception as ve:
+                    all_views = []
+                    print(f"     ⚠️  get_views failed for share: {ve}")
+                if share_user_email and all_views:
+                    try:
+                        connector.share_request_with_user(
+                            rid, share_user_email, all_views, send_email=send_email)
+                        print(f"     🔗 shared {len(all_views)} views -> {share_user_email}")
+                        log_rows.append((now, run_id, "share", environment, name, rid, "SHARE_USER",
+                                         None, None, None, "ok", "", f"{len(all_views)} views -> {share_user_email}", None))
+                    except Exception as se:
+                        print(f"     ❌ user share failed: {se}")
+                        log_rows.append((now, run_id, "share", environment, name, rid, "SHARE_USER",
+                                         None, None, None, "error", "share_failed", str(se)[:300], None))
+                if share_user_group and group_view_names:
+                    try:
+                        connector.share_request_with_usergroup(
+                            rid, share_user_group, group_view_names, send_email=send_email)
+                        print(f"     🔗 shared {group_view_names} -> group {share_user_group!r}")
+                        log_rows.append((now, run_id, "share", environment, name, rid, "SHARE_GROUP",
+                                         None, None, None, "ok", "", f"{group_view_names} -> {share_user_group}", None))
+                    except Exception as se:
+                        print(f"     ❌ group share failed: {se}")
+                        log_rows.append((now, run_id, "share", environment, name, rid, "SHARE_GROUP",
+                                         None, None, None, "error", "share_failed", str(se)[:300], None))
         except Exception as e:
             print(f"  ❌ {name}: create failed: {e}")
             log_rows.append((now, run_id, "create", environment, name, None, "CREATE_REQUEST",

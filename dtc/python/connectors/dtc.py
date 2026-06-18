@@ -12,6 +12,7 @@ import json
 import logging
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone
+from urllib.parse import quote
 import pandas as pd
 
 from client.rest_client import RestClient
@@ -78,6 +79,106 @@ class DTCConnector:
         logger.info(f"Fetching views for request: {request_id}")
         response = self.client.get(f"/v1/requests/{request_id}/views")
         return response.get("data", [])
+
+    # ------------------------------------------------------------------
+    # REQUEST SHARING
+    # ------------------------------------------------------------------
+    # A newly created request grants FULL rights to its creator only; for the
+    # data to be visible to the team it must be explicitly SHARED. Validated
+    # against the DTC Postman collection (Share Request):
+    #
+    #   POST /v1/requests/{requestId}/shares/{userEmail}
+    #   POST /v1/requests/{requestId}/shares/usergroups/{userGroupName}
+    #   body: {"viewNames": [...], "message": "...", "sendEmail": "Y"|"N"}
+    #
+    # The userEmail / userGroupName are PATH segments, so they are URL-encoded
+    # (group names like "Fabric Group" contain spaces).
+    # ------------------------------------------------------------------
+
+    def get_request_shares(self, request_id: str) -> List[Dict[str, Any]]:
+        """GET the users a request is shared with (best-effort; [] on error)."""
+        try:
+            resp = self.client.get(f"/v1/requests/{request_id}/shares")
+            return resp.get("data", []) if isinstance(resp, dict) else (resp or [])
+        except Exception as e:
+            logger.warning(f"get_request_shares({request_id}) failed: {e}")
+            return []
+
+    def get_request_share_usergroups(self, request_id: str) -> List[Dict[str, Any]]:
+        """GET the user groups a request is shared with (best-effort; [] on error)."""
+        try:
+            resp = self.client.get(f"/v1/requests/{request_id}/shares/usergroups")
+            return resp.get("data", []) if isinstance(resp, dict) else (resp or [])
+        except Exception as e:
+            logger.warning(f"get_request_share_usergroups({request_id}) failed: {e}")
+            return []
+
+    def share_request_with_user(
+        self,
+        request_id: str,
+        user_email: str,
+        view_names: List[str],
+        message: str = "",
+        send_email: str = "N",
+    ) -> Dict[str, Any]:
+        """
+        Share a request's views with a user (by email).
+
+        POST /v1/requests/{requestId}/shares/{userEmail}
+
+        Args:
+            request_id: DTC request ID
+            user_email: target user's email (path segment, URL-encoded)
+            view_names: list of view display names to share
+            message: optional notification message
+            send_email: "Y" to email the user, "N" (default) to share silently
+
+        Returns:
+            Parsed response (or {"status_code": <code>}).
+        """
+        seg = quote(str(user_email), safe="")
+        logger.info(
+            f"Share request {request_id} -> user {user_email}: views={view_names}"
+        )
+        return self.client.post(
+            f"/v1/requests/{request_id}/shares/{seg}",
+            data={"viewNames": list(view_names), "message": message,
+                  "sendEmail": send_email},
+        )
+
+    def share_request_with_usergroup(
+        self,
+        request_id: str,
+        user_group_name: str,
+        view_names: List[str],
+        message: str = "",
+        send_email: str = "N",
+    ) -> Dict[str, Any]:
+        """
+        Share a request's views with a user GROUP (by group name).
+
+        POST /v1/requests/{requestId}/shares/usergroups/{userGroupName}
+
+        Args:
+            request_id: DTC request ID
+            user_group_name: target group name (path segment, URL-encoded;
+                             e.g. "Fabric Group")
+            view_names: list of view display names to share
+            message: optional notification message
+            send_email: "Y" to email the group, "N" (default) to share silently
+
+        Returns:
+            Parsed response (or {"status_code": <code>}).
+        """
+        seg = quote(str(user_group_name), safe="")
+        logger.info(
+            f"Share request {request_id} -> group {user_group_name!r}: views={view_names}"
+        )
+        return self.client.post(
+            f"/v1/requests/{request_id}/shares/usergroups/{seg}",
+            data={"viewNames": list(view_names), "message": message,
+                  "sendEmail": send_email},
+        )
 
     def get_sheet(
         self, sheet_id: str, view_id: str, filters: Optional[Dict] = None
@@ -450,7 +551,7 @@ class DTCConnector:
         return self.delete_rows(sheet_id, view_id, [row_index])
 
     # ------------------------------------------------------------------
-    # IMAGE WRITE CONTRACT (Phase 3 — NOT YET LIVE-VALIDATED)
+    # IMAGE WRITE CONTRACT (Phase 3 — LIVE-VALIDATED 2026-06-17, 41 uploads OK)
     # ------------------------------------------------------------------
     # Cell images (e.g. the "Style Image" column) are NOT settable through the
     # JSON sheetData PATCH used for normal columns; they are binary and use a
@@ -460,11 +561,12 @@ class DTCConnector:
     #          ?rowindex={int}&columnname={display name}
     #     body: multipart/form-data with the image bytes as a file part
     #
-    # IMPORTANT: the query param name is lowercase "rowindex"; columnname is the
-    # column DISPLAY name ("Style Image"). The multipart file PART NAME ("file"
-    # below) and the success status code are still UNVALIDATED — verify live
-    # against the sacrificial UAT request (KTB FW26 Wrangler,
-    # 6a26581854e92e7acd8fa71b) before enabling a non-dry-run production run.
+    # CONFIRMED live: the query param name is lowercase "rowindex"; columnname is
+    # the column DISPLAY name ("Style Image"); the multipart file PART NAME is
+    # "file" (below). jpg and png upload successfully.
+    # CAVEAT: DTC REJECTS webp with HTTP 400 — convert/skip unsupported types
+    # before calling this. (Separately, some BeProduct CDN URLs 403 on download;
+    # that is a CDN/SAS issue upstream of this method.)
     # ------------------------------------------------------------------
 
     def upload_row_image(
@@ -583,40 +685,84 @@ class DTCConnector:
         document_name: str,
         request_name: str,
         request_description: str = "",
-        **kwargs
+        view_name: str = "WIP_ITS_USE",
+        sharing_view_names: Optional[List[str]] = None,
+        sheet_data: Optional[List[Dict[str, Any]]] = None,
+        request_status_name: Optional[str] = None,
+        request_assignee_email: Optional[str] = None,
+        **kwargs,
     ) -> Dict[str, str]:
         """
-        Create new DTC Request and Sheet.
-        
-        POST /v1/sheets
-        
+        Create a new DTC Request + Sheet.
+
+        POST /v1/sheets  (VALIDATED LIVE 2026-06-18, HTTP 201)
+
+        The endpoint's required body shape (per the DTC Postman collection and
+        confirmed live) is:
+          - `requestReference`  (NOT `requestName` — the old payload 400'd with
+            "Request reference is required.")
+          - `requestDescription` MUST be non-empty (empty string 400'd with
+            "Request description is required."); defaults to request_name here.
+          - `viewName`
+          - `requestAssigneeSharingViewNames` and `sheetData` MUST be present as
+            ARRAYS — omitting them crashed the server with 400 "Cannot read
+            properties of undefined (reading 'map')". Empty arrays are accepted.
+        Optional: `requestStatusName` (e.g. "Factory Allocation"),
+        `requestAssigneeEmail`.
+
+        Response (201) nests ids under `data` and uses a CAPITAL S `SheetId`:
+            {"data": {"requestId": "...", "SheetId": "..."}}
+        This method normalises that to a flat {"requestId", "sheetId", "raw"}.
+
         Args:
-            workspace_name: DTC workspace name (e.g., "KTB", "KTB")
-            document_name: Document name (e.g., "KTB WIP")
-            request_name: Request name (e.g., "KTB SS26 Wrangler")
-            request_description: Optional description
-            **kwargs: Additional fields for the request
-        
+            workspace_name: DTC workspace name (e.g. "KTB")
+            document_name: Document name new request is created under (e.g. "KTB WIP")
+            request_name: The request reference (e.g. "KTB SS26 Wrangler")
+            request_description: Description; defaults to request_name if blank
+                                 (the API rejects an empty description).
+            view_name: View the request is created for (default "WIP_ITS_USE")
+            sharing_view_names: assignee sharing view names (default [])
+            sheet_data: initial rows (default []; Phase 1 inserts rows later)
+            request_status_name: optional request status (e.g. "Factory Allocation")
+            request_assignee_email: optional assignee email
+            **kwargs: extra body fields (override defaults)
+
         Returns:
-            {
-                "requestId": "...",
-                "sheetId": "...",
-                ...
-            }
+            {"requestId": str|None, "sheetId": str|None, "raw": <response>}
         """
-        logger.info(f"Creating sheet: workspace={workspace_name}, document={document_name}, name={request_name}")
-        
-        payload = {
+        logger.info(
+            f"Creating sheet: workspace={workspace_name}, document={document_name}, "
+            f"reference={request_name}"
+        )
+
+        payload: Dict[str, Any] = {
             "workspaceName": workspace_name,
             "documentName": document_name,
-            "requestName": request_name,
-            "requestDescription": request_description,
-            **kwargs
+            "requestReference": request_name,
+            # API requires a non-empty description.
+            "requestDescription": request_description or request_name,
+            "viewName": view_name,
+            # These MUST be arrays or the server 400s on .map(); empty is fine.
+            "requestAssigneeSharingViewNames": sharing_view_names or [],
+            "sheetData": sheet_data or [],
         }
-        
+        if request_status_name:
+            payload["requestStatusName"] = request_status_name
+        if request_assignee_email:
+            payload["requestAssigneeEmail"] = request_assignee_email
+        payload.update(kwargs)
+
         response = self.client.post("/v1/sheets", data=payload)
-        logger.info(f"Created sheet: requestId={response.get('requestId')}, sheetId={response.get('sheetId')}")
-        return response
+
+        # Normalise the nested/oddly-cased response. Success body is
+        # {"data": {"requestId": "...", "SheetId": "..."}}; tolerate flat shapes too.
+        data = response.get("data", response) if isinstance(response, dict) else {}
+        if not isinstance(data, dict):
+            data = {}
+        request_id = data.get("requestId") or data.get("RequestId")
+        sheet_id = data.get("sheetId") or data.get("SheetId")
+        logger.info(f"Created sheet: requestId={request_id}, sheetId={sheet_id}")
+        return {"requestId": request_id, "sheetId": sheet_id, "raw": response}
     
     def search_requests(
         self,
