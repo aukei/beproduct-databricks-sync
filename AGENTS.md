@@ -244,6 +244,18 @@ added 350–410 s.
 
 **Remaining opportunity**: pre-warmed/keep-alive cluster eliminates 350–410 s cold
 start with zero code change (job configuration only).
+- **INCREMENTAL mode upsert bug fixed (2026-06-18):** `beproduct_style_sync.py`
+  was using `mode="append"` for INCREMENTAL writes, causing duplicates when the
+  BeProduct `FolderModifiedAt` filter (folder-scoped, not style-scoped) returned
+  styles that were already in `ktb_styles`. Fixed to `DeltaTable.merge` (keyed on
+  BeProduct style `id`) so INCREMENTAL correctly upserts — matched rows UPDATE,
+  new rows INSERT, unrelated rows are untouched. FULL mode remains `overwrite`.
+  The `FolderModifiedAt` filter returns all styles in any folder where ANY style
+  was modified after the cutoff (folder-level granularity), so INCREMENTAL can
+  legitimately return styles whose individual `modified_at` predates the cutoff.
+  `LFBP-1WTP0002 / Wrangler / Spring / 2028` has 3 distinct BeProduct style IDs
+  sharing the same key — a BeProduct data quality issue, not a sync bug; the
+  transform handles it with a WARNING and proceeds.
 
 ## Commands
 

@@ -675,15 +675,47 @@ if HAS_DATA:
         spark.sql(f"USE CATALOG {catalog_val}")
         spark.sql(f"CREATE SCHEMA IF NOT EXISTS {catalog_val}.{schema_val}")
         
-        write_mode = "overwrite" if refresh_mode_val == "FULL" else "append"
-        print(f"   Write mode: {write_mode}")
-        
-        (
-            df.write.format("delta")
-            .mode(write_mode)
-            .option("mergeSchema", "true")
-            .saveAsTable(full_table_path)
-        )
+        if refresh_mode_val == "FULL":
+            # FULL: overwrite the whole table with the complete fresh snapshot.
+            write_mode = "overwrite"
+            print(f"   Write mode: overwrite (FULL refresh, {len(rows)} styles)")
+            (
+                df.write.format("delta")
+                .mode("overwrite")
+                .option("mergeSchema", "true")
+                .saveAsTable(full_table_path)
+            )
+        else:
+            # INCREMENTAL: MERGE by BeProduct style id so that already-present
+            # styles are UPDATED (not duplicated) and genuinely new styles are
+            # INSERTED. Plain "append" would create duplicate rows because the
+            # BeProduct FolderModifiedAt filter is folder-scoped — any modification
+            # in the KTB folder causes all styles in that folder to qualify, so
+            # previously-synced styles can re-appear in the incremental result.
+            from delta.tables import DeltaTable
+            table_exists = spark.catalog.tableExists(full_table_path)
+            if table_exists:
+                write_mode = "merge (upsert by id)"
+                print(f"   Write mode: merge/upsert (INCREMENTAL, key=id, {len(rows)} styles)")
+                dt = DeltaTable.forName(spark, full_table_path)
+                (
+                    dt.alias("target")
+                    .merge(df.alias("source"), "target.id = source.id")
+                    .whenMatchedUpdateAll()
+                    .whenNotMatchedInsertAll()
+                    .execute()
+                )
+            else:
+                # Table doesn't exist yet (first run in INCREMENTAL mode) — treat
+                # as initial load.
+                write_mode = "overwrite (first run)"
+                print(f"   Write mode: overwrite (first run, {len(rows)} styles)")
+                (
+                    df.write.format("delta")
+                    .mode("overwrite")
+                    .option("mergeSchema", "true")
+                    .saveAsTable(full_table_path)
+                )
         
         final_count = spark.sql(f"SELECT COUNT(*) as cnt FROM {full_table_path}").collect()[0]["cnt"]
         print(f"✅ Data written successfully")
