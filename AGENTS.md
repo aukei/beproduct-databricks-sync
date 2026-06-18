@@ -253,9 +253,10 @@ start with zero code change (job configuration only).
   The `FolderModifiedAt` filter returns all styles in any folder where ANY style
   was modified after the cutoff (folder-level granularity), so INCREMENTAL can
   legitimately return styles whose individual `modified_at` predates the cutoff.
-  `LFBP-1WTP0002 / Wrangler / Spring / 2028` has 3 distinct BeProduct style IDs
-  sharing the same key — a BeProduct data quality issue, not a sync bug; the
-  transform handles it with a WARNING and proceeds.
+  `LFBP-1WTP0002 / Wrangler / Spring / 2028` had 3 distinct BeProduct style IDs
+  sharing the same key — resolved 2026-06-18 by reassigning the styles to different
+  brands in BeProduct. The next INCREMENTAL sync will update all three via MERGE
+  (keyed on `id`), restoring unique keys in `ktb_styles`.
 
 ## Commands
 
