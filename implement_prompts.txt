@@ -215,4 +215,5 @@ Tackle image. Since image API is an operation on existing row, it cannot be hand
 - sure refresh kilo skills
 - kilo plan - superseded by docs. bin it
 - implement_prompts - keep at /, but create a docs/prompts/opus_revision.md about the implementation (exclude task log elements) base on your understand of the prompt plus proj status, and write it in agent friendly way.
+    - i intended @docs/prompts/opus_revision.md  be like "how would you opus have written the prompt to this coding agent to create this what we have in this repo", intended for other (human) to learn the way to prompt effectively.
 - keep DTC API doc as is.
