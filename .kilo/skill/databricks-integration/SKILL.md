@@ -811,7 +811,18 @@ for i, cmd in enumerate(obj.get('commands', [])):
 - Per-request UPDATE loops (e.g., 66 iterations) = 66 Spark jobs = ~400-600s overhead
 - Fix: Replace per-request UPDATE loops with a single batch `MERGE INTO` using a temp view
 
-### Child notebooks via `dbutils.notebook.run` (orchestrate_sync) — HOW TO GET THEIR LOGS
+### Per-step logs: prefer the multi-task job
+
+The production pipeline is now the **multi-task job** `BeProduct_DTC_sync_dag`
+(job 294837488757511, defined in `scripts/deploy_job.py`). Each step is a
+first-class task, so per-step timing/logs come straight from
+`GET /api/2.1/jobs/runs/get?run_id=<JOB_RUN>` → `.tasks[]` (each has its own
+`run_id`, `execution_duration`, state). Export any single step's command-level
+model with `runs/export?run_id=<tasks[].run_id>` — **no `WORKFLOW_RUN` hunting**.
+The technique below is only needed for the RETIRED single-notebook
+`orchestrate_sync.py` (or any other `dbutils.notebook.run` caller).
+
+### Child notebooks via `dbutils.notebook.run` (legacy orchestrate_sync) — HOW TO GET THEIR LOGS
 
 `beproduct/orchestrate_sync.py` launches every step with
 `dbutils.notebook.run(notebook_path, timeout, params)` (`orchestrate_sync.py:186`).

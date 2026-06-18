@@ -209,6 +209,55 @@ cluster / use `%pip` cache).
   BeProduct offers a cheaper delta/changed-since endpoint. Opt D (INCREMENTAL) can
   be left on (no harm) but should not be expected to save time.
 
+### Multi-task job refactor — validated 2026-06-19 (job 294837488757511)
+
+The single-notebook orchestrator (`orchestrate_sync.py`, retired) was replaced by
+a top-level **multi-task** job `BeProduct_DTC_sync_dag` (`scripts/deploy_job.py`):
+8 steps as first-class tasks on ONE shared single-node non-Photon cluster, with
+condition-task phase gates and a `dbutils.jobs.taskValues` hand-off for Step 5 ->
+Step 7 `inserted_ids`. Validation run 857980233264412 (dry_run) — all tasks
+SUCCESS. Per-task exec:
+
+| Task | exec | Notes |
+|------|------|-------|
+| `bp_style_sync` ∥ `pull_dtc` | 76 s ∥ 278 s | **started simultaneously** — parallelism confirmed |
+| `transform` | 37 s | after bp_style_sync |
+| `request_manager` | 13 s | |
+| `gate_phase1/2/3` | 0–1 s | condition tasks |
+| `phase1_push` | 47 s | taskValues.set(inserted_ids) |
+| `phase2_push` | 21 s | |
+| `repull_dtc` | 197 s | dry-run → empty inserted_ids → full re-pull (real run = targeted, ~30 s) |
+| `phase3_images` | 26 s | |
+| cluster setup (cold) | **291 s** | single-node started FASTER than the old 2-node Photon (441–591 s) |
+
+Wins confirmed: parallel Step 1-2 ∥ Step 3 saves ~113 s; per-step logs are now
+first-class (export any step directly via its `tasks[].run_id` — no `WORKFLOW_RUN`
+hunting); the control-table MERGE held at **5.5 s** (was 179 s). Single-node
+non-Photon validated as the right cluster shape for this tiny-data workload.
+
+### Cell-5 single-DataFrame write — validated 2026-06-19 (run 345301990331528)
+
+`pull_requests_to_delta.py` now accumulates ALL requests' records into one flat
+list, builds a SINGLE DataFrame (union of every request's `col_*`, `rec.get()`
+fills missing cols with None), writes once, and uses `len(all_records)` instead of
+a Spark `count()`. Result — `pull_dtc` cell-by-cell:
+
+| cell | original | +MERGE | +cell-5 fix |
+|------|----------|--------|-------------|
+| 2 registry.refresh | 19.8 s | 26.8 s | 42.2 s (API variance) |
+| 4 parallel get_sheet | 3.9 s | 4.7 s | 2.1 s |
+| **5 build+write** | **277 s** | 201 s | **8.8 s** |
+| **6 control update** | **179 s** | 5.5 s | **7.8 s** |
+| **Step 3 total** | **491 s** | 483 s | **84 s** |
+
+`repull_dtc` (Step 7) full re-pull also dropped 197 s → **17 s**. Step 3 is now
+bottlenecked only by `registry.refresh` (cell 2, ~40 s of serial
+`get_request_scope` by-id reads) — the last remaining lever if sub-40 s is wanted
+(parallelize that loop with the same `ThreadPoolExecutor(max_workers=4)` pattern).
+
+Follow-up: migrate the cron schedule from the old job (22324120218492) to the new
+multi-task job (294837488757511) and pause the old one.
+
 ### Changes applied 2026-06-19 (pending live validation)
 
 - **Opt E — batched control-table MERGE.** `pull_requests_to_delta.py` now replaces
@@ -221,9 +270,9 @@ cluster / use `%pip` cache).
   `time.perf_counter()` print, so the next run's exported model shows the install
   cost separately from imports/fetch/write. If it proves material, bake `beproduct`
   into the cluster image / init script.
-- **Still NOT addressed:** Step 3 cell 5 (277 s union+write of 422 rows). The
-  highest-impact remaining fix is to build one DataFrame for the whole pull instead
-  of 66 unioned ones and drop the redundant `out.count()`.
+- **Opt F — single-DataFrame write (DONE 2026-06-19).** Step 3 cell 5's 66-way
+  union + `out.count()` (was 277 s) replaced by one DataFrame + `len()`; validated
+  at **8.8 s** (see "Cell-5 single-DataFrame write" below).
 
 ---
 

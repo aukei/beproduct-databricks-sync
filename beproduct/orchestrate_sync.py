@@ -3,6 +3,14 @@
 Daily Sync Orchestrator: BeProduct <-> DTC (Phase 1 + Phase 2)
 ==============================================================
 
+⚠️  RETIRED (2026-06-19): superseded by the top-level MULTI-TASK job
+    `BeProduct_DTC_sync_dag` (job 294837488757511), defined in
+    `scripts/deploy_job.py`. That job runs the same 8 steps as first-class tasks
+    on one shared cluster, with native per-task logs/timing, parallel Step 1-2 vs
+    Step 3, condition-task phase gates, and a `dbutils.jobs.taskValues` hand-off
+    for the Step 5 -> Step 7 inserted_ids. This single-notebook orchestrator is
+    kept only as a manual fallback; prefer the job. See docs/PERFORMANCE.md.
+
 Runs the full bi-directional sync pipeline in the correct order:
 
   Step 1  beproduct_style_sync           BeProduct API -> lft.beproduct.ktb_styles

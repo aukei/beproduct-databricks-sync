@@ -195,7 +195,7 @@ def _build_records(r, rows):
         records.append(rec)
     return records
 
-all_spark_dfs = []
+all_records = []      # flat list of record dicts across ALL requests (one DF built later)
 control_updates = []  # (request_id, row_count, msg)
 
 # Split eligible (WIP view present) vs skipped (wrong view) before parallel fetch.
@@ -227,7 +227,8 @@ with ThreadPoolExecutor(max_workers=max_workers) as pool:
         except Exception as e:
             fetch_errors[r.request_id] = str(e)
 
-# Process results in registry order (deterministic DataFrame union ordering).
+# Process results in registry order (deterministic row ordering) and accumulate
+# ALL records into one flat list — we build a SINGLE DataFrame below.
 for r in eligible:
     name = r.request_reference
     if r.request_id in fetch_errors:
@@ -243,32 +244,26 @@ for r in eligible:
                             "extracted" if rows else "extracted (empty request)"))
 
     if rows:
-        records = _build_records(r, rows)
-        # Dynamic col_* set is identical within a request's view; build an explicit
-        # schema (all dynamic cols are strings) so all-NULL columns don't break
-        # type inference. Feed ordered tuples to avoid dict/schema ambiguity.
-        dyn_cols = sorted({k for rec in records for k in rec if k.startswith("col_")})
-        row_schema = StructType(FIXED_FIELDS + [StructField(c, StringType()) for c in dyn_cols])
-        ordered = [f.name for f in row_schema.fields]
-        data = [tuple(rec.get(fn) for fn in ordered) for rec in records]
-        all_spark_dfs.append(spark.createDataFrame(data, row_schema))
+        all_records.extend(_build_records(r, rows))
 
 connector.close()
 
 # COMMAND ----------
 
-# Union all requests (column sets are identical within a Document/view) and write.
-if all_spark_dfs:
-    from functools import reduce
-    # Align columns across requests defensively (in case of view differences).
-    all_cols = sorted({c for df in all_spark_dfs for c in df.columns})
-    aligned = []
-    for df in all_spark_dfs:
-        for c in all_cols:
-            if c not in df.columns:
-                df = df.withColumn(c, F.lit(None).cast("string"))
-        aligned.append(df.select(*all_cols))
-    out = reduce(lambda a, b: a.unionByName(b), aligned)
+# Build ONE DataFrame for the whole pull (not one per request) and write once.
+# Previously this created ~66 per-request DataFrames, aligned them, unioned via
+# reduce(unionByName), then called out.count() — two heavy executions over a deep
+# 66-way plan that dominated this notebook (~200–280 s for ~420 rows; see
+# docs/PERFORMANCE.md "Validation run 3"). Every dynamic col_* is a nullable
+# string, so a single explicit schema using the UNION of all requests' col_* lets
+# rec.get() fill any missing column with None — no per-DataFrame alignment needed.
+# The row count is known in Python (len), so the Spark count() action is dropped.
+if all_records:
+    dyn_cols = sorted({k for rec in all_records for k in rec if k.startswith("col_")})
+    out_schema = StructType(FIXED_FIELDS + [StructField(c, StringType()) for c in dyn_cols])
+    ordered = [f.name for f in out_schema.fields]
+    data = [tuple(rec.get(fn) for fn in ordered) for rec in all_records]
+    out = spark.createDataFrame(data, out_schema)
 
     # Targeted re-pull (request_ids filter active): replace only the rows for the
     # specified requests — DELETE their stale rows then APPEND the fresh data.
@@ -287,8 +282,7 @@ if all_spark_dfs:
         .option("mergeSchema", "true")
         .option("delta.columnMapping.mode", "name")
         .saveAsTable(target_full))
-    total = out.count()
-    print(f"✅ Wrote {total} rows to {target_full}")
+    print(f"✅ Wrote {len(all_records)} rows to {target_full}")
 else:
     if filter_request_ids:
         # Targeted pull where all fetched requests came back empty — still remove

@@ -371,10 +371,20 @@ print("\n✅ Push complete")
 
 # COMMAND ----------
 
-# Exit with a structured string so the orchestrator (orchestrate_sync.py) can
-# parse inserted_request_ids for the targeted Step 7 re-pull (Opt B).
-# Format: "ok inserts=N inserted_ids=id1,id2,..."
+# Hand the inserted request_ids to the downstream Step 7 re-pull (targeted Opt B).
+# Two channels, both populated for compatibility:
+#   1. dbutils.jobs.taskValues  → consumed by the multi-task job (scripts/deploy_job.py)
+#      via the param ref {{tasks.phase1_push.values.inserted_ids}} on the repull task.
+#   2. structured exit string    → consumed by the legacy orchestrate_sync.py notebook
+#      (kept as a manual fallback). Format: "ok inserts=N inserted_ids=id1,id2,..."
 _inserted_ids_str = ",".join(sorted(inserted_request_ids)) if inserted_request_ids else ""
+try:
+    # taskValues is only available inside a Databricks job task; ignore if missing
+    # (e.g. interactive run) so the notebook still works standalone.
+    dbutils.jobs.taskValues.set(key="inserted_ids", value=_inserted_ids_str)
+    dbutils.jobs.taskValues.set(key="inserts", value=int(totals["inserts"]))
+except Exception as _e:
+    print(f"(taskValues.set skipped: {_e})")
 dbutils.notebook.exit(
     f"ok inserts={totals['inserts']} inserted_ids={_inserted_ids_str}"
 )
