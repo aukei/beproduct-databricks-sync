@@ -110,6 +110,123 @@ bringing wall time to ≈ 5–8 min.
 
 ---
 
+## Validation run 3 — post Opt A/B/D (2026-06-18, run 57360453476718)
+
+Job run `57360453476718` → task run `274593806072640` (job 22324120218492),
+executed AFTER Opt A (parallel `get_sheet`), Opt B (targeted Step 7), and Opt D
+(INCREMENTAL Step 1 default). Per-step timings parsed from the orchestrator's own
+command-level `startTime`/`finishTime` (parent notebook export):
+
+| Step | Description | Run 3 | vs baseline |
+|------|-------------|-------|-------------|
+| Cluster cold start (setup) | new cluster | 441 s | ~unchanged |
+| 1 | BeProduct → ktb_styles (**INCREMENTAL**) | **133 s** | 103–123 s (FULL) → **no gain** |
+| 2 | Transform → staging | 52 s | ~unchanged |
+| **3** | **DTC pull + registry refresh** | **494 s** | 383–454 s → **no gain** |
+| 4 | DTC Request Manager | 21 s | ~unchanged |
+| 5 | Phase 1 push | 62 s | ~unchanged |
+| 6 | Phase 2 push | 31 s | ~unchanged |
+| **7** | **DTC re-pull post-Phase 1 (targeted)** | **31 s** | 383–414 s → **~13× faster** |
+| 8 | Phase 3 image upload | 31 s | 41–132 s |
+| **Total execution** | | **887 s** | 1 156–1 167 s |
+| **Total wall (incl. 441 s setup)** | | **1 328 s (~22 min)** | ~25–26 min |
+
+**Only Opt B (Step 7) delivered a material gain** (≈383 s → 31 s). Opt A and Opt D
+produced no measurable improvement. **The earlier (baseline) root-cause was wrong**:
+it blamed serial `get_sheet` ("6 s × 66 ≈ 396 s"), but the measured intra-step
+breakdown below shows the DTC API is only ~24 s of Step 3 — the real cost is Spark.
+
+### Measured intra-step breakdown (this is the key correction)
+
+The child notebooks launched by `dbutils.notebook.run` ARE recoverable: they are
+`run_type=WORKFLOW_RUN` runs (see the databricks-integration skill for the exact
+CLI recipe). Exporting the Step 1 and Step 3 child runs and reading each cell's
+`startTime`/`finishTime` gives the true split:
+
+**Step 3 — `pull_requests_to_delta` (child run 476284671935125, 491 s):**
+
+| Cell | Work | Time | Notes |
+|------|------|------|-------|
+| 2 | connector init + **`registry.refresh`** (66 in-scope enriched, 66×2 serial GETs) | **19.8 s** | API by-id reads are FAST (~0.1 s each) |
+| 4 | **parallel `get_sheet`** of 66 sheets (4 workers) + build per-request DataFrames | **3.9 s** | the part Opt A "fixed" — was never the bottleneck |
+| **5** | **union 66 DataFrames + `saveAsTable` (overwrite, mergeSchema, columnMapping) + `out.count()`** | **277.1 s** | wrote only **422 rows** |
+| **6** | **per-request control-table `UPDATE` loop (66×)** | **179.1 s** | 66 separate Delta UPDATE Spark jobs |
+| 0,1,3,7 | docstring, imports, registry read, final `.show()` | ~6 s | |
+
+So **456 s of 491 s (93 %) of Step 3 is Spark overhead**: the 66-way `unionByName`
++ schema-evolving Delta overwrite + redundant post-write `count()` (cell 5, 277 s),
+and the 66-iteration control-table `UPDATE` loop (cell 6, 179 s). The DTC API
+(registry refresh + all `get_sheet`s) is only ~24 s.
+
+- **Confirms hypothesis 1** (control-table logging as separate Spark jobs):
+  cell 6 = **179 s** for 66 serial `UPDATE`s (`pull_requests_to_delta.py:306-316`),
+  ~2.7 s per UPDATE.
+- **Explains why Opt A gave nothing**: parallelizing `get_sheet` shaved a few
+  seconds off a 3.9 s cell. `get_sheet` was never slow because the requests are
+  small (422 rows across 66 requests ≈ 6 rows each; ~40 are empty).
+- **New, larger bottleneck the hypotheses missed**: cell 5 = **277 s** to write
+  422 rows, caused by building one tiny DataFrame *per request* and
+  `reduce(unionByName)`-ing 66 of them (66 LocalRelation scans + deep plan), an
+  `overwrite` + `mergeSchema` + `delta.columnMapping.mode=name` write, and a
+  redundant `out.count()` re-execution.
+
+**Step 1 — `beproduct_style_sync` (child run 849467851218721, 132 s):**
+
+| Cell | Work | Time |
+|------|------|------|
+| 1 | `pip install beproduct` (subprocess) + imports + widgets | 5.8 s |
+| 2 | (monolithic) BeProduct `attributes_list` fetch + transform + `createDataFrame`/`count` + MERGE upsert + metadata insert | **110.4 s** |
+
+Cell 2's stdout was not captured in the export, so the API-vs-Spark split inside
+it isn't directly visible. But the step-level comparison settles hypothesis 2:
+INCREMENTAL Step 1 = 110 s (cell 2) / 132 s (wrapper) vs the FULL baseline of
+103–123 s — **not faster**. **Confirms hypothesis 2**: the BeProduct
+`api.style.attributes_list(filters=…)` call costs about the same regardless of the
+`FolderModifiedAt` filter; the filter reduces *rows returned*, not API time. This
+matches the AGENTS.md note that `FolderModifiedAt` is **folder-scoped** (any change
+in the KTB folder re-qualifies every style in that folder), so INCREMENTAL still
+enumerates ~the whole folder. The fixed `pip install beproduct` on every run
+(`beproduct_style_sync.py:34`) is a smaller, easily-removed cost (bake into the
+cluster / use `%pip` cache).
+
+### Suggested next optimizations (re-prioritised by the measured data)
+
+**Step 3 (highest impact — ~456 s of pure Spark overhead):**
+- **Build ONE DataFrame for the whole pull, not 66.** Collect all records into a
+  single list and `spark.createDataFrame(all_records, schema)` once; write once;
+  **drop the redundant `out.count()`** (cell 5). Targets the 277 s.
+- **Batch the control-table updates** into a single `MERGE INTO {registry} USING
+  <temp view>` keyed on `request_id` (one Spark job instead of 66). Targets the
+  179 s (cell 6). This is the highest-confidence win and directly addresses
+  hypothesis 1.
+- (Lower priority) Parallelizing `registry.refresh` only saves part of ~20 s — do
+  it last.
+
+**Step 1:**
+- Pre-install the `beproduct` SDK on the cluster image / via an init script to drop
+  the ~6 s `pip install` per run.
+- The ~110 s BeProduct fetch is API-bound and filter-insensitive; revisit only if
+  BeProduct offers a cheaper delta/changed-since endpoint. Opt D (INCREMENTAL) can
+  be left on (no harm) but should not be expected to save time.
+
+### Changes applied 2026-06-19 (pending live validation)
+
+- **Opt E — batched control-table MERGE.** `pull_requests_to_delta.py` now replaces
+  the ~66-iteration per-request `UPDATE` loop (cell 6, was ~179 s) with a single
+  `MERGE INTO {registry} USING control_updates_src` (one Spark job). Because Step 7
+  runs the same notebook, it benefits automatically; in targeted mode the MERGE
+  only touches the filtered requests. Expected Step 3 saving: ~150–175 s.
+- **SDK-install isolated (instrumentation, not a fix).** `beproduct_style_sync.py`
+  splits the `pip install beproduct` into its own command cell with a
+  `time.perf_counter()` print, so the next run's exported model shows the install
+  cost separately from imports/fetch/write. If it proves material, bake `beproduct`
+  into the cluster image / init script.
+- **Still NOT addressed:** Step 3 cell 5 (277 s union+write of 422 rows). The
+  highest-impact remaining fix is to build one DataFrame for the whole pull instead
+  of 66 unioned ones and drop the redundant `out.count()`.
+
+---
+
 ## Remaining opportunities (not yet implemented)
 
 - **Pre-warmed cluster**: pin job to an all-purpose cluster or enable keep-alive.
@@ -120,4 +237,5 @@ bringing wall time to ≈ 5–8 min.
 - **Parallelize `registry.refresh()` inner loop**: `registry.py:308` loops
   sequentially over `get_request_scope()` calls (only runs in Step 3).  Same
   ThreadPoolExecutor pattern as Opt A would help when many new requests are
-  discovered (less impact once the registry is stable).
+  discovered. **NOTE (run 3): low impact** — the whole registry refresh measured
+  only ~20 s; the by-id GETs are fast. Prioritise the Step 3 Spark fixes above.

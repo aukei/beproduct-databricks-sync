@@ -18,24 +18,41 @@ Parameters:
 # COMMAND ----------
 
 # ============================================================================
-# CELL 1: Setup - Install SDK, Import, Configure Parameters
+# CELL 1: Install BeProduct SDK  (ISOLATED so its time is measured separately)
 # ============================================================================
+# Kept in its own command cell on purpose: the per-cell timing in the exported
+# run model then shows EXACTLY how long the pip install takes, isolated from the
+# imports / fetch / write. See docs/PERFORMANCE.md "Validation run 3" — the SDK
+# install is a fixed per-run cost; if it's material, bake `beproduct` into the
+# cluster image / init script and this cell becomes a no-op.
 
 import sys
 import subprocess
+import time
 
 print("=" * 80)
-print("SETUP CELL: Install SDK, Import Libraries, Configure Parameters")
+print("INSTALL CELL: Install BeProduct SDK")
 print("=" * 80)
 
-# Install BeProduct SDK
 print("\n📦 Installing BeProduct SDK...")
+_install_t0 = time.perf_counter()
 try:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "beproduct"])
-    print("✅ BeProduct SDK installed")
+    _install_secs = time.perf_counter() - _install_t0
+    print(f"✅ BeProduct SDK installed in {_install_secs:.1f}s")
 except Exception as e:
-    print(f"❌ Failed: {str(e)}")
+    print(f"❌ Failed after {time.perf_counter() - _install_t0:.1f}s: {str(e)}")
     raise
+
+# COMMAND ----------
+
+# ============================================================================
+# CELL 2: Setup - Import Libraries, Configure Parameters
+# ============================================================================
+
+print("=" * 80)
+print("SETUP CELL: Import Libraries, Configure Parameters")
+print("=" * 80)
 
 # Import libraries
 print("\n📚 Importing libraries...")

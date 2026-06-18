@@ -684,6 +684,197 @@ table_name = f"{config['catalog']}.{config['schema']}.ktb_styles"
 df = spark.table(table_name)
 ```
 
+## Reading Job Run Logs
+
+### Overview
+
+Databricks job run logs are exported as HTML with an embedded base64-encoded notebook model containing per-command outputs and timing. The CLI `databricks jobs get-run-output` doesn't support multi-task jobs, so we use the REST API directly.
+
+### Step-by-Step: Extract and Parse Run Logs
+
+**1. Get the task run_id from the parent job run:**
+```bash
+source .env
+export DATABRICKS_HOST DATABRICKS_TOKEN="$DATABRICKS_PAT"
+
+# List recent runs of a job
+databricks api get "/api/2.1/jobs/runs/list?job_id=22324120218492&limit=5" \
+  | jq '.runs[] | {run_id, start_time, state: .state.result_state}'
+
+# Get task details for a specific run (finds the task run_id)
+databricks api get "/api/2.1/jobs/runs/get?run_id=57360453476718" \
+  | jq '.tasks[] | {task_key, run_id, result: .state.result_state, duration_ms: .execution_duration}'
+```
+
+**2. Export the run logs (returns HTML with embedded notebook model):**
+```bash
+databricks api get "/api/2.1/jobs/runs/export?run_id=274593806072640&views_to_export=ALL" \
+  | jq -r '.views[0].content' > /tmp/run_export.html
+```
+
+**3. Extract and decode the notebook model:**
+```bash
+# Extract base64 from HTML
+grep -oP "__DATABRICKS_NOTEBOOK_MODEL = '\K[^']+" /tmp/run_export.html > /tmp/b64.txt
+
+# Decode: base64 → URL-decode → JSON
+python3 << 'EOF'
+import base64, json
+from urllib.parse import unquote
+
+with open('/tmp/b64.txt', 'r') as f:
+    b64_data = f.read().strip()
+
+decoded = base64.b64decode(b64_data).decode('utf-8')
+url_decoded = unquote(decoded)
+obj = json.loads(url_decoded)
+
+# obj['commands'] is a list of notebook cells with outputs
+print(f"Total commands: {len(obj.get('commands', []))}")
+EOF
+```
+
+**4. Extract command outputs with timing:**
+```python
+import base64, json
+from urllib.parse import unquote
+
+with open('/tmp/b64.txt', 'r') as f:
+    b64_data = f.read().strip()
+
+decoded = base64.b64decode(b64_data).decode('utf-8')
+url_decoded = unquote(decoded)
+obj = json.loads(url_decoded)
+
+for i, cmd in enumerate(obj.get('commands', [])):
+    command = cmd.get('command', '')
+    results = cmd.get('results', {})
+    start_time = cmd.get('startTime')
+    finish_time = cmd.get('finishTime')
+    
+    # Command identification (first line)
+    cmd_lines = command.split('\n')
+    cmd_preview = cmd_lines[0][:120] if cmd_lines else command[:120]
+    
+    print(f"\n{'='*80}")
+    print(f"Command {i+1}: {cmd_preview}")
+    if start_time and finish_time:
+        duration_ms = finish_time - start_time
+        print(f"Duration: {duration_ms}ms ({duration_ms/1000:.1f}s)")
+    
+    # Extract output from results.data (list of {type: 'ansi', data: '...'})
+    if isinstance(results, dict) and 'data' in results:
+        data_list = results['data']
+        if isinstance(data_list, list):
+            for item in data_list:
+                if isinstance(item, dict) and item.get('type') == 'ansi':
+                    output = item.get('data', '')
+                    print(f"Output ({len(output.split(chr(10)))} lines):")
+                    for line in output.split('\n')[:60]:
+                        print(f"  {line[:200]}")
+                    if len(output.split('\n')) > 60:
+                        print(f"  ... (truncated)")
+```
+
+### Key Fields in the Notebook Model
+
+| Field | Description |
+|-------|-------------|
+| `commands[].command` | The notebook cell code |
+| `commands[].startTime` | Unix timestamp (ms) when cell started |
+| `commands[].finishTime` | Unix timestamp (ms) when cell finished |
+| `commands[].results.data[].type` | Output type: `ansi` (text), `table`, `image`, etc. |
+| `commands[].results.data[].data` | The actual output content |
+| `commands[].state` | Cell state: `Finished`, `Error`, etc. |
+| `commands[].error` | Error message if cell failed |
+
+### Performance Analysis Pattern
+
+To identify bottlenecks, extract timing per step and correlate with Spark job overhead:
+
+```python
+# Build timing table
+for i, cmd in enumerate(obj.get('commands', [])):
+    start = cmd.get('startTime')
+    finish = cmd.get('finishTime')
+    if start and finish:
+        duration_s = (finish - start) / 1000
+        # Identify step from command content
+        command = cmd.get('command', '')
+        step_match = command.split('\n')[0] if command else f"Command {i+1}"
+        print(f"Step {i+1}: {duration_s:6.1f}s  {step_match[:80]}")
+```
+
+**Common Spark overhead patterns:**
+- Each `spark.sql("UPDATE delta_table ...")` on a Delta table launches a separate Spark job (~5-15s overhead)
+- `CREATE TABLE IF NOT EXISTS`, `SELECT COUNT(*)`, `information_schema` queries each launch Spark jobs
+- Per-request UPDATE loops (e.g., 66 iterations) = 66 Spark jobs = ~400-600s overhead
+- Fix: Replace per-request UPDATE loops with a single batch `MERGE INTO` using a temp view
+
+### Child notebooks via `dbutils.notebook.run` (orchestrate_sync) — HOW TO GET THEIR LOGS
+
+`beproduct/orchestrate_sync.py` launches every step with
+`dbutils.notebook.run(notebook_path, timeout, params)` (`orchestrate_sync.py:186`).
+Each child is a real run with its own `run_id` and its own full command-level
+notebook model — but it is hidden in non-obvious ways:
+
+- The parent run export (`runs/export`) contains **only the orchestrator's own**
+  cells. Each step shows just the wrapper print (`✅ STEP N done in Xs`), NOT the
+  child's per-command output, and **no child `run_id` is embedded** in it.
+- `GET /api/2.1/jobs/runs/get?run_id=<task>` returns only `parent_run_id` (a pointer
+  UP to the job run); there is **no downward child pointer**.
+- A plain `runs/list?job_id=…` does **not** list the children.
+
+**The trick: children are `run_type=WORKFLOW_RUN` runs.** List them by time window
+(NOT by job_id — they have no `job_id`), match to the parent by start-time/duration,
+then export each child exactly like any other run. `limit` max is **25**.
+
+```bash
+source .env; export DATABRICKS_HOST DATABRICKS_TOKEN="$DATABRICKS_PAT"
+
+# 1. Parent job run -> task run_id + its start/end window (ms since epoch)
+databricks api get "/api/2.1/jobs/runs/get?run_id=<JOB_RUN_ID>" \
+  | jq '{task: .tasks[0].run_id, start: .start_time, end: .tasks[0].end_time, setup_ms: .tasks[0].setup_duration}'
+
+# 2. List the dbutils.notebook.run children in that window (run_type=WORKFLOW_RUN).
+#    parent_run_id is NOT returned here, so map children to steps by start_time order
+#    and execution_duration (they line up 1:1 with the orchestrator step timings).
+databricks api get "/api/2.1/jobs/runs/list?run_type=WORKFLOW_RUN&start_time_from=<START_MS>&start_time_to=<END_MS>&limit=25" \
+  | jq -r '.runs[]? | "\(.run_id)\tstart=\(.start_time)\tdur=\(.execution_duration/1000)s\t\(.run_name)"' \
+  | sort -t= -k2 -n
+
+# 3. Export a specific child and decode its notebook model (same recipe as above).
+databricks api get "/api/2.1/jobs/runs/export?run_id=<CHILD_RUN_ID>&views_to_export=ALL" \
+  | jq -r '.views[0].content' > /tmp/child.html
+grep -oP "__DATABRICKS_NOTEBOOK_MODEL = '\K[^']+" /tmp/child.html > /tmp/child.b64
+# then base64 -> unquote -> json, and read commands[].startTime/finishTime per cell.
+```
+
+This gives **exact per-cell timing inside each step** (e.g. for run 57360453476718
+it revealed Step 3's cost was a 277 s union+write of 422 rows and a 179 s 66×
+control-table `UPDATE` loop — NOT the DTC API, which was ~24 s). See
+`docs/PERFORMANCE.md` "Validation run 3".
+
+Caveats:
+- The CLI/REST is the only programmatic route; there is no `--child` flag — you must
+  use the `run_type=WORKFLOW_RUN` + time-window query above.
+- A child cell's stdout is occasionally not captured in the export (only its
+  timing). If you need the printed values too, enable cluster `cluster_log_conf`
+  (driver-log delivery; currently `null` on job 22324120218492) or add
+  `time.perf_counter()` prints. The job cluster's `setup_duration` (here 441 s) is
+  the cold-start and is reported on the parent task run.
+
+### Quick Reference: Common API Endpoints
+
+| Endpoint | Purpose |
+|----------|---------|
+| `/api/2.1/jobs/runs/list?job_id=X&limit=N` | List recent runs of a job (max `limit`=25). Does NOT include `dbutils.notebook.run` children. |
+| `/api/2.1/jobs/runs/list?run_type=WORKFLOW_RUN&start_time_from=MS&start_time_to=MS&limit=25` | List `dbutils.notebook.run` child runs by time window (they have no `job_id`). |
+| `/api/2.1/jobs/runs/get?run_id=X` | Get run details (tasks, state, duration). Single-task job: task `run_id` is `.tasks[0].run_id`; `setup_duration` = cold start; `parent_run_id` points up only. |
+| `/api/2.1/jobs/runs/export?run_id=X&views_to_export=ALL` | Export run logs (HTML w/ embedded notebook model). Works on child run_ids too. |
+| `/api/2.1/jobs/runs/get-output?run_id=X` | Returns ONLY the notebook's `dbutils.notebook.exit()` string (+ a `logs` field for JAR/Python-script tasks). **No per-cell timing, no stdout.** Verified: on the task run it gives just the orchestrator exit; on a child WORKFLOW_RUN it's empty `{}` (steps exit `None`). Use `runs/export` for timing, NOT this. |
+| `/api/2.0/clusters/get?cluster_id=X` | Check `cluster_log_conf` (driver-log delivery) + node type / workers. |
+
 ## Troubleshooting
 
 ### Common Issues

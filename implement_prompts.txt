@@ -217,3 +217,12 @@ Tackle image. Since image API is an operation on existing row, it cannot be hand
 - implement_prompts - keep at /, but create a docs/prompts/opus_revision.md about the implementation (exclude task log elements) base on your understand of the prompt plus proj status, and write it in agent friendly way.
     - i intended @docs/prompts/opus_revision.md  be like "how would you opus have written the prompt to this coding agent to create this what we have in this repo", intended for other (human) to learn the way to prompt effectively.
 - keep DTC API doc as is.
+
+
+# Performance tuning
+DO NOT make change to any code yet. Continue investigate performance of databricks job orchestrate_sync. 
+The latest run https://adb-781381861146191.11.azuredatabricks.net/jobs/22324120218492/runs/57360453476718 is after implementation of "parallel DTC read at step 3", "incremental BeProduct Style upsert at step 1" and "Skip rereading no-insert DTC sheet at step 7". Only "skip rereading at step 7" made material differences. First focus on identifying where time was spent in step 1 and step 3. 
+My hypothesis is the many 'log message to sync control table' actions being executed as separate spark job that killed performance. And "BeProduct Style list action overall take similar amount of time to response, filter only reduce amount of data return".
+
+There is a docs/performance.md for base line.
+databricks-integration SKILL has some instruction on how to get job log from databricks written by another agent. Make sure or update that if relevant.

@@ -302,17 +302,35 @@ else:
 # COMMAND ----------
 
 # Update control table (requirement 1a): last_extracted, row_count, msgs.
-ts = now.isoformat()
-for request_id, row_count, msg in control_updates:
-    rc = "NULL" if row_count is None else str(row_count)
-    msg_sql = msg.replace("'", "''")
+# Batched as a SINGLE `MERGE INTO` (one Spark job) instead of one `UPDATE` per
+# request. The old per-request loop fired ~66 separate Delta UPDATE jobs and was
+# the second-largest cost in this notebook (~179 s in run 3 — see
+# docs/PERFORMANCE.md "Validation run 3"). Because Step 7 runs THIS SAME notebook
+# (with a targeted request_ids filter), it gets the same speedup automatically;
+# in targeted mode `control_updates` only holds the filtered requests, so the
+# MERGE touches just those rows.
+ts_iso = now.isoformat()
+if control_updates:
+    ctrl_schema = StructType([
+        StructField("environment", StringType()),
+        StructField("request_id", StringType()),
+        StructField("row_count", LongType()),   # nullable: None -> NULL (skipped)
+        StructField("msg", StringType()),
+    ])
+    ctrl_data = [
+        (environment, rid, (None if rc is None else int(rc)), msg)
+        for (rid, rc, msg) in control_updates
+    ]
+    spark.createDataFrame(ctrl_data, ctrl_schema).createOrReplaceTempView("control_updates_src")
     spark.sql(f"""
-      UPDATE {registry_full}
-      SET last_extracted = timestamp('{ts}'),
-          row_count = {rc},
-          msgs = '{msg_sql}',
-          updated_at = timestamp('{ts}')
-      WHERE environment = '{environment}' AND request_id = '{request_id}'
+      MERGE INTO {registry_full} t
+      USING control_updates_src s
+        ON t.environment = s.environment AND t.request_id = s.request_id
+      WHEN MATCHED THEN UPDATE SET
+        t.last_extracted = timestamp('{ts_iso}'),
+        t.row_count = s.row_count,
+        t.msgs = s.msg,
+        t.updated_at = timestamp('{ts_iso}')
     """)
 print(f"✅ Updated control table for {len(control_updates)} request(s)")
 
