@@ -135,6 +135,14 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
 
 ## Decisions on record
 
+- **`create_sheet` payload fix (2026-06-17): `requestName` → `requestReference`.**
+  The original `POST /v1/sheets` payload used the key `requestName`; the DTC API
+  uses `requestReference` everywhere (GET responses, search filters, `get_request`
+  return values). Sending the wrong key caused 400 on all create attempts. Fixed in
+  `DTCConnector.create_sheet` (`dtc/python/connectors/dtc.py`). Also added
+  `RestClient._log_error_body` which logs the API response body on any HTTP error so
+  future 4xx failures are self-diagnosable without a debugger.
+  Status: code fix applied; UAT validation still required.
 - **Phase 3 image sync is a separate post-Phase-1 step (2026-06-17).** Style Image
   is binary and cannot ride the Phase 1 JSON sheetData PATCH, and its endpoint
   targets an EXISTING row by `rowindex`, so it cannot run at insert time. New

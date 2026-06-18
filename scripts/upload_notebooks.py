@@ -116,6 +116,8 @@ def _load_config() -> dict[str, str]:
 def upload_notebooks_to_databricks(
     local_dir: str,
     workspace_path: str,
+    host: str = "",
+    token: str = "",
     file_extensions: list[str] = [".py", ".sql"],
     dry_run: bool = False,
 ) -> tuple[int, int]:
@@ -171,7 +173,7 @@ def upload_notebooks_to_databricks(
         return len(notebooks), 0
 
     # Upload notebooks
-    w = WorkspaceClient()
+    w = WorkspaceClient(host=host, token=token)
     uploaded = 0
     failed = 0
 
@@ -213,6 +215,8 @@ def upload_notebooks_to_databricks(
 def upload_modules_to_databricks(
     local_dir: str,
     workspace_path: str,
+    host: str = "",
+    token: str = "",
     dry_run: bool = False,
 ) -> tuple[int, int]:
     """
@@ -252,7 +256,7 @@ def upload_modules_to_databricks(
         return len(files), 0
 
     import io
-    w = WorkspaceClient()
+    w = WorkspaceClient(host=host, token=token)
     uploaded = failed = 0
     # Ensure parent dirs exist (mkdirs is idempotent).
     made_dirs = set()
@@ -346,6 +350,8 @@ def main() -> None:
             uploaded, failed = upload_notebooks_to_databricks(
                 local_dir=local_dir,
                 workspace_path=workspace_path,
+                host=cfg["DATABRICKS_HOST"],
+                token=cfg["DATABRICKS_PAT"],
                 dry_run=args.dry_run,
             )
             total_uploaded += uploaded
@@ -364,6 +370,8 @@ def main() -> None:
             uploaded, failed = upload_modules_to_databricks(
                 local_dir=local_dir,
                 workspace_path=workspace_path,
+                host=cfg["DATABRICKS_HOST"],
+                token=cfg["DATABRICKS_PAT"],
                 dry_run=args.dry_run,
             )
             total_uploaded += uploaded
