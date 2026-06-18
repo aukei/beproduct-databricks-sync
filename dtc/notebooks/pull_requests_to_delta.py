@@ -32,6 +32,13 @@ Parameters:
   - write_mode: overwrite | append (default: overwrite)
   - refresh_registry (default: true) -- scan workspace+document and upsert the
     registry (via sync.registry.refresh) before pulling; set false to use as-is
+  - request_ids (default: "") -- comma-separated DTC request IDs to pull;
+    blank = all in-scope. When provided the pull is targeted: only the listed
+    requests are read and their rows are replaced in the Delta table (DELETE +
+    append) rather than overwriting the whole table. Typically passed by the
+    orchestrator for the Step 7 post-Phase-1 re-pull (only INSERT'd requests).
+  - max_workers (default: 4) -- ThreadPoolExecutor size for parallel get_sheet()
+    calls. Capped at 4 to respect the 2-node K8S cluster backing the DTC UAT API.
 """
 
 # COMMAND ----------
@@ -40,6 +47,7 @@ import sys
 sys.path.append("/Workspace/Repos/beproduct-sync/DTC/python")
 
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 from connectors.dtc import DTCConnector
@@ -81,6 +89,8 @@ dbutils.widgets.text("catalog", "lft", "Catalog")
 dbutils.widgets.text("schema", "beproduct", "Schema")
 dbutils.widgets.text("write_mode", "overwrite", "overwrite | append")
 dbutils.widgets.text("refresh_registry", "true", "Scan + refresh registry first")
+dbutils.widgets.text("request_ids", "", "Comma-separated request IDs (blank = all in-scope)")
+dbutils.widgets.text("max_workers", "4", "Parallel get_sheet() workers (max 4 for UAT K8S)")
 
 environment = dbutils.widgets.get("dtc_environment").strip().lower()
 customer = dbutils.widgets.get("customer").strip()
@@ -90,6 +100,12 @@ catalog = dbutils.widgets.get("catalog").strip()
 schema = dbutils.widgets.get("schema").strip()
 write_mode = dbutils.widgets.get("write_mode").strip().lower()
 refresh_registry = dbutils.widgets.get("refresh_registry").strip().lower() in ("true", "1", "yes", "y")
+_raw_request_ids = dbutils.widgets.get("request_ids").strip()
+filter_request_ids = (
+    {i.strip() for i in _raw_request_ids.split(",") if i.strip()}
+    if _raw_request_ids else None
+)
+max_workers = min(int(dbutils.widgets.get("max_workers").strip() or "4"), 4)  # hard cap at 4
 
 registry_full = f"{catalog}.{schema}.dtc_request_registry"
 target_full = f"{catalog}.{schema}.dtc_wip_{customer.lower()}"
@@ -102,6 +118,8 @@ print(f"  Target:   {target_full}")
 print(f"  Source view: {WIP_VIEW_NAME} (per request, from registry)")
 print(f"  Env: {environment} | Customer: {customer} | write_mode: {write_mode}")
 print(f"  Refresh registry first: {refresh_registry}")
+print(f"  filter_request_ids: {filter_request_ids or '(all in-scope)'}")
+print(f"  max_workers: {max_workers}")
 
 # COMMAND ----------
 
@@ -123,14 +141,23 @@ if refresh_registry:
 
 # COMMAND ----------
 
-reg_rows = spark.table(registry_full).where(
+_reg_all = spark.table(registry_full).where(
     (F.col("environment") == environment)
     & (F.col("customer") == customer)
     & (F.col("in_scope") == True)        # noqa: E712
     & (F.upper(F.col("request_is_active")).isin("Y", "TRUE", "1"))
 ).collect()
 
-print(f"In-scope active requests to pull: {len(reg_rows)}")
+# When request_ids filter is given (targeted re-pull from orchestrator Step 7),
+# only pull the specified requests instead of the full in-scope set.
+if filter_request_ids:
+    reg_rows = [r for r in _reg_all if r.request_id in filter_request_ids]
+    print(f"Targeted pull: {len(reg_rows)} of {len(_reg_all)} in-scope requests "
+          f"(filtered to {len(filter_request_ids)} request_id(s))")
+else:
+    reg_rows = _reg_all
+    print(f"In-scope active requests to pull: {len(reg_rows)}")
+
 if not reg_rows:
     connector.close()
     dbutils.notebook.exit("NO_IN_SCOPE_REQUESTS")
@@ -140,33 +167,10 @@ if not reg_rows:
 def normalize(col_name):
     return DTCConnector._normalize_column_name(col_name)
 
-all_spark_dfs = []
-control_updates = []  # (request_id, row_count, msg)
-
-for r in reg_rows:
-    name = r.request_reference
-
-    # Explicitly require the WIP_ITS_USE view. r.view_id is that view's id (the
-    # registry resolves view_id/view_name from get_request_scope); skip + log if a
-    # request's registered view is anything else so we never pull the wrong view.
-    if r.view_name != WIP_VIEW_NAME:
-        print(f"  ⏭️  {name}: skipped (view_name={r.view_name!r}, expected {WIP_VIEW_NAME!r})")
-        control_updates.append((r.request_id, None,
-                                f"skipped: WIP view missing (view_name={r.view_name})"))
-        continue
-
-    try:
-        # Pull the WIP_ITS_USE view's sheet data.
-        sheet = connector.get_sheet(r.sheet_id, r.view_id)
-        rows = sheet.get("sheetData", [])
-    except Exception as e:
-        print(f"  ❌ {name}: read failed: {e}")
-        control_updates.append((r.request_id, None, f"extract_error: {str(e)[:160]}"))
-        continue
-
-    print(f"  ✅ {name}: {len(rows)} row(s)")
-
+def _build_records(r, rows):
+    """Convert raw DTC sheet rows into flat record dicts for Delta."""
     records = []
+    name = r.request_reference
     for row in rows:
         rec = {
             "customer": customer,
@@ -189,19 +193,65 @@ for r in reg_rows:
                 continue
             rec[f"col_{normalize(k)}"] = None if v is None else str(v)
         records.append(rec)
+    return records
+
+all_spark_dfs = []
+control_updates = []  # (request_id, row_count, msg)
+
+# Split eligible (WIP view present) vs skipped (wrong view) before parallel fetch.
+eligible = [r for r in reg_rows if r.view_name == WIP_VIEW_NAME]
+for r in reg_rows:
+    if r.view_name != WIP_VIEW_NAME:
+        print(f"  ⏭️  {r.request_reference}: skipped "
+              f"(view_name={r.view_name!r}, expected {WIP_VIEW_NAME!r})")
+        control_updates.append((r.request_id, None,
+                                f"skipped: WIP view missing (view_name={r.view_name})"))
+
+# Parallel get_sheet() calls — max_workers=4 to respect the 2-node K8S DTC API cluster.
+# requests.Session is safe for concurrent GET calls (no shared mutable state per request).
+fetch_results = {}   # request_id -> list[dict]  (sheetData rows)
+fetch_errors  = {}   # request_id -> str
+
+def _fetch(r):
+    sheet = connector.get_sheet(r.sheet_id, r.view_id)
+    return r.request_id, sheet.get("sheetData", [])
+
+print(f"\nFetching {len(eligible)} sheet(s) with {max_workers} parallel worker(s)...")
+with ThreadPoolExecutor(max_workers=max_workers) as pool:
+    futures = {pool.submit(_fetch, r): r for r in eligible}
+    for fut in as_completed(futures):
+        r = futures[fut]
+        try:
+            rid, rows = fut.result()
+            fetch_results[rid] = rows
+        except Exception as e:
+            fetch_errors[r.request_id] = str(e)
+
+# Process results in registry order (deterministic DataFrame union ordering).
+for r in eligible:
+    name = r.request_reference
+    if r.request_id in fetch_errors:
+        err = fetch_errors[r.request_id]
+        print(f"  ❌ {name}: read failed: {err}")
+        control_updates.append((r.request_id, None, f"extract_error: {err[:160]}"))
+        continue
+
+    rows = fetch_results[r.request_id]
+    print(f"  ✅ {name}: {len(rows)} row(s)")
 
     control_updates.append((r.request_id, len(rows),
                             "extracted" if rows else "extracted (empty request)"))
 
-    if records:
+    if rows:
+        records = _build_records(r, rows)
         # Dynamic col_* set is identical within a request's view; build an explicit
         # schema (all dynamic cols are strings) so all-NULL columns don't break
         # type inference. Feed ordered tuples to avoid dict/schema ambiguity.
         dyn_cols = sorted({k for rec in records for k in rec if k.startswith("col_")})
-        schema = StructType(FIXED_FIELDS + [StructField(c, StringType()) for c in dyn_cols])
-        ordered = [f.name for f in schema.fields]
+        row_schema = StructType(FIXED_FIELDS + [StructField(c, StringType()) for c in dyn_cols])
+        ordered = [f.name for f in row_schema.fields]
         data = [tuple(rec.get(fn) for fn in ordered) for rec in records]
-        all_spark_dfs.append(spark.createDataFrame(data, schema))
+        all_spark_dfs.append(spark.createDataFrame(data, row_schema))
 
 connector.close()
 
@@ -220,14 +270,34 @@ if all_spark_dfs:
         aligned.append(df.select(*all_cols))
     out = reduce(lambda a, b: a.unionByName(b), aligned)
 
-    (out.write.format("delta").mode(write_mode)
+    # Targeted re-pull (request_ids filter active): replace only the rows for the
+    # specified requests — DELETE their stale rows then APPEND the fresh data.
+    # This preserves all other requests' rows in the table.
+    # Full pull (no filter): normal overwrite replaces the whole table.
+    if filter_request_ids:
+        ids_sql = "', '".join(filter_request_ids)
+        spark.sql(f"DELETE FROM {target_full} WHERE request_id IN ('{ids_sql}')")
+        effective_write_mode = "append"
+        print(f"  Targeted write: deleted stale rows for {len(filter_request_ids)} "
+              f"request(s), appending fresh data")
+    else:
+        effective_write_mode = write_mode
+
+    (out.write.format("delta").mode(effective_write_mode)
         .option("mergeSchema", "true")
         .option("delta.columnMapping.mode", "name")
         .saveAsTable(target_full))
     total = out.count()
     print(f"✅ Wrote {total} rows to {target_full}")
 else:
-    print("⚠️  All in-scope requests were empty - no data rows written")
+    if filter_request_ids:
+        # Targeted pull where all fetched requests came back empty — still remove
+        # their stale rows from the table so dtc_wip is consistent.
+        ids_sql = "', '".join(filter_request_ids)
+        spark.sql(f"DELETE FROM {target_full} WHERE request_id IN ('{ids_sql}')")
+        print("⚠️  All targeted requests were empty — removed stale rows if any")
+    else:
+        print("⚠️  All in-scope requests were empty - no data rows written")
 
 # COMMAND ----------
 

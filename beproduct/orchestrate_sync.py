@@ -55,6 +55,7 @@ Parameters
 # COMMAND ----------
 
 import json
+import re
 from datetime import datetime, timezone
 
 # ── Widgets ───────────────────────────────────────────────────────────────────
@@ -66,7 +67,7 @@ try:
     dbutils.widgets.text("dtc_workspace",   "KTB",       "DTC Workspace")
     dbutils.widgets.text("dtc_document",    "KTB WIP",   "DTC Document")
     dbutils.widgets.text("dtc_environment", "uat",       "DTC Environment (uat|prod)")
-    dbutils.widgets.text("refresh_mode",    "FULL",      "BP pull mode (FULL|INCREMENTAL)")
+    dbutils.widgets.text("refresh_mode",    "INCREMENTAL", "BP pull mode (FULL|INCREMENTAL)")
     dbutils.widgets.text("dry_run",         "false",     "Dry run (true/false)")
     dbutils.widgets.text("delta_only",      "true",      "Delta push only (true/false)")
     dbutils.widgets.text("run_phase1",      "true",      "Run Phase 1: BP->DTC (true/false)")
@@ -108,6 +109,22 @@ nb_bp           = dbutils.widgets.get("notebook_base_beproduct").strip().rstrip(
 nb_dtc          = dbutils.widgets.get("notebook_base_dtc").strip().rstrip("/")
 
 started_at = datetime.now(timezone.utc)
+
+
+def _parse_inserted_ids(exit_str: str) -> str:
+    """
+    Extract inserted_ids from the beproduct_to_dtc_push exit string.
+
+    Format emitted by Step 5: "ok inserts=N inserted_ids=id1,id2,..."
+    Returns the raw comma-separated id string (empty string if none / unparseable),
+    ready to pass straight to pull_requests_to_delta's request_ids widget.
+    """
+    if not exit_str:
+        return ""
+    m = re.search(r"inserted_ids=([^\s]*)", exit_str)
+    if not m:
+        return ""
+    return m.group(1).strip()
 
 print("=" * 80)
 print("BEPRODUCT <-> DTC DAILY SYNC ORCHESTRATOR")
@@ -243,6 +260,7 @@ _r3 = _run_step(
         "schema":           schema,
         "write_mode":       "overwrite",
         "refresh_registry": "true",
+        "max_workers":      "4",
     },
     timeout_seconds=1800,
 )
@@ -346,11 +364,19 @@ _r6 = _run_step(
 # Phase 1 (step 5) may have INSERTED new DTC rows; re-pull so dtc_wip_<customer>
 # is current before image sync. Gated by run_phase3 (only needed for Phase 3) and
 # by step 4 success (no point refreshing if nothing was resolved/pushed).
-# The images step also reads sheets live, but this keeps the dtc_wip table fresh
-# for any consumer and satisfies "reload all in-scope rows from DTC".
+# Opt B: parse the request_ids that had INSERTs from Step 5's exit string and
+# pass them as a targeted filter so only those sheets are re-fetched (DELETE +
+# append) instead of a full 66-request overwrite. Falls back to full re-pull if
+# Step 5 exit is unavailable or reports no inserts.
+_step5_inserted_ids = _parse_inserted_ids(_r5 or "")
+if _step5_inserted_ids:
+    _step7_name = f"Refresh dtc_wip (targeted: {len(_step5_inserted_ids.split(','))} request(s) with INSERTs)"
+else:
+    _step7_name = "Refresh dtc_wip (post-Phase 1 re-pull, full)"
+
 _r7 = _run_step(
     7,
-    "Refresh dtc_wip (post-Phase 1 re-pull)",
+    _step7_name,
     f"{nb_dtc}/pull_requests_to_delta",
     {
         "dtc_environment":  dtc_environment,
@@ -359,8 +385,10 @@ _r7 = _run_step(
         "dtc_document":     dtc_document,
         "catalog":          catalog,
         "schema":           schema,
-        "write_mode":       "overwrite",
-        "refresh_registry": "false",  # registry already refreshed in step 3
+        "write_mode":       "overwrite",   # ignored when request_ids is set (uses delete+append)
+        "refresh_registry": "false",       # registry already refreshed in step 3
+        "request_ids":      _step5_inserted_ids,  # "" = full pull; "id1,id2" = targeted
+        "max_workers":      "4",
     },
     timeout_seconds=1800,
     skip=(not run_phase3 or not _step4_ok),

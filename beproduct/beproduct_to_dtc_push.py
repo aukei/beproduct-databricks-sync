@@ -171,6 +171,7 @@ totals = {"requests": 0, "updates": 0, "inserts": 0, "noops": 0, "exceptions": 0
           "orphan_marks": 0, "pushed_ok": 0, "push_failed": 0}
 pushed_keys = {}    # request_name -> set of (lf,color) that reached DTC (or would, dry_run)
 error_keys = {}     # request_name -> set of (lf,color) with exceptions
+inserted_request_ids = set()  # request_ids that had at least one successful INSERT (Opt B)
 
 # Global live-key map for orphan / moved-key detection (requirement: point 1).
 # Built from the FULL staging (all live BeProduct rows, NOT delta-filtered) so we
@@ -261,6 +262,9 @@ for name, m in mapping.items():
                     log(log_rows, name, request_id, "INSERT", op.match_key, "ok",
                         "dry_run" if dry_run else "", f"rowIndex={op.row_index}", op.fields)
                     pushed_keys[name].add(op.match_key); totals["pushed_ok"] += 1
+                # Track request_ids that received INSERTs so the orchestrator can
+                # pass only these to Step 7's targeted re-pull (Opt B).
+                inserted_request_ids.add(request_id)
             except Exception as e:
                 for op in chunk_ops:
                     log(log_rows, name, request_id, "INSERT", op.match_key, "error",
@@ -358,7 +362,19 @@ print("PUSH SUMMARY")
 print("=" * 80)
 for k, v in totals.items():
     print(f"  {k}: {v}")
+if inserted_request_ids:
+    print(f"  inserted_request_ids ({len(inserted_request_ids)}): {', '.join(sorted(inserted_request_ids))}")
 if dry_run:
     print("\n⚠️  DRY RUN - no PATCH calls were made. Set dry_run=false to apply.")
 print(f"\nReview details:\n  SELECT * FROM {sync_log_full} WHERE run_id = '{run_id}' ORDER BY status DESC;")
 print("\n✅ Push complete")
+
+# COMMAND ----------
+
+# Exit with a structured string so the orchestrator (orchestrate_sync.py) can
+# parse inserted_request_ids for the targeted Step 7 re-pull (Opt B).
+# Format: "ok inserts=N inserted_ids=id1,id2,..."
+_inserted_ids_str = ",".join(sorted(inserted_request_ids)) if inserted_request_ids else ""
+dbutils.notebook.exit(
+    f"ok inserts={totals['inserts']} inserted_ids={_inserted_ids_str}"
+)

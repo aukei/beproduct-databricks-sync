@@ -206,8 +206,44 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
   stale DTC row `Product Status = "(removed)"` (invalid BeProduct value, user signal);
   do not delete. Only mark keys that moved to another request.
 - `Main Factory Customer ID` has no BeProduct target → skipped + logged until a
-  fieldId is provided.
+  fieldId is provided. Live schema check (2026-06-18): `factory_id_no` is a
+  read-only LabelText formula (`[factory]`); `customer_supplier_id` is a DropDown
+  with only 2 predefined choices — neither is a suitable writable target.
 - DTC blanks do not clear BeProduct unless `push_blanks=true`.
+- `customer_style_number` / DTC "Legacy Code" direction is **DTC → BeProduct**
+  (Phase 2). If the value is entered directly in BeProduct it will NOT flow to DTC
+  (there is no BeProduct → DTC push for this field). Data should be entered in DTC
+  first. No code change — leave as-is per team decision 2026-06-18.
+- BeProduct `header_number` for style `127-WM2FF-K26` has a leading space
+  (`' 127-WM2FF-K26'`). `phase1.norm()` strips it for matching so the sync
+  functions correctly; the cosmetic issue should be fixed in BeProduct directly.
+
+## Pipeline performance (validated 2026-06-18)
+
+Full profile of `BeProduct_orchestrate_sync` (Databricks job 22324120218492):
+see `docs/PERFORMANCE.md` for the complete breakdown and projected savings.
+
+**Bottlenecks (baseline):** Steps 3 + 7 (`pull_requests_to_delta`) each looped
+sequentially over 66 in-scope DTC requests calling `get_sheet()` — one HTTP GET
+per request, ≈6 s avg → ≈400 s per step (74% of execution). Cluster cold start
+added 350–410 s.
+
+**Optimizations applied 2026-06-18:**
+- **Opt A**: `pull_requests_to_delta.py` now uses `ThreadPoolExecutor(max_workers=4)`
+  for all `get_sheet()` calls. Hard cap of 4 to protect the 2-node K8S cluster
+  backing the DTC UAT API. New widget `max_workers` (default "4").
+- **Opt B**: `beproduct_to_dtc_push.py` emits `inserted_request_ids` in its exit
+  string (`"ok inserts=N inserted_ids=id1,id2,..."`). `orchestrate_sync.py` parses
+  this and passes the IDs to Step 7 via `pull_requests_to_delta`'s new `request_ids`
+  widget, so Step 7 only re-fetches sheets that had Phase 1 INSERTs (targeted
+  DELETE + append) instead of overwriting all 66 requests. Falls back to full
+  re-pull when `inserted_ids` is empty.
+- **Opt D**: `orchestrate_sync.py` default `refresh_mode` changed from `"FULL"` to
+  `"INCREMENTAL"`. `beproduct_style_sync.py` falls back to FULL automatically on
+  first run (no prior `ktb_styles_sync_meta` timestamp).
+
+**Remaining opportunity**: pre-warmed/keep-alive cluster eliminates 350–410 s cold
+start with zero code change (job configuration only).
 
 ## Commands
 
