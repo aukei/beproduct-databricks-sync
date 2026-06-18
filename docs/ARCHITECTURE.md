@@ -41,7 +41,7 @@ beproduct/                         # BeProduct-side notebooks (also host the cro
 ├── beproduct_to_dtc_push.py       # Phase 1: BeProduct → DTC upsert + orphan marks
 ├── beproduct_to_dtc_images.py     # Phase 3: front image → DTC "Style Image"
 ├── dtc_share_requests.py          # Idempotent request-sharing backfill
-└── orchestrate_sync.py            # One job: runs Phases 1+2+3 in order (schedulable)
+└── orchestrate_sync.py            # ⚠️ RETIRED — single-notebook fallback only
 
 dtc/
 ├── notebooks/
@@ -62,7 +62,9 @@ dtc/
 └── DTC-api-2026-05.pdf              # DTC API description/examples
 
 standalone/beproduct_style_push.py   # Standalone Delta → BeProduct push-back (not in daily pipeline)
-scripts/upload_notebooks.py          # Deploy notebooks + modules to the workspace
+scripts/
+├── upload_notebooks.py              # Deploy notebooks + modules to the workspace
+└── deploy_job.py                    # Create / reset the multi-task job (BeProduct_DTC_sync_dag)
 docs/                                # This documentation set
 ```
 
@@ -75,25 +77,28 @@ unit-tested); notebooks are thin Spark/IO wrappers around it. All HTTP lives in
 
 ## 3. Components & data flow
 
-The whole pipeline is one schedulable job, `beproduct/orchestrate_sync.py`, which
-runs the steps below in dependency order and reports per-step status.
+The whole pipeline runs as the **multi-task Databricks job** `BeProduct_DTC_sync_dag`
+(job 294837488757511, defined in `scripts/deploy_job.py`). Steps 1–2 and Step 3 run
+in **parallel** (they are independent); the rest follow in dependency order. Each
+step is a first-class task with its own logs and per-task timing in the Jobs UI.
 
 ```
-Step 1  beproduct_style_sync          BeProduct API ─▶ ktb_styles
-Step 2  beproduct_to_dtc_transform    ktb_styles    ─▶ beproduct_to_dtc_staging   (denormalize)
-Step 3  pull_requests_to_delta        DTC API       ─▶ dtc_wip_<customer> (+ refresh registry)
-Step 4  dtc_request_manager           staging+registry ─▶ dtc_request_mapping
-                                       (creates + shares missing in-scope requests)
-Step 5  beproduct_to_dtc_push         Phase 1: staging ─▶ DTC sheets (upsert + orphan marks)
-Step 6  05_push_dtc_to_beproduct      Phase 2: dtc_wip ─▶ BeProduct (pushback)
-Step 7  pull_requests_to_delta        refresh dtc_wip after Phase 1 inserts
-Step 8  beproduct_to_dtc_images       Phase 3: front image ─▶ DTC "Style Image"
+Step 1  bp_style_sync    BeProduct API ─▶ ktb_styles                      ┐ parallel
+Step 3  pull_dtc         DTC API       ─▶ dtc_wip_<customer> + registry   ┘
+Step 2  transform        ktb_styles    ─▶ beproduct_to_dtc_staging  (after Step 1)
+Step 4  request_manager  staging+registry ─▶ dtc_request_mapping    (after 2+3)
+                          (creates + shares missing in-scope requests)
+Step 5  phase1_push      Phase 1: staging ─▶ DTC sheets (upsert + orphan marks)
+Step 6  phase2_push      Phase 2: dtc_wip ─▶ BeProduct (pushback)   (after 2+3)
+Step 7  repull_dtc       refresh dtc_wip after Phase 1 inserts       (after 5)
+Step 8  phase3_images    Phase 3: front image ─▶ DTC "Style Image"
 ```
 
-Dependencies: 1→2 (chain); 3 independent; 4 needs 2+3; 5 needs 4; 6 needs 2+3
-(disjoint fields from 5); 7 after 5; 8 needs 4+2. Phases are individually gated by
-`run_phase1` / `run_phase2` / `run_phase3`. `dry_run` (applied to steps 4/5/6/8)
-computes + logs without writing.
+Dependencies: 1→2 (chain); 3 independent of 1/2; 4 needs 2+3; 5 needs 4; 6 needs
+2+3 (disjoint fields from 5); 7 after 5 (`run_if=ALL_DONE` so a skipped Phase 1
+still lets Phase 3 proceed); 8 after 7. Condition tasks `gate_phase1/2/3` evaluate
+`run_phase1/2/3` job parameters and gate the respective push tasks. `dry_run`
+(applied to steps 4/5/6/8) computes + logs without writing.
 
 ```
    BeProduct (PLM)                  Databricks  (lft.beproduct)                 DTC (sheets)

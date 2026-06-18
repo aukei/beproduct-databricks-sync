@@ -18,7 +18,9 @@ sheets), staged through **Databricks/Delta**.
 
 Each field syncs **one way only** (no loops). Direction table below.
 Components, data flow, and the full ADB data model: `docs/ARCHITECTURE.md`.
-The whole pipeline runs as one schedulable job: `beproduct/orchestrate_sync.py`.
+The whole pipeline runs as a **multi-task Databricks job** (`BeProduct_DTC_sync_dag`,
+job 294837488757511), defined in `scripts/deploy_job.py`. The old single-notebook
+orchestrator `beproduct/orchestrate_sync.py` is retired (kept as a manual fallback).
 
 ## Single source of truth (SSOT) for field mapping
 
@@ -218,45 +220,66 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
   (`' 127-WM2FF-K26'`). `phase1.norm()` strips it for matching so the sync
   functions correctly; the cosmetic issue should be fixed in BeProduct directly.
 
-## Pipeline performance (validated 2026-06-18)
+## Pipeline performance (validated 2026-06-19)
 
-Full profile of `BeProduct_orchestrate_sync` (Databricks job 22324120218492):
-see `docs/PERFORMANCE.md` for the complete breakdown and projected savings.
+Full history in `docs/PERFORMANCE.md`. Key facts for agents:
 
-**Bottlenecks (baseline):** Steps 3 + 7 (`pull_requests_to_delta`) each looped
-sequentially over 66 in-scope DTC requests calling `get_sheet()` — one HTTP GET
-per request, ≈6 s avg → ≈400 s per step (74% of execution). Cluster cold start
-added 350–410 s.
+**Current production job:** `BeProduct_DTC_sync_dag` (job 294837488757511),
+8 first-class tasks on one shared single-node non-Photon cluster. Defined in
+`scripts/deploy_job.py`; deploy with `python scripts/deploy_job.py`. The old
+single-notebook orchestrator (job 22324120218492, `orchestrate_sync.py`) is retired.
 
-**Optimizations applied 2026-06-18:**
-- **Opt A**: `pull_requests_to_delta.py` now uses `ThreadPoolExecutor(max_workers=4)`
-  for all `get_sheet()` calls. Hard cap of 4 to protect the 2-node K8S cluster
-  backing the DTC UAT API. New widget `max_workers` (default "4").
-- **Opt B**: `beproduct_to_dtc_push.py` emits `inserted_request_ids` in its exit
-  string (`"ok inserts=N inserted_ids=id1,id2,..."`). `orchestrate_sync.py` parses
-  this and passes the IDs to Step 7 via `pull_requests_to_delta`'s new `request_ids`
-  widget, so Step 7 only re-fetches sheets that had Phase 1 INSERTs (targeted
-  DELETE + append) instead of overwriting all 66 requests. Falls back to full
-  re-pull when `inserted_ids` is empty.
-- **Opt D**: `orchestrate_sync.py` default `refresh_mode` changed from `"FULL"` to
-  `"INCREMENTAL"`. `beproduct_style_sync.py` falls back to FULL automatically on
-  first run (no prior `ktb_styles_sync_meta` timestamp).
+**Parallel DAG:** Steps 1→2 (BeProduct chain) run in parallel with Step 3 (DTC
+pull), converging at Step 4. Steps 1-2 ≈ 110 s; Step 3 ≈ 84 s — they overlap.
 
-**Remaining opportunity**: pre-warmed/keep-alive cluster eliminates 350–410 s cold
-start with zero code change (job configuration only).
-- **INCREMENTAL mode upsert bug fixed (2026-06-18):** `beproduct_style_sync.py`
-  was using `mode="append"` for INCREMENTAL writes, causing duplicates when the
-  BeProduct `FolderModifiedAt` filter (folder-scoped, not style-scoped) returned
-  styles that were already in `ktb_styles`. Fixed to `DeltaTable.merge` (keyed on
-  BeProduct style `id`) so INCREMENTAL correctly upserts — matched rows UPDATE,
-  new rows INSERT, unrelated rows are untouched. FULL mode remains `overwrite`.
-  The `FolderModifiedAt` filter returns all styles in any folder where ANY style
-  was modified after the cutoff (folder-level granularity), so INCREMENTAL can
-  legitimately return styles whose individual `modified_at` predates the cutoff.
-  `LFBP-1WTP0002 / Wrangler / Spring / 2028` had 3 distinct BeProduct style IDs
-  sharing the same key — resolved 2026-06-18 by reassigning the styles to different
-  brands in BeProduct. The next INCREMENTAL sync will update all three via MERGE
-  (keyed on `id`), restoring unique keys in `ktb_styles`.
+**Current typical execution (single-node cold start ~290 s):**
+
+| Step | Task | Typical exec |
+|------|------|-------------|
+| 1 | `bp_style_sync` (BeProduct API → ktb_styles) | ~75–130 s |
+| 2 | `transform` (ktb_styles → staging) | ~30–50 s |
+| **3** | **`pull_dtc`** (DTC API → dtc_wip + registry) | **~84 s** |
+| 4 | `request_manager` | ~13 s |
+| 5 | `phase1_push` (BeProduct → DTC upsert) | ~14–60 s |
+| 6 | `phase2_push` (DTC → BeProduct) | ~20–30 s |
+| 7 | `repull_dtc` (targeted: only INSERT'd requests) | ~17 s full / ~5 s targeted |
+| 8 | `phase3_images` (front image upload) | ~25–130 s |
+| **Total execution** | | **~320–450 s** |
+| **Total wall (cold)** | | **~610–740 s (~10–12 min)** |
+
+**What was actually slow and why (intra-step cell-level profiling, 2026-06-19):**
+The original hypothesis (serial `get_sheet` HTTP calls = 396 s) was wrong. The real
+costs in `pull_requests_to_delta` were 100% Spark overhead:
+- Cell 5: 66 per-request DataFrames → `reduce(unionByName)` → Delta overwrite +
+  redundant `count()` = **277 s** for 422 rows. Fixed: one flat list → one DF → one
+  write → `len()`. Now **8.8 s**.
+- Cell 6: 66 serial `spark.sql("UPDATE registry …")` = **179 s**. Fixed: single
+  batched `MERGE INTO` from a temp view. Now **5.5–8 s**.
+- DTC API (registry refresh + all `get_sheet`s combined) = **~24 s** and was never
+  the bottleneck. Opt A (parallel `get_sheet`) therefore gave nothing.
+
+**Per-step log access (no hidden child runs):** Because the pipeline is now a
+multi-task job, each step's logs are at `runs/get → tasks[].run_id`. Export any
+step directly with `runs/export?run_id=<task_run_id>`. No WORKFLOW_RUN hunting.
+
+**INCREMENTAL mode upsert bug fixed (2026-06-18):** `beproduct_style_sync.py`
+was using `mode="append"` for INCREMENTAL writes, causing duplicates when the
+BeProduct `FolderModifiedAt` filter (folder-scoped, not style-scoped) returned
+styles that were already in `ktb_styles`. Fixed to `DeltaTable.merge` (keyed on
+BeProduct style `id`) so INCREMENTAL correctly upserts — matched rows UPDATE,
+new rows INSERT, unrelated rows are untouched. FULL mode remains `overwrite`.
+NOTE: the `FolderModifiedAt` filter is folder-scoped (any change in the KTB folder
+re-qualifies all styles), so INCREMENTAL is NOT reliably faster than FULL for Step 1
+— leave `refresh_mode=INCREMENTAL` (default) but do not expect it to save time.
+
+**BeProduct SDK install (~10 s/run):** `beproduct_style_sync.py` installs the SDK
+via `subprocess.check_call(pip install)` on every run. Isolated in its own cell so
+the cost is measured. To eliminate, bake `beproduct` into the cluster init script.
+
+**Remaining opportunity:** parallelize `registry.refresh()` inner loop
+(`registry.py:308`, serial `get_request_scope` by-id reads) — now ~40 s, the last
+remaining lever in Step 3. Same `ThreadPoolExecutor(max_workers=4)` pattern.
+Pre-warmed cluster pool also eliminates the ~290 s cold start.
 
 ## Commands
 
@@ -267,4 +290,7 @@ python3 dtc/tests/test_phase3.py        # Phase 3 image-upload core unit tests
 python3 dtc/tests/test_phase1_live.py   # live reversible DTC write test (needs UAT)
 python scripts/upload_notebooks.py --dry-run   # preview Databricks notebook upload
 python scripts/upload_notebooks.py             # deploy notebooks to Databricks
+python scripts/deploy_job.py --dry-run         # preview multi-task job definition
+python scripts/deploy_job.py                   # create BeProduct_DTC_sync_dag job
+python scripts/deploy_job.py --reset-existing <JOB_ID>  # update existing job in place
 ```

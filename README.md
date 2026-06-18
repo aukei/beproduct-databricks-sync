@@ -10,8 +10,10 @@ schema `lft.beproduct`. Each field syncs **one way only** (no loops).
 - **Phase 3 — BeProduct → DTC (image):** upload the front image into the DTC
   "Style Image" cell (binary, separate endpoint).
 
-The whole pipeline runs as **one schedulable Databricks job**
-(`beproduct/orchestrate_sync.py`).
+The whole pipeline runs as a **multi-task Databricks job** (`BeProduct_DTC_sync_dag`,
+job 294837488757511), defined in `scripts/deploy_job.py`. Steps 1–2 (BeProduct chain)
+run in parallel with Step 3 (DTC pull) for shorter wall time; each step has its own
+logs and per-task timing directly in the Jobs UI.
 
 ---
 
@@ -27,6 +29,7 @@ The whole pipeline runs as **one schedulable Databricks job**
 | [docs/BEPRODUCT_GUIDE.md](docs/BEPRODUCT_GUIDE.md) | BeProduct SDK/API used + BeProduct tables on ADB |
 | [docs/DTC_GUIDE.md](docs/DTC_GUIDE.md) | DTC API used + DTC tables on ADB |
 | [docs/beproduct_style_interested_fields.txt](docs/beproduct_style_interested_fields.txt) | **Field-mapping SSOT** (DTC column ⇄ BeProduct fieldId ⇄ direction) |
+| [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | Pipeline performance history, root-cause analysis, and optimisations applied |
 | [AGENTS.md](AGENTS.md) | Durable log of verified API behaviour & project invariants |
 | [implement_prompts.txt](implement_prompts.txt) | Original requirements / spec braindump |
 
@@ -43,7 +46,7 @@ beproduct/                         # BeProduct-side notebooks (+ cross-platform 
 ├── beproduct_to_dtc_push.py       # Phase 1: BeProduct → DTC upsert + orphan marks
 ├── beproduct_to_dtc_images.py     # Phase 3: front image → DTC "Style Image"
 ├── dtc_share_requests.py          # Idempotent request-sharing backfill
-└── orchestrate_sync.py            # One job: Phases 1+2+3 in order (schedulable)
+└── orchestrate_sync.py            # ⚠️ RETIRED — single-notebook fallback only
 
 dtc/
 ├── notebooks/
@@ -60,7 +63,9 @@ dtc/
 
 standalone/                          # Standalone utilities (not in the daily pipeline)
 └── beproduct_style_push.py          # Generic Delta → BeProduct push-back
-scripts/upload_notebooks.py          # Deploy notebooks + modules to the workspace
+scripts/
+├── upload_notebooks.py              # Deploy notebooks + modules to the workspace
+└── deploy_job.py                    # Create / reset the multi-task job on Databricks
 docs/                                # Documentation (see table above)
 ```
 
@@ -83,9 +88,16 @@ pip install databricks-sdk
 cp .env.example .env          # set DATABRICKS_HOST + DATABRICKS_PAT
 python scripts/upload_notebooks.py
 
-# 3. Run the full sync (Databricks job) — notebook:
-#    /Workspace/Repos/beproduct-sync/beproduct/orchestrate_sync
-#    params: dtc_environment=uat, dry_run=true (preview) → dry_run=false (apply)
+# 3. Create (or reset) the multi-task job
+python scripts/deploy_job.py --dry-run   # preview the task graph
+python scripts/deploy_job.py             # create BeProduct_DTC_sync_dag
+# To overwrite an existing job in place:
+# python scripts/deploy_job.py --reset-existing <JOB_ID>
+
+# 4. Run the full sync via the Jobs UI (or CLI):
+#    Job: BeProduct_DTC_sync_dag (job 294837488757511)
+#    Key parameters: dtc_environment=uat, dry_run=true (preview) → dry_run=false (apply)
+#    run_phase1/2/3=true|false to toggle individual phases
 ```
 
 See **[QUICK_START.md](QUICK_START.md)** for step-by-step instructions, individual
@@ -112,10 +124,15 @@ beproduct_master_*      dtc_request_mapping              dtc_wip_<customer>     
 ## Development
 
 ```bash
-# Deploy
+# Deploy notebooks + modules
 python scripts/upload_notebooks.py --dry-run        # preview
 python scripts/upload_notebooks.py                  # notebooks + modules
 python scripts/upload_notebooks.py --modules-only   # just dtc/python modules
+
+# Job definition
+python scripts/deploy_job.py --dry-run              # preview task graph + settings
+python scripts/deploy_job.py                        # create new job
+python scripts/deploy_job.py --reset-existing <ID>  # update existing job in place
 
 # Tests (pure cores; no Spark/network)
 python3 dtc/tests/test_phase1.py
