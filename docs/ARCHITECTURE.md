@@ -34,7 +34,8 @@ the user-profile timezone (treated as **+08:00 HKT** here).
 
 ```
 beproduct/                         # BeProduct-side notebooks (also host the cross-platform push)
-├── beproduct_style_sync.py        # BeProduct API → lft.beproduct.ktb_styles
+├── 00_init_style_app_registry.py  # Cache folder application IDs → beproduct_style_app_registry
+├── beproduct_style_sync.py        # BeProduct API → lft.beproduct.ktb_styles (+ sample-app status)
 ├── beproduct_master_data_sync.py  # Reference/master data → beproduct_master_*
 ├── beproduct_to_dtc_transform.py  # ktb_styles → beproduct_to_dtc_staging (denormalize)
 ├── dtc_request_manager.py         # Resolve / CREATE / SHARE DTC requests → dtc_request_mapping
@@ -83,7 +84,7 @@ in **parallel** (they are independent); the rest follow in dependency order. Eac
 step is a first-class task with its own logs and per-task timing in the Jobs UI.
 
 ```
-Step 1  bp_style_sync    BeProduct API ─▶ ktb_styles                      ┐ parallel
+Step 1  bp_style_sync    BeProduct API ─▶ ktb_styles (+ 6 sample-app stat) ┐ parallel
 Step 3  pull_dtc         DTC API       ─▶ dtc_wip_<customer> + registry   ┘
 Step 2  transform        ktb_styles    ─▶ beproduct_to_dtc_staging  (after Step 1)
 Step 4  request_manager  staging+registry ─▶ dtc_request_mapping    (after 2+3)
@@ -182,7 +183,8 @@ Workspace ("KTB")
 
 | Table | Grain | Key columns / notes |
 |-------|-------|---------------------|
-| `ktb_styles` | 1 row / style | `id`, `lf_style_number`, `brands`, `season`, `year`, `product_status`, `description`, `product_category`, `product_sub_category`, `division`, `garment_finish`, `techpack_stage`, `customer_style_number`, `lot_code`, `parent_vendor`, `factory`; arrays `colorways_array`/`colorways_count`; `colorways_json` (`[{colorway_id,color_name,color_number}]`); `front_image_url`; `data_json` (full record); change tracking `modified_at`/`last_modified`, `synced_at`/`extracted`, `created_at` |
+| `ktb_styles` | 1 row / style | `id`, `lf_style_number`, `brands`, `season`, `year`, `product_status`, `description`, `product_category`, `product_sub_category`, `division`, `garment_finish`, `techpack_stage`, `customer_style_number`, `lot_code`, `parent_vendor`, `factory`; arrays `colorways_array`/`colorways_count`; `colorways_json` (`[{colorway_id,color_name,color_number}]`); `front_image_url`; **sample-app submits** `{proto,preline,sms,fit,pp,top}_sample_json` (6 JSON arrays of submit×size records, `'[]'` when no data; transform flattens); `data_json` (full record); change tracking `modified_at`/`last_modified`, `synced_at`/`extracted`, `created_at` |
+| `beproduct_style_app_registry` | 1 row / (folder × app) | Cache of folder-constant application IDs (`00_init_style_app_registry`). `folder_name`, `app_id`, `app_title`, `app_type`, `is_sample`, `column_prefix`, `registered_at`. Sync reads `is_sample=true` to know which apps to `app_get`. |
 | `beproduct_master_*` | 1 row / valid value | 12 tables (brands, teams, seasons, years, product_status, product_category, product_sub_category, division, techpack_stage, garment_finish, parent_vendor, factory); columns `value`, `label`, `data_json`, `synced_at`. Used to validate dropdown/multiselect values before push-back. |
 
 Details + BeProduct API/SDK usage: `BEPRODUCT_GUIDE.md`.

@@ -219,10 +219,23 @@ Tackle image. Since image API is an operation on existing row, it cannot be hand
 - keep DTC API doc as is.
 
 
-# Performance tuning
+# Performance tuning $21
 DO NOT make change to any code yet. Continue investigate performance of databricks job orchestrate_sync. 
 The latest run https://adb-781381861146191.11.azuredatabricks.net/jobs/22324120218492/runs/57360453476718 is after implementation of "parallel DTC read at step 3", "incremental BeProduct Style upsert at step 1" and "Skip rereading no-insert DTC sheet at step 7". Only "skip rereading at step 7" made material differences. First focus on identifying where time was spent in step 1 and step 3. 
 My hypothesis is the many 'log message to sync control table' actions being executed as separate spark job that killed performance. And "BeProduct Style list action overall take similar amount of time to response, filter only reduce amount of data return".
 
 There is a docs/performance.md for base line.
 databricks-integration SKILL has some instruction on how to get job log from databricks written by another agent. Make sure or update that if relevant.
+
+
+# Phase 4 sample information 
+- Reference to BeProduct SDK 'https://python.beproduct.com/075-apps/', each Style can have a list of associated applications. 
+- Take LFStyle# 'HOODED-K263' & 'LFBP-WM1MO-MALE WAXED JKT-002' as examples, study what applications are there, taking note of application IDs which is the same for a particular app across all Styles according to doc. Verify this claim.
+- In particular is there apps resemble 'Proto Sample', 'PreLine sample'. If so, what content data do BeProduct returns in 'app_get' call? 
+- User want to see "submitStatus" and "submitStatusDate" of  all sample apps on DTC. Since these apps have a separate 'modifiedAt', likely
+    - do full style retrieval every time
+    - enrich with apps data
+  Ponder data to see would there be better ways: Do Style contains any metadata that hint app's Modified?
+- in this exploration phase, just do a full style x sample trial run locally to ensure we deduce app behavior correctly, and to time it. AFAIK the project team only setup Sample data in a few Style during implementation. Good to know which Style is a good candidate for later coding verification purpose too.
+    - note: The tricky part is deciding which submit status to extract when an app has multiple submits and sizes. The cleanest approach is to take the latest submit (last in the submits array or by submitStatusDate) and within that, prefer the sample size if it exists, otherwise use the first size. That gives us a single submitStatus and submitStatusDate per app to store in the corresponding column.
+    - each submit has:       → submit=1ST Submit size=S status=Requested statusDate=2026-05-14

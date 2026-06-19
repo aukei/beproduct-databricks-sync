@@ -79,7 +79,10 @@ JOB_PARAMS = {
     "dtc_workspace": "KTB",
     "dtc_document": "KTB WIP",
     "dtc_environment": "uat",
-    "refresh_mode": "INCREMENTAL",
+    # FULL on the daily job: sample-app changes do NOT bump style.modifiedAt, so
+    # INCREMENTAL would miss app-only updates. Developers can still run Step 1 with
+    # refresh_mode=INCREMENTAL ad-hoc from the ADB portal. See beproduct_style_sync.
+    "refresh_mode": "FULL",
     "dry_run": "false",
     "delta_only": "true",
     "run_phase1": "true",

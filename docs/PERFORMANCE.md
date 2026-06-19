@@ -109,7 +109,7 @@ All optimisations applied and validated. The pipeline now runs as the multi-task
 
 | Task | Typical exec | Notes |
 |------|-------------|-------|
-| `bp_style_sync` ∥ `pull_dtc` | ~77 s ∥ **~84 s** | run in parallel (DAG); pull_dtc was 491 s at baseline |
+| `bp_style_sync` ∥ `pull_dtc` | ~77 s (+ ~120 s sample apps) ∥ **~84 s** | run in parallel (DAG); pull_dtc was 491 s at baseline |
 | `transform` | ~30–50 s | after bp_style_sync |
 | `request_manager` | ~13 s | |
 | `phase1_push` | ~14–60 s | |
@@ -269,6 +269,19 @@ bottlenecked only by `registry.refresh` (cell 2, ~40 s of serial
 
 Follow-up: migrate the cron schedule from the old job (22324120218492) to the new
 multi-task job (294837488757511) and pause the old one.
+
+### Step 1 sample-app enrichment cost (added 2026-06-19)
+
+`beproduct_style_sync` now also reads each style's 6 sample apps (Proto / PreLine /
+SMS / Fit / PP / TOP) — **one `app_get` per (style × app)**, because app changes are
+invisible to `style.modifiedAt` (no incremental shortcut exists; see AGENTS.md).
+For KTB that is 146 × 6 = **876 calls ≈ ~120 s** at `app_max_workers=10` (~1.5 s
+genuine API latency/call; BeProduct's "2/sec" is a min-throughput SLA, not a cap).
+The calls run in parallel BEFORE the single DataFrame build, so there is still **one
+write**. This is why the daily job pins Step 1 to **FULL** — INCREMENTAL would skip
+unchanged styles and miss app-only edits. Disable with `enrich_sample_apps=false`.
+App IDs are folder-constant and cached by `00_init_style_app_registry`
+(`beproduct_style_app_registry`), so the sync does not call `app_list` per run.
 
 ### Opt E — batched control-table MERGE (validated 2026-06-19)
 

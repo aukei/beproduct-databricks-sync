@@ -8,11 +8,27 @@ Supports both FULL and INCREMENTAL refresh modes.
 
 Schedule: Daily at 7pm HKT (11am UTC)
 
+Also enriches each style with the submit data of its 6 SAMPLE applications
+(Proto / PreLine / SMS / Fit / PP / TOP) — stored as 6 JSON-array columns
+(`<prefix>_json`), each the full list of that app's submit×size records (sampling
+explodes like colorways/BOM; flattening is delegated to the Step-2 transform). App
+data lives in a separate BeProduct "app" with its OWN modifiedAt that is INDEPENDENT
+of the style's
+modifiedAt (a style attribute change does NOT bump the app, and vice-versa). There
+is no field in the style payload that hints an app changed, so the only way to learn
+sample status is one `app_get` per (style × app). For that reason the daily JOB
+runs this step in FULL mode (INCREMENTAL would miss app-only changes on otherwise
+unchanged styles); INCREMENTAL stays available for ad-hoc developer runs. The app
+IDs are constant per FOLDER and are cached by `00_init_style_app_registry`.
+
 Parameters:
   - refresh_mode: "FULL" (default) or "INCREMENTAL"
   - catalog: Target Databricks catalog (default: "lft")
   - schema: Target Databricks schema (default: "beproduct")
   - table_name: Table name (default: "ktb_styles")
+  - enrich_sample_apps: "true" (default) — fetch sample-app submit status
+  - app_max_workers: parallel app_get workers (default: 10)
+  - app_registry_table: sample-app id cache (default: "beproduct_style_app_registry")
 """
 
 # COMMAND ----------
@@ -75,6 +91,9 @@ dbutils.widgets.text("refresh_mode", "FULL", "Refresh Mode (FULL or INCREMENTAL)
 dbutils.widgets.text("catalog", "lft", "Catalog Name")
 dbutils.widgets.text("schema", "beproduct", "Schema Name")
 dbutils.widgets.text("table_name", "ktb_styles", "Table Name")
+dbutils.widgets.text("enrich_sample_apps", "true", "Enrich with sample-app status (true/false)")
+dbutils.widgets.text("app_max_workers", "10", "Parallel app_get workers")
+dbutils.widgets.text("app_registry_table", "beproduct_style_app_registry", "Sample-app id registry table")
 
 folder_name = dbutils.widgets.get("folder_name")
 refresh_mode = dbutils.widgets.get("refresh_mode").upper()
@@ -109,6 +128,9 @@ refresh_mode_val = dbutils.widgets.get("refresh_mode").upper()
 catalog_val = dbutils.widgets.get("catalog")
 schema_val = dbutils.widgets.get("schema")
 table_name_val = dbutils.widgets.get("table_name")
+enrich_sample_apps_val = dbutils.widgets.get("enrich_sample_apps").strip().lower() in ("true", "1", "yes")
+app_max_workers_val = int(dbutils.widgets.get("app_max_workers").strip() or "10")
+app_registry_table_val = dbutils.widgets.get("app_registry_table").strip()
 
 # Field mapping configuration
 # Keys are BeProduct field names (from headerData.fields[].name)
@@ -146,6 +168,26 @@ BOM_MATERIAL_FIELDS = {
 }
 
 EXTRACTED_FIELDS = {**COMPULSORY_FIELDS, **INTERESTED_FIELDS}
+
+# Sample applications to enrich each style with (BeProduct "apps").
+# SSOT for the title -> Delta column-prefix mapping (also used by
+# 00_init_style_app_registry). Each app contributes ONE JSON-array column:
+#   <prefix>_json — full list of the app's submit×size records (raw, not collapsed)
+# A sample app explodes like colorways/BOM: N submit rounds × M sizes, each with its
+# own submitStatus/submitStatusDate/dueDate/etc. We store the WHOLE array as JSON
+# (mirroring colorways_json) and DELEGATE flattening/selection to the Step-2
+# transform, so we don't pre-bake a presentation the user hasn't specified yet.
+# App IDs are constant per FOLDER (resolved from the registry at runtime), so they
+# are intentionally NOT hardcoded here. See https://python.beproduct.com/075-apps/.
+SAMPLE_APPS = {
+    "Proto Sample":   "proto_sample",
+    "PreLine Sample": "preline_sample",
+    "SMS Sample":     "sms_sample",
+    "Fit Sample":     "fit_sample",
+    "PP Sample":      "pp_sample",
+    "TOP Sample":     "top_sample",
+}
+SAMPLE_APP_COLUMNS = [f"{_prefix}_json" for _prefix in SAMPLE_APPS.values()]
 
 print(f"\n📋 Configuration:")
 print(f"   Folder: {folder_name_val}")
@@ -415,7 +457,121 @@ else:
 
 # Only proceed if we have data
 if HAS_DATA:
-    
+
+    # ============================================================================
+    # Step 3b: Enrich with SAMPLE-APP submit data
+    # ============================================================================
+    # One app_get per (style x sample app). App IDs are folder-constant; resolve
+    # them from the registry (00_init_style_app_registry), falling back to a single
+    # app_list() discovery call if the registry is missing. Parallelised because
+    # each app_get is ~1.5 s of API latency. Builds a {header_id: {<6 _json cols>}}
+    # map; every style gets all 6 JSON-array columns ('[]' where the app has no
+    # submit data) so the Delta schema is stable whether or not a style has data.
+
+    print(f"\n{'='*80}")
+    print("Step 3b: Enrich with sample-app submit status")
+    print("=" * 80)
+
+    def extract_sample_submits(app_resp: Dict) -> List[Dict]:
+        """Return the FULL list of submit×size records for a SampleRequestMulti
+        app_get response — one element per (submit round × size) — or [] when the
+        app has no submit data (app.modifiedAt == '0001-01-01'). Stored verbatim as
+        a JSON array so the Step-2 transform can flatten/select whatever format the
+        user eventually specifies (sampling explodes like colorways/BOM). POM
+        measurement rows (`data.poms`) are intentionally NOT included here."""
+        data = app_resp.get("data") or {}
+        out = []
+        for sub in (data.get("submits") or []):
+            for sz in (sub.get("sizes") or []):
+                out.append({
+                    "submit_id": sub.get("id"),
+                    "submit_name": sub.get("name"),
+                    "size_id": sz.get("id"),
+                    "size": sz.get("size"),
+                    "is_sample_size": sz.get("sampleSize"),
+                    "submit_status": sz.get("submitStatus"),
+                    "submit_status_date": sz.get("submitStatusDate"),
+                    "due_date": sz.get("dueDate"),
+                    "received_date": sz.get("receivedDate"),
+                    "fit_date": sz.get("fitDate"),
+                })
+        return out
+
+    def resolve_sample_app_ids() -> Dict[str, str]:
+        """title -> app_id for SAMPLE_APPS in this folder. Reads the registry table
+        first (cached by 00_init_style_app_registry); falls back to ONE app_list()
+        discovery call if the registry is missing/empty."""
+        reg = f"{catalog_val}.{schema_val}.{app_registry_table_val}"
+        try:
+            rows = spark.sql(
+                f"SELECT app_title, app_id FROM {reg} "
+                f"WHERE folder_name = '{folder_name_val}' AND is_sample = true"
+            ).collect()
+            mapping = {r["app_title"]: r["app_id"] for r in rows if r["app_title"] in SAMPLE_APPS}
+            if mapping:
+                print(f"   Resolved {len(mapping)} sample-app id(s) from registry {reg}")
+                return mapping
+            print(f"   ⚠️  {reg} has no sample apps for folder '{folder_name_val}'; "
+                  f"falling back to app_list() discovery")
+        except Exception as e:
+            print(f"   ⚠️  registry {reg} unavailable ({str(e)[:120]}); "
+                  f"falling back to app_list() discovery")
+        # Fallback: discover from one style's app_list
+        apps = api.style.app_list(header_id=styles[0]["id"])
+        by_title = {a.get("title"): a.get("id") for a in apps}
+        mapping = {t: by_title[t] for t in SAMPLE_APPS if t in by_title}
+        print(f"   Discovered {len(mapping)} sample-app id(s) via app_list "
+              f"(run 00_init_style_app_registry to cache them)")
+        return mapping
+
+    def enrich_styles_with_sample_apps(style_list, app_id_by_title, max_workers) -> Dict[str, Dict]:
+        """{header_id: {<prefix>_json: '<json array>'}} for all styles. All 6 JSON
+        columns present ('[]' default). One parallel app_get per (style x app)."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        empty = json.dumps([])
+        enrichment = {s["id"]: {c: empty for c in SAMPLE_APP_COLUMNS} for s in style_list}
+        if not app_id_by_title:
+            return enrichment
+        tasks = [(s["id"], title, aid)
+                 for s in style_list for title, aid in app_id_by_title.items()]
+
+        def _fetch(hid, title, aid):
+            return hid, title, api.style.app_get(header_id=hid, app_id=aid)
+
+        errors = 0
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = [pool.submit(_fetch, *t) for t in tasks]
+            for fut in as_completed(futures):
+                try:
+                    hid, title, resp = fut.result()
+                    prefix = SAMPLE_APPS[title]
+                    enrichment[hid][f"{prefix}_json"] = json.dumps(extract_sample_submits(resp))
+                except Exception:
+                    errors += 1
+        if errors:
+            print(f"   ⚠️  {errors} app_get call(s) failed (left as '[]')")
+        return enrichment
+
+    # Always initialise the map so every row gets the 6 JSON-array columns ('[]').
+    _empty_json = json.dumps([])
+    app_enrichment = {s["id"]: {c: _empty_json for c in SAMPLE_APP_COLUMNS} for s in styles}
+    if enrich_sample_apps_val:
+        _app_t0 = time.perf_counter()
+        _app_ids = resolve_sample_app_ids()
+        _n_calls = len(styles) * len(_app_ids)
+        print(f"   {len(styles)} styles × {len(_app_ids)} sample apps = {_n_calls} "
+              f"app_get calls ({app_max_workers_val} workers)…")
+        if refresh_mode_val != "FULL":
+            print("   ⚠️  INCREMENTAL run: only changed styles are enriched. App-only "
+                  "changes on unchanged styles are NOT captured — use FULL for that.")
+        app_enrichment = enrich_styles_with_sample_apps(styles, _app_ids, app_max_workers_val)
+        _n_with = sum(1 for v in app_enrichment.values()
+                      if any(x not in (None, "[]") for x in v.values()))
+        print(f"   ✅ Enriched in {time.perf_counter()-_app_t0:.1f}s — "
+              f"{_n_with} of {len(styles)} style(s) have sample data")
+    else:
+        print("   (skipped: enrich_sample_apps=false — sample columns will be '[]')")
+
     # ============================================================================
     # Step 4: Transform Records
     # ============================================================================
@@ -595,7 +751,14 @@ if HAS_DATA:
         print(f"   - Change tracking: last_modified, extracted")
         
         rows = [transform_style_record(s) for s in styles]
-        
+
+        # Attach sample-app submit arrays (6 JSON columns; '[]' where no data) so the
+        # schema is stable across all rows regardless of whether a style has data.
+        for _row in rows:
+            _vals = app_enrichment.get(_row["id"], {})
+            for _col in SAMPLE_APP_COLUMNS:
+                _row[_col] = _vals.get(_col, "[]")
+
         # Print sample for verification
         if rows:
             sample = rows[0]
@@ -605,6 +768,7 @@ if HAS_DATA:
             print(f"      - bom_material_2: {sample.get('bom_material_2', 'N/A')}")
             print(f"      - last_modified: {sample.get('last_modified', 'N/A')}")
             print(f"      - extracted: {sample.get('extracted', 'N/A')}")
+            print(f"      - proto_sample_json: {str(sample.get('proto_sample_json', '[]'))[:160]}")
         
         print(f"✅ Transformed {len(rows)} rows")
     except Exception as e:

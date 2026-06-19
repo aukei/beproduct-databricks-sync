@@ -50,6 +50,8 @@ api = BeProduct(
 | `api.style.attributes_list(filters=…)` | `beproduct_style_sync.py` | iterate styles in a folder (pull) |
 | `api.style.attributes_get(header_id)` | `05_push_dtc_to_beproduct.py` | read current values live for an accurate NOOP diff (Phase 2) |
 | `api.style.attributes_update(header_id, fields={…}, colorways=[{"id":…,"fields":{…}}])` | `beproduct_style_push.py`, `05_push_dtc_to_beproduct.py` | write header and/or colorway fields back |
+| `api.style.app_list(header_id)` | `00_init_style_app_registry.py` | list a folder's applications (ids are folder-constant) |
+| `api.style.app_get(header_id, app_id)` | `beproduct_style_sync.py` | read one application's content (sample-app submit status) |
 | `GET /api/{company}/MasterData/{fieldId}` | `beproduct_master_data_sync.py` | pull valid dropdown/multiselect values |
 
 ### Push-back is type-aware (MultiSelect vs DropDown)
@@ -77,11 +79,53 @@ misleading; the header no longer defines it). Colorway writes need the colorway
 
 ---
 
+## 3a. Style Applications (sample submit data)
+
+Besides attributes, a BeProduct style has **applications** ("pages"): Tech Pack, BOM,
+Artboards, and **sample requests** (Proto / PreLine / SMS / Fit / PP / TOP). The sync
+enriches each style with the full **submit data** of its 6 sample apps.
+
+**Key behaviours (live-validated 2026-06-19, see `../AGENTS.md`):**
+
+- **App IDs are constant per FOLDER, not per style** — every style in `KTB` shares
+  the same 6 sample-app IDs. We cache them once with `00_init_style_app_registry`
+  rather than calling `app_list` per style. (https://python.beproduct.com/075-apps/)
+- **App changes are INVISIBLE to the style.** An app has its OWN `modifiedAt`,
+  independent of `style.modifiedAt`; nothing in the style payload hints an app
+  changed. `app.modifiedAt == "0001-01-01T00:00:00"` means the app exists but has no
+  data. ⇒ the only way to read sample status is one `app_get` per (style × app), and
+  the daily JOB must run Step 1 in **FULL** (INCREMENTAL would miss app-only edits).
+- `app_get` for a `SampleRequestMulti` returns `data.submits[].sizes[]` each with
+  `submitStatus`, `submitStatusDate`, `dueDate`, `receivedDate`, `fitDate`, plus
+  `data.poms[]` (measurements). A sample app **explodes** like colorways/BOM
+  (N submit rounds × M sizes), so we do NOT collapse it to a single status.
+  ~1.5 s/call API latency; the sync parallelises with `app_max_workers`.
+- BeProduct's "2 calls/sec" is a **minimum throughput SLA, not a cap** — 10 workers
+  sustained ~7 calls/sec with no throttling.
+
+**The 6 JSON-array columns added to `ktb_styles`** — for each app `<prefix>` ∈
+`{proto, preline, sms, fit, pp, top}_sample`: a single column `<prefix>_json`
+holding the full list of submit×size records
+(`submit_id/name, size_id/size, is_sample_size, submit_status, submit_status_date,
+due_date, received_date, fit_date`); `'[]'` when the style has no data for that app.
+Stored RAW (POMs excluded) — **flattening/selection is delegated to the Step-2
+transform** (same pattern as `colorways_json`), so no presentation format is
+pre-baked here.
+
+SSOT for the title→prefix map: the `SAMPLE_APPS` dict, defined identically in
+`beproduct_style_sync.py` and `00_init_style_app_registry.py`.
+
+> DTC push of these fields is a **future step** — they currently land only in
+> `ktb_styles`; the transform → staging → Phase 1 wiring is not done yet.
+
+---
+
 ## 4. Notebooks (BeProduct side)
 
 | Notebook | Does | Writes |
 |----------|------|--------|
-| `beproduct/beproduct_style_sync.py` | Pull styles for a folder (FULL/INCREMENTAL); extract header fields, colorways, front image. | `ktb_styles` |
+| `beproduct/00_init_style_app_registry.py` | Cache a folder's application IDs (run on-demand when app setup changes). | `beproduct_style_app_registry` |
+| `beproduct/beproduct_style_sync.py` | Pull styles for a folder (FULL/INCREMENTAL); extract header fields, colorways, front image; enrich with 6 sample-app submit arrays. | `ktb_styles` |
 | `beproduct/beproduct_master_data_sync.py` | Pull valid values for 12 dropdown/multiselect fields. | `beproduct_master_*` |
 | `standalone/beproduct_style_push.py` | Generic Delta → BeProduct push-back of locally edited rows (`modified_at > synced_at`), type-aware. | BeProduct |
 
@@ -113,10 +157,21 @@ Plus:
 - `data_json` — full raw record (full fidelity)
 - change tracking: `modified_at`/`last_modified`, `synced_at`/`extracted`,
   `created_at`
+- **sample-app data (6 JSON cols)**: `{proto,preline,sms,fit,pp,top}_sample_json`
+  (each a JSON array of submit×size records; `'[]'` when no data). See §3a.
 
-`refresh_mode` = `FULL` (all styles) or `INCREMENTAL` (changed only). Field lists
+`refresh_mode` = `FULL` (all styles) or `INCREMENTAL` (changed only). The daily job
+uses **FULL** (sample-app changes don't bump `style.modifiedAt`). Field lists
 are `COMPULSORY_FIELDS` / `INTERESTED_FIELDS` in the notebook; keep them aligned
-with the SSOT field file.
+with the SSOT field file. Sample apps: `SAMPLE_APPS` dict.
+
+### `beproduct_style_app_registry` — 1 row per (folder × application)
+
+Cache of folder-constant application IDs, written by `00_init_style_app_registry`.
+Columns: `folder_name`, `app_id`, `app_title`, `app_type`, `is_sample` (bool),
+`column_prefix` (e.g. `proto_sample`, null unless sample), `registered_at`. The sync
+reads `WHERE is_sample = true` to know which apps to fetch. Re-run the init notebook
+only when the folder's app setup changes.
 
 ### `beproduct_master_*` — 1 row per valid value (12 tables)
 
@@ -141,3 +196,5 @@ WHERE brands IN (SELECT value FROM lft.beproduct.beproduct_master_brands)
 | Pushed field silently blanked | MultiSelect sent as string, or value not in that field's Master Data. Use type-aware shaping + a valid value. |
 | Tables empty | Folder name is case-sensitive; verify `folder_name`. |
 | Colorway write didn't land | Ensure `colorway_id` is present (from `colorways_json`) and use the `colorways=[{"id":…}]` form. |
+| Sample-app columns all null | Run `00_init_style_app_registry` for the folder; confirm the 6 sample apps exist (`is_sample=true`). Sync falls back to `app_list` discovery + warns if the registry is missing. |
+| Sample status stale / not updating | Daily job must be FULL — app edits don't bump `style.modifiedAt`, so INCREMENTAL won't re-fetch unchanged styles' apps. |

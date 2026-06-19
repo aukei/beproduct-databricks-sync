@@ -37,6 +37,7 @@ fieldId, JSONPath, sync direction. Always update it first, then the code constan
 | DTC → BeProduct (colorway) | `REVERSE_COLORWAY_FIELDS` | `dtc/python/sync/phase2.py` |
 | DTC → BeProduct (no target yet) | `UNSUPPORTED_FIELDS` | `dtc/python/sync/phase2.py` |
 | BeProduct extraction (raw → master) | `COMPULSORY_FIELDS` / `INTERESTED_FIELDS` | `beproduct/beproduct_style_sync.py` |
+| BeProduct sample-app status (title → column prefix) | `SAMPLE_APPS` | `beproduct/beproduct_style_sync.py` + `beproduct/00_init_style_app_registry.py` |
 | BeProduct → DTC transform (denormalize) | `FIELD_MAPPING` + staging `select` | `beproduct/beproduct_to_dtc_transform.py` |
 
 Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
@@ -134,6 +135,46 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
   colorways=[{"id":colorway_id,"fields":{fieldId:val}}])` — colorway writes need the
   colorway **id**, so the transform carries `colorway_id` into staging
   (`colorways_json` from `beproduct_style_sync`).
+
+**BeProduct Style Applications (sample status, validated 2026-06-19):**
+- A style has **applications** (`api.style.app_list(header_id)` →
+  `[{id,title,type}]`; `api.style.app_get(header_id, app_id)` → content). The 6
+  SAMPLE apps are Proto / PreLine / SMS / Fit / PP / TOP Sample (type
+  `SampleRequestMulti`). KTB-folder sample app IDs: Proto `a765845f-…`,
+  PreLine `8979ea71-…`, SMS `91094294-…`, Fit `a5a51c66-…`, PP `e5b7564d-…`,
+  TOP `ca05cf47-…` (verified identical across styles).
+- **App IDs are constant per FOLDER, not per style** (confirmed across two styles,
+  23/23 ids matched). Cache them once via `00_init_style_app_registry` →
+  `beproduct_style_app_registry`; do NOT call `app_list` per style.
+- **`app.modifiedAt` is INDEPENDENT of `style.modifiedAt`.** Editing a sample app
+  does NOT bump the style; editing attributes does NOT bump the app. Nothing in the
+  style payload hints an app changed. So there is **no incremental shortcut** — the
+  only way to read sample status is one `app_get` per (style × app). `app.modifiedAt
+  == "0001-01-01T00:00:00"` = app exists, no data.
+- `app_get` (`SampleRequestMulti`) → `data.submits[].sizes[]` each with
+  `submitStatus`, `submitStatusDate`, `dueDate`, `receivedDate`, `fitDate`; plus
+  `data.poms[]` (measurements). A sample app **explodes** like colorways/BOM
+  (N submit rounds × M sizes) — do NOT collapse it to one status.
+- `beproduct_style_sync` enriches `ktb_styles` with **6 JSON-array columns**:
+  `{proto,preline,sms,fit,pp,top}_sample_json` — each the full list of submit×size
+  records (`submit_id/name, size_id/size, is_sample_size, submit_status,
+  submit_status_date, due_date, received_date, fit_date`), `'[]'` when no data.
+  Stored RAW (POMs excluded); flattening/selection is **delegated to the Step-2
+  transform** (mirrors `colorways_json`) so we don't pre-bake an unspecified format.
+  One write — enrichment runs in parallel (`app_max_workers`, default 10) BEFORE the
+  single DataFrame build. SSOT title→prefix map = `SAMPLE_APPS` (duplicated in the
+  sync + init notebooks; keep aligned).
+- **Daily job runs Step 1 in FULL** (set in `scripts/deploy_job.py`) precisely
+  because app edits don't bump `style.modifiedAt`; INCREMENTAL would miss them.
+  INCREMENTAL stays for ad-hoc developer runs via the ADB portal.
+- BeProduct "2 calls/sec" is a **minimum-throughput SLA, not a cap** — 10 workers
+  sustained ~7 calls/sec, no throttling. ~1.5 s genuine latency per `app_get`.
+  146 KTB styles × 6 apps = 876 calls ≈ ~120 s at 10 workers (the full-scan cost
+  added to Step 1). Only ~15 of 146 styles currently hold any sample data.
+- Good verification candidates (rich sample data): `Iris - Test- Top-111` (Proto
+  Approved + Fit Requested + TOP Approved), `Boy  Short Sleeve Tee` (Proto+PP),
+  `LFBP-1WTP0003` (Proto+SMS), `HOODED-K263` (Proto, 27 POMs).
+- DTC push of sample status is **not yet wired** — data lands only in `ktb_styles`.
 
 ## Decisions on record
 
@@ -294,3 +335,6 @@ python scripts/deploy_job.py --dry-run         # preview multi-task job definiti
 python scripts/deploy_job.py                   # create BeProduct_DTC_sync_dag job
 python scripts/deploy_job.py --reset-existing <JOB_ID>  # update existing job in place
 ```
+
+Run `beproduct/00_init_style_app_registry` (ADB) once per folder, and again whenever
+the folder's BeProduct application setup changes, to refresh the cached sample-app IDs.

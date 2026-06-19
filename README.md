@@ -39,7 +39,8 @@ logs and per-task timing directly in the Jobs UI.
 
 ```
 beproduct/                         # BeProduct-side notebooks (+ cross-platform push)
-├── beproduct_style_sync.py        # BeProduct API → lft.beproduct.ktb_styles
+├── 00_init_style_app_registry.py  # Cache folder app IDs → beproduct_style_app_registry (on-demand)
+├── beproduct_style_sync.py        # BeProduct API → ktb_styles (+ 6 sample-app submit arrays)
 ├── beproduct_master_data_sync.py  # Reference/master data → beproduct_master_*
 ├── beproduct_to_dtc_transform.py  # ktb_styles → beproduct_to_dtc_staging (denormalize)
 ├── dtc_request_manager.py         # Resolve / CREATE / SHARE DTC requests → dtc_request_mapping
@@ -111,12 +112,12 @@ All tables live in `lft.beproduct`. Full schema in
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ```
-BeProduct source        Integration                     DTC
-ktb_styles              beproduct_to_dtc_staging         dtc_request_registry   (control table)
-beproduct_master_*      dtc_request_mapping              dtc_wip_<customer>     (pulled sheet rows)
-                        dtc_seasoncode_mapping
-                        beproduct_to_dtc_sync_log
-                        dtc_to_beproduct_sync_log
+BeProduct source             Integration                     DTC
+ktb_styles                   beproduct_to_dtc_staging         dtc_request_registry   (control table)
+beproduct_master_*           dtc_request_mapping              dtc_wip_<customer>     (pulled sheet rows)
+beproduct_style_app_registry dtc_seasoncode_mapping
+                             beproduct_to_dtc_sync_log
+                             dtc_to_beproduct_sync_log
 ```
 
 ---
