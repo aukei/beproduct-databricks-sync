@@ -228,7 +228,7 @@ There is a docs/performance.md for base line.
 databricks-integration SKILL has some instruction on how to get job log from databricks written by another agent. Make sure or update that if relevant.
 
 
-# Phase 4 sample information 
+# Phase 4 sample information $33
 - Reference to BeProduct SDK 'https://python.beproduct.com/075-apps/', each Style can have a list of associated applications. 
 - Take LFStyle# 'HOODED-K263' & 'LFBP-WM1MO-MALE WAXED JKT-002' as examples, study what applications are there, taking note of application IDs which is the same for a particular app across all Styles according to doc. Verify this claim.
 - In particular is there apps resemble 'Proto Sample', 'PreLine sample'. If so, what content data do BeProduct returns in 'app_get' call? 
@@ -239,3 +239,4 @@ databricks-integration SKILL has some instruction on how to get job log from dat
 - in this exploration phase, just do a full style x sample trial run locally to ensure we deduce app behavior correctly, and to time it. AFAIK the project team only setup Sample data in a few Style during implementation. Good to know which Style is a good candidate for later coding verification purpose too.
     - note: The tricky part is deciding which submit status to extract when an app has multiple submits and sizes. The cleanest approach is to take the latest submit (last in the submits array or by submitStatusDate) and within that, prefer the sample size if it exists, otherwise use the first size. That gives us a single submitStatus and submitStatusDate per app to store in the corresponding column.
     - each submit has:       → submit=1ST Submit size=S status=Requested statusDate=2026-05-14
+- save the whole sample submit list to style.

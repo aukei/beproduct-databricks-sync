@@ -3,7 +3,7 @@
 Deploy the BeProduct <-> DTC sync as a TOP-LEVEL MULTI-TASK Databricks job.
 
 This replaces the single-notebook orchestrator (`beproduct/orchestrate_sync.py`,
-now retired) with one job whose 8 pipeline steps are first-class tasks. Benefits:
+now retired) with one job whose pipeline steps are first-class tasks. Benefits:
 
   * Each step has its own task run_id, duration, logs and retry/repair in the
     Jobs UI run graph — no more digging through hidden `dbutils.notebook.run`
@@ -13,33 +13,40 @@ now retired) with one job whose 8 pipeline steps are first-class tasks. Benefits
   * The Step 5 -> Step 7 hand-off (which requests got INSERTs) uses native
     `dbutils.jobs.taskValues` instead of parsing an exit string.
   * Phase on/off toggles (run_phase1/2/3) are expressed as condition tasks.
+  * A root `wait_cluster` task absorbs the cold-start latency so that its
+    duration in the run graph shows cluster warm-up separately from Step 1/3.
 
 DAG
 ---
-    bp_style_sync ─► transform ─┐
-                                ├─► request_manager ─► gate_phase1 ─► phase1_push ─┐
-    pull_dtc ───────────────────┘         │                                        │
-        │                                  └─► gate_phase3 ──────────────┐         │
-        └─► gate_phase2 ─► phase2_push                                   ├─► repull_dtc ─► phase3_images
-                                                                          (also depends phase1_push, run_if=ALL_DONE)
+    wait_cluster ─┬─► bp_style_sync ─► transform ─┐
+                  │                                ├─► request_manager ─► gate_phase1 ─► phase1_push ─┐
+                  └─► pull_dtc ───────────────────┘         │                                         │
+                          │                                   └─► gate_phase3 ──────────────┐          │
+                          └─► gate_phase2 ─► phase2_push                                    ├─► repull_dtc ─► phase3_images
+                                                                                            (also depends phase1_push, run_if=ALL_DONE)
 
 Cluster
 -------
-One SHARED single-node, NON-Photon job cluster (see CLUSTER below). This
-workload is tiny-data + driver/IO-bound (≈145 styles, ≈420 rows); Photon and
-extra workers add cost without speeding up the small LocalRelation unions, Delta
-commits and HTTP calls. A shared cluster also means ONE cold start for the whole
-run instead of one per task. Flip RUNTIME_ENGINE / NUM_WORKERS below to revert.
+One SHARED single-node, NON-Photon job cluster (Classic Preview mode, matching the
+live cluster kind). This workload is tiny-data + driver/IO-bound (≈145 styles,
+≈420 rows); Photon and extra workers add cost without benefit. A shared cluster
+also means ONE cold start for the whole run, measured by `wait_cluster`.
+
+Schedule / log destination
+--------------------------
+These are live-deployed settings retrieved from job 294837488757511 on 2026-06-20
+and encoded here so future `--reset-existing` runs preserve them automatically.
+Edit JOB_SCHEDULE / CLUSTER_LOG_DEST below to change them; set JOB_SCHEDULE=None
+to deploy without a schedule (safe for brand-new jobs before UAT).
 
 Usage
 -----
     python scripts/deploy_job.py --dry-run        # print the task graph + settings
     python scripts/deploy_job.py                  # CREATE a new (unscheduled) job
-    python scripts/deploy_job.py --reset-existing 22324120218492
+    python scripts/deploy_job.py --reset-existing 294837488757511
                                                   # overwrite an existing job in place
 
-After creating, validate with a manual run, then move the cron schedule from the
-old job and pause the old one. Requires DATABRICKS_HOST + DATABRICKS_PAT (.env).
+Requires DATABRICKS_HOST + DATABRICKS_PAT (.env).
 """
 
 import argparse
@@ -58,19 +65,38 @@ NB_DTC = "/Workspace/Repos/beproduct-sync/DTC/notebooks"
 
 SHARED_CLUSTER_KEY = "shared"
 
-# Single-node, no-Photon shared cluster (see module docstring). To revert to the
-# old shape: set NUM_WORKERS=2, RUNTIME_ENGINE=PHOTON and drop SINGLE_NODE_CONF.
+# ── Cluster spec (mirrors live cluster retrieved 2026-06-20) ────────────────
+# Classic Preview single-node mode (is_single_node=True, kind=CLASSIC_PREVIEW)
+# matches the live cluster. Standard engine, no Photon.
 SPARK_VERSION = "17.3.x-scala2.13"
 NODE_TYPE = "Standard_D4s_v3"
-NUM_WORKERS = 0
-RUNTIME_ENGINE = compute.RuntimeEngine.STANDARD  # STANDARD = no Photon
-SINGLE_NODE_CONF = {
-    "spark.databricks.cluster.profile": "singleNode",
-    "spark.master": "local[*]",
+# is_single_node / kind are set in CLUSTER_EXTRA — do NOT set num_workers.
+CLUSTER_EXTRA = {
+    "is_single_node": True,
+    "kind": "CLASSIC_PREVIEW",
+    "enable_elastic_disk": True,
 }
+SPARK_CONF = {"spark.master": "local[*]"}
 
-# Job-level parameters (mirror the old orchestrate_sync widgets). Every task
-# references these via {{job.parameters.<name>}}.
+# ── Cluster log destination (Volumes, retrieved 2026-06-20) ─────────────────
+# Set to None to disable log delivery.
+CLUSTER_LOG_DEST = "/Volumes/lft/beproduct/job_log/BpDtcSync"
+
+# ── Job schedule (retrieved from live job 294837488757511 on 2026-06-20) ────
+# Quartz: 07:57:15, 12:57:15, 15:57:15 HKT daily.
+# Set to None to deploy without a schedule (safe for brand-new jobs).
+JOB_SCHEDULE = jobs.CronSchedule(
+    quartz_cron_expression="15 57 7,12,15 * * ?",
+    timezone_id="Asia/Hong_Kong",
+    pause_status=jobs.PauseStatus.UNPAUSED,
+)
+
+# ── Job-level tags and queue (retrieved 2026-06-20) ─────────────────────────
+JOB_TAGS = {"userpurpose": "lft-job-bpsync"}
+JOB_QUEUE = jobs.QueueSettings(enabled=True)
+
+# ── Job-level parameters (mirror the old orchestrate_sync widgets) ───────────
+# Every task references these via {{job.parameters.<name>}}.
 JOB_PARAMS = {
     "catalog": "lft",
     "schema": "beproduct",
@@ -134,11 +160,18 @@ def dep(task_key, outcome=None):
 def build_tasks():
     tasks = []
 
+    # Step 0 — cluster warm-up sentinel (root, no dependencies).
+    # Absorbs cold-start latency into its own task duration so that Step 1 and
+    # Step 3 timings reflect pure compute, not cluster spin-up.
+    # Both parallel chains (BeProduct and DTC) depend on this task.
+    tasks.append(nb_task("wait_cluster", f"{NB_BP}/wait_cluster", {},
+                         timeout=600))  # 10-min cap; warm-up never takes this long
+
     # Step 1 — BeProduct -> ktb_styles
     tasks.append(nb_task("bp_style_sync", f"{NB_BP}/beproduct_style_sync", {
         "folder_name": P("folder_name"), "refresh_mode": P("refresh_mode"),
         "catalog": CAT, "schema": SCH, "table_name": "ktb_styles",
-    }))
+    }, depends=[dep("wait_cluster")]))
 
     # Step 2 — transform (depends on Step 1)
     tasks.append(nb_task("transform", f"{NB_BP}/beproduct_to_dtc_transform", {
@@ -147,12 +180,12 @@ def build_tasks():
         "folder_name": P("folder_name"), "customer_code": CUST,
     }, depends=[dep("bp_style_sync")]))
 
-    # Step 3 — pull DTC + refresh registry (INDEPENDENT → parallel with 1/2)
+    # Step 3 — pull DTC + refresh registry (parallel with 1/2, both gated by wait_cluster)
     tasks.append(nb_task("pull_dtc", f"{NB_DTC}/pull_requests_to_delta", {
         "dtc_environment": ENV, "customer": CUST, "dtc_workspace": WS, "dtc_document": DOC,
         "catalog": CAT, "schema": SCH, "write_mode": "overwrite",
         "refresh_registry": "true", "max_workers": "4",
-    }))
+    }, depends=[dep("wait_cluster")]))
 
     # Step 4 — request manager (needs Step 2 staging AND Step 3 registry)
     tasks.append(nb_task("request_manager", f"{NB_BP}/dtc_request_manager", {
@@ -198,31 +231,60 @@ def build_tasks():
     return tasks
 
 
-def build_settings() -> jobs.JobSettings:
-    cluster = compute.ClusterSpec(
+def _build_cluster() -> compute.ClusterSpec:
+    """Build the shared job cluster spec.
+
+    Uses Classic Preview single-node mode (is_single_node / kind) as deployed
+    live; falls back gracefully if the SDK version doesn't expose those attrs.
+    """
+    log_conf = None
+    if CLUSTER_LOG_DEST:
+        log_conf = compute.ClusterLogConf(
+            volumes=compute.VolumesStorageInfo(destination=CLUSTER_LOG_DEST)
+        )
+
+    spec = compute.ClusterSpec(
         spark_version=SPARK_VERSION,
         node_type_id=NODE_TYPE,
-        num_workers=NUM_WORKERS,
-        runtime_engine=RUNTIME_ENGINE,
-        data_security_mode=compute.DataSecurityMode.SINGLE_USER,
-        spark_conf=SINGLE_NODE_CONF if NUM_WORKERS == 0 else None,
-        custom_tags={"ResourceClass": "SingleNode"} if NUM_WORKERS == 0 else None,
+        # num_workers intentionally omitted for is_single_node clusters
+        runtime_engine=compute.RuntimeEngine.STANDARD,
+        data_security_mode=compute.DataSecurityMode.DATA_SECURITY_MODE_DEDICATED,
+        spark_conf=SPARK_CONF,
+        cluster_log_conf=log_conf,
     )
+
+    # CLUSTER_EXTRA fields (is_single_node, kind, enable_elastic_disk) are set
+    # via dict-patch so the script still works if the installed SDK predates them.
+    raw = spec.as_dict()
+    raw.update(CLUSTER_EXTRA)
+    # Rebuild from dict so the SDK object stays consistent
+    return compute.ClusterSpec.from_dict(raw)
+
+
+def build_settings(schedule: "jobs.CronSchedule | None" = JOB_SCHEDULE) -> jobs.JobSettings:
     return jobs.JobSettings(
         name=JOB_NAME,
         tasks=build_tasks(),
-        job_clusters=[jobs.JobCluster(job_cluster_key=SHARED_CLUSTER_KEY, new_cluster=cluster)],
+        job_clusters=[jobs.JobCluster(job_cluster_key=SHARED_CLUSTER_KEY,
+                                      new_cluster=_build_cluster())],
         parameters=[jobs.JobParameterDefinition(name=k, default=v) for k, v in JOB_PARAMS.items()],
         max_concurrent_runs=1,
-        # No schedule on purpose: validate manually, then migrate the cron from the
-        # old job and pause the old one.
+        schedule=schedule,
+        tags=JOB_TAGS,
+        queue=JOB_QUEUE,
     )
 
 
 def _preview(settings: jobs.JobSettings):
-    print(f"Job name: {settings.name}")
-    print(f"Shared cluster: {NODE_TYPE} workers={NUM_WORKERS} "
-          f"engine={RUNTIME_ENGINE.value} (single_node={NUM_WORKERS == 0})")
+    sched = settings.schedule
+    sched_str = (f"{sched.quartz_cron_expression} ({sched.timezone_id}) "
+                 f"pause={sched.pause_status.value if sched.pause_status else 'n/a'}"
+                 if sched else "none (deploy manually)")
+    print(f"Job name : {settings.name}")
+    print(f"Schedule : {sched_str}")
+    print(f"Cluster  : {NODE_TYPE} single_node=True engine=STANDARD")
+    print(f"Log dest : {CLUSTER_LOG_DEST or 'none'}")
+    print(f"Tags     : {settings.tags}")
     print("\nTask graph:")
     for t in settings.tasks:
         kind = "condition" if t.condition_task else "notebook"
@@ -240,18 +302,21 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="print the graph/settings; do not apply")
     ap.add_argument("--reset-existing", metavar="JOB_ID", type=int,
                     help="overwrite an existing job (reset) instead of creating a new one")
+    ap.add_argument("--no-schedule", action="store_true",
+                    help="omit the cron schedule from the deployed settings (useful for test jobs)")
     args = ap.parse_args()
 
-    settings = build_settings()
+    schedule = None if args.no_schedule else JOB_SCHEDULE
+    settings = build_settings(schedule=schedule)
     _preview(settings)
 
     if args.dry_run:
-        print("\n📋 Dry run — nothing applied.")
+        print("\nDry run — nothing applied.")
         return
 
     if not (os.environ.get("DATABRICKS_HOST") and
             (os.environ.get("DATABRICKS_TOKEN") or os.environ.get("DATABRICKS_PAT"))):
-        sys.exit("❌ Set DATABRICKS_HOST and DATABRICKS_TOKEN/DATABRICKS_PAT (source .env).")
+        sys.exit("Set DATABRICKS_HOST and DATABRICKS_TOKEN/DATABRICKS_PAT (source .env).")
     if os.environ.get("DATABRICKS_PAT") and not os.environ.get("DATABRICKS_TOKEN"):
         os.environ["DATABRICKS_TOKEN"] = os.environ["DATABRICKS_PAT"]
 
@@ -259,7 +324,7 @@ def main():
     if args.reset_existing:
         w.jobs.reset(job_id=args.reset_existing, new_settings=settings)
         job_id = args.reset_existing
-        print(f"\n✅ Reset existing job {job_id} to the multi-task DAG.")
+        print(f"\nReset existing job {job_id} to the multi-task DAG.")
     else:
         created = w.jobs.create(
             name=settings.name,
@@ -267,12 +332,14 @@ def main():
             job_clusters=settings.job_clusters,
             parameters=settings.parameters,
             max_concurrent_runs=settings.max_concurrent_runs,
+            schedule=settings.schedule,
+            tags=settings.tags,
+            queue=settings.queue,
         )
         job_id = created.job_id
-        print(f"\n✅ Created job {job_id} ({JOB_NAME}).")
+        print(f"\nCreated job {job_id} ({JOB_NAME}).")
     host = os.environ["DATABRICKS_HOST"].rstrip("/")
     print(f"   {host}/jobs/{job_id}")
-    print("   Validate with a manual run, then migrate the schedule off the old job.")
 
 
 if __name__ == "__main__":
