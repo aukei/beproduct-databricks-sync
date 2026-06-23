@@ -240,3 +240,19 @@ databricks-integration SKILL has some instruction on how to get job log from dat
     - note: The tricky part is deciding which submit status to extract when an app has multiple submits and sizes. The cleanest approach is to take the latest submit (last in the submits array or by submitStatusDate) and within that, prefer the sample size if it exists, otherwise use the first size. That gives us a single submitStatus and submitStatusDate per app to store in the corresponding column.
     - each submit has:       → submit=1ST Submit size=S status=Requested statusDate=2026-05-14
 - save the whole sample submit list to style.
+
+# Phase 5 Master Data utility
+verify @beproduct/beproduct_master_data_sync.py  does it still work against current beproduct data structure?  include "directory" as part of master data, ref  SDK at https://python.beproduct.com/080-directory/
+- note SDK does not support update / insert to Directory, however RESTful api at https://developers.beproduct.com/swagger/v1/swagger.json expose /api/{company}/Directory/Add and /api/{company}/Directory/Update.
+- derive push back logic of Directory as well as other dropdown values.
+- this is  manually triggered by admin to check and bulk update beproduct master data & directory, thus not part of DAG schedule job.
+
+# Phase 5 Structural clean up
+- BeProduct Style contains a new field id = "IT-STYLE-KEY"
+- This replace "LF_STYLE#" in the composite key that identify a Style. This field also get created on DTC WIP doc and other downstream pipeline. i.e. (Customer, IT-STYLE-KEY, Seasoncode, Brand) is style composite key.
+- "LF STYLE#" becomes an optional field, together with 'Customer Style #" both should be populated into DTC. "Customer Style #" is also a new col in DTC WIP document.
+- Update beproduct and DTC sync pipeline. These 3 fields are from BeProduct to DTC only, Turned read only in DTC.
+
+# Phase 6 Preparation of Costing sheet
+- In addition to WIP document requests, Retrieve also Requests of DTC document "<Customer> LinePlan" e.g. "KTB LinePlan", using view "LINEPLAN_ITS_USE" (preferred) or "Full" if former not exists.
+- Once WIP and LinePlan are in Databricks, they are joined with "Lineplan Ref #" to from a "Costing_Chart"
