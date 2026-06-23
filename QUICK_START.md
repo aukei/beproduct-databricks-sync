@@ -113,8 +113,13 @@ Run these in order if you prefer step-by-step control (params shown are the key 
 Other notebooks:
 - `dtc/notebooks/00_init_request_registry` — standalone registry build/refresh
   (first build or targeted `request_ids`).
-- `beproduct/beproduct_master_data_sync` — pull dropdown/multiselect valid values
-  → `beproduct_master_*`.
+- `beproduct/beproduct_master_data_sync` — **admin-only, not in DAG.** Pull and/or
+  push-back BeProduct MasterData (dropdown choices) and Directory (vendors/factories/
+  contacts). Modes: `PULL_ONLY` (default), `PUSH_MASTER_DATA`, `PUSH_DIRECTORY`,
+  `PUSH_ALL`. Use `dry_run=true` to preview push changes before committing.
+  Writes `beproduct_master_*` (11 tables), `beproduct_directory`,
+  `beproduct_directory_contacts`. Typical workflow: run PULL_ONLY, edit rows in
+  Databricks SQL, run PUSH_* with `dry_run=true`, then `dry_run=false`.
 - `beproduct/dtc_share_requests` — idempotently (re-)share existing requests
   (all views → `aiagentwip@lifung.com`; Full Version → `Fabric Group`).
 - `standalone/beproduct_style_push` — standalone Delta → BeProduct push-back

@@ -41,7 +41,7 @@ logs and per-task timing directly in the Jobs UI.
 beproduct/                         # BeProduct-side notebooks (+ cross-platform push)
 ├── 00_init_style_app_registry.py  # Cache folder app IDs → beproduct_style_app_registry (on-demand)
 ├── beproduct_style_sync.py        # BeProduct API → ktb_styles (+ 6 sample-app submit arrays)
-├── beproduct_master_data_sync.py  # Reference/master data → beproduct_master_*
+├── beproduct_master_data_sync.py  # Admin: pull/push-back MasterData (dropdowns) + Directory → beproduct_master_*, beproduct_directory*
 ├── beproduct_to_dtc_transform.py  # ktb_styles → beproduct_to_dtc_staging (denormalize)
 ├── dtc_request_manager.py         # Resolve / CREATE / SHARE DTC requests → dtc_request_mapping
 ├── beproduct_to_dtc_push.py       # Phase 1: BeProduct → DTC upsert + orphan marks
@@ -115,9 +115,9 @@ All tables live in `lft.beproduct`. Full schema in
 BeProduct source             Integration                     DTC
 ktb_styles                   beproduct_to_dtc_staging         dtc_request_registry   (control table)
 beproduct_master_*           dtc_request_mapping              dtc_wip_<customer>     (pulled sheet rows)
-beproduct_style_app_registry dtc_seasoncode_mapping
-                             beproduct_to_dtc_sync_log
-                             dtc_to_beproduct_sync_log
+beproduct_directory          dtc_seasoncode_mapping
+beproduct_directory_contacts beproduct_to_dtc_sync_log
+beproduct_style_app_registry dtc_to_beproduct_sync_log
 ```
 
 ---

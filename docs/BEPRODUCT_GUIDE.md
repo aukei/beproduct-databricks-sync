@@ -52,7 +52,14 @@ api = BeProduct(
 | `api.style.attributes_update(header_id, fields={…}, colorways=[{"id":…,"fields":{…}}])` | `beproduct_style_push.py`, `05_push_dtc_to_beproduct.py` | write header and/or colorway fields back |
 | `api.style.app_list(header_id)` | `00_init_style_app_registry.py` | list a folder's applications (ids are folder-constant) |
 | `api.style.app_get(header_id, app_id)` | `beproduct_style_sync.py` | read one application's content (sample-app submit status) |
-| `GET /api/{company}/MasterData/{fieldId}` | `beproduct_master_data_sync.py` | pull valid dropdown/multiselect values |
+| `api.raw_api.get("MasterData/{fieldId}")` | `beproduct_master_data_sync.py` | pull valid dropdown/multiselect choices (token refresh auto-handled) |
+| `api.raw_api.post("MasterData/{fieldId}/Update", body=…)` | `beproduct_master_data_sync.py` | push choice changes back (add / deactivate / rename) |
+| `api.directory.directory_list()` | `beproduct_master_data_sync.py` | paginated iterator over all directory companies |
+| `api.directory.directory_contact_list(header_id=<uuid>)` | `beproduct_master_data_sync.py` | contacts for one company |
+| `api.directory.directory_add(fields=…)` | `beproduct_master_data_sync.py` | create a new directory company |
+| `api.directory.directory_contact_add(header_id, fields=…)` | `beproduct_master_data_sync.py` | add a contact to a company |
+| `api.raw_api.post("Directory/Update/{id}", body=…)` | `beproduct_master_data_sync.py` | update existing company (SDK has no Update) |
+| `api.raw_api.post("Directory/{dId}/Contact/{cId}/Update", body=…)` | `beproduct_master_data_sync.py` | update existing contact (SDK has no Update) |
 
 ### Push-back is type-aware (MultiSelect vs DropDown)
 
@@ -126,7 +133,7 @@ SSOT for the title→prefix map: the `SAMPLE_APPS` dict, defined identically in
 |----------|------|--------|
 | `beproduct/00_init_style_app_registry.py` | Cache a folder's application IDs (run on-demand when app setup changes). | `beproduct_style_app_registry` |
 | `beproduct/beproduct_style_sync.py` | Pull styles for a folder (FULL/INCREMENTAL); extract header fields, colorways, front image; enrich with 6 sample-app submit arrays. | `ktb_styles` |
-| `beproduct/beproduct_master_data_sync.py` | Pull valid values for 12 dropdown/multiselect fields. | `beproduct_master_*` |
+| `beproduct/beproduct_master_data_sync.py` | **Admin-only (not in DAG).** Pull or push-back MasterData dropdown choices and Directory records/contacts. Four modes: `PULL_ONLY` (default), `PUSH_MASTER_DATA`, `PUSH_DIRECTORY`, `PUSH_ALL`. `dry_run=true` previews push changes without writing. | `beproduct_master_*` (11 tables), `beproduct_directory`, `beproduct_directory_contacts` |
 | `standalone/beproduct_style_push.py` | Generic Delta → BeProduct push-back of locally edited rows (`modified_at > synced_at`), type-aware. | BeProduct |
 
 `standalone/beproduct_style_push.py` is a standalone bi-directional helper (not
@@ -173,17 +180,40 @@ Columns: `folder_name`, `app_id`, `app_title`, `app_type`, `is_sample` (bool),
 reads `WHERE is_sample = true` to know which apps to fetch. Re-run the init notebook
 only when the folder's app setup changes.
 
-### `beproduct_master_*` — 1 row per valid value (12 tables)
+### `beproduct_master_*` — 1 row per valid choice (11 tables)
 
 `beproduct_master_brands`, `_teams`, `_seasons`, `_years`, `_product_status`,
 `_product_category`, `_product_sub_category`, `_division`, `_techpack_stage`,
-`_garment_finish`, `_parent_vendor`, `_factory`. Columns: `value` (id, use when
-pushing), `label` (display), `data_json`, `synced_at`. `mode("overwrite")` each run.
+`_parent_vendor`, `_factory`. (`garment_finish` excluded — free-text field, no choices.)
+
+Columns: `field_id` (BeProduct fieldId, e.g. `brands_multi`), `value` (the choice
+display string — **use this when pushing to BeProduct**), `code` (short code),
+`active` (false = deactivated in BeProduct), `data_json`, `synced_at`.
+Full refresh (`DROP + overwrite`) each pull run.
 
 Validate before pushing:
 ```sql
 WHERE brands IN (SELECT value FROM lft.beproduct.beproduct_master_brands)
 ```
+
+To push choice changes back from the Delta table to BeProduct, run
+`beproduct_master_data_sync` with `mode=PUSH_MASTER_DATA`. The push is PATCH-style:
+only rows present in the table are sent; absent rows are left as-is.
+Optional admin columns: `update_value` (rename a choice), `delete_choice` (remove it).
+
+### `beproduct_directory` — 1 row per vendor / factory / partner
+
+Columns: `id` (BeProduct UUID — null = new record to add on next push),
+`directory_id` (human-readable code), `name`, `partner_type` (VENDOR/FACTORY/…;
+**cannot be changed after creation**), `address`, `country`, `state`, `zip`, `city`,
+`phone`, `fax`, `website`, `notes`, `active`, `data_json`, `synced_at`.
+
+### `beproduct_directory_contacts` — 1 row per contact
+
+Columns: `directory_id` (parent company UUID), `contact_id` (null = new contact),
+`email`, `first_name`, `last_name`, `title`, `mobile_phone`, `work_phone`, `role`,
+`active`, `data_json`, `synced_at`. Email/firstName/lastName cannot be changed for
+fully-registered BeProduct users.
 
 ---
 
@@ -192,9 +222,12 @@ WHERE brands IN (SELECT value FROM lft.beproduct.beproduct_master_brands)
 | Issue | Fix |
 |-------|-----|
 | `401 / unauthorized_client` | Refresh token expired → update `refresh_token` secret. |
-| Master data endpoint 404 | Confirm the `fieldId` / endpoint path; the job logs a warning and skips. |
-| Pushed field silently blanked | MultiSelect sent as string, or value not in that field's Master Data. Use type-aware shaping + a valid value. |
+| Master data endpoint 404 | Confirm the `fieldId` / endpoint path; the notebook logs a warning and skips that field. |
+| Pushed field silently blanked | MultiSelect sent as string, or value not in that field's Master Data. Use type-aware shaping + a valid value from `beproduct_master_*`. |
 | Tables empty | Folder name is case-sensitive; verify `folder_name`. |
 | Colorway write didn't land | Ensure `colorway_id` is present (from `colorways_json`) and use the `colorways=[{"id":…}]` form. |
 | Sample-app columns all null | Run `00_init_style_app_registry` for the folder; confirm the 6 sample apps exist (`is_sample=true`). Sync falls back to `app_list` discovery + warns if the registry is missing. |
 | Sample status stale / not updating | Daily job must be FULL — app edits don't bump `style.modifiedAt`, so INCREMENTAL won't re-fetch unchanged styles' apps. |
+| Directory push — `partnerType` not updated | API restriction: `partnerType` is immutable after creation. Only set it on new records (null `id`). |
+| Directory push — contact fields not updated | `email`/`firstName`/`lastName` cannot be changed for fully-registered users (API restriction). |
+| MasterData push PATCH semantics | Only choices present in the Delta table are sent. To deactivate a choice, set `active=false`. To delete permanently, add an `delete_choice=true` column. Choices absent from the table are left unchanged in BeProduct. |
