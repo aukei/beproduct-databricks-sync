@@ -246,8 +246,11 @@ verify @beproduct/beproduct_master_data_sync.py  does it still work against curr
 - note SDK does not support update / insert to Directory, however RESTful api at https://developers.beproduct.com/swagger/v1/swagger.json expose /api/{company}/Directory/Add and /api/{company}/Directory/Update.
 - derive push back logic of Directory as well as other dropdown values.
 - this is  manually triggered by admin to check and bulk update beproduct master data & directory, thus not part of DAG schedule job.
+- it is known that the directory list API throughput is 2rec/sec. So push and pull ops should be separated.
+- Directory "update" is actually massaging another table to upsert record to this directory master. Add a cell containing a template merge SQL that cater the modifiedAt logic, and admin can supply the actual merge statement later.
 
-# Phase 5 Structural clean up
+
+# Phase 6 Structural clean up
 - BeProduct Style contains a new field id = "IT-STYLE-KEY"
 - This replace "LF_STYLE#" in the composite key that identify a Style. This field also get created on DTC WIP doc and other downstream pipeline. i.e. (Customer, IT-STYLE-KEY, Seasoncode, Brand) is style composite key.
 - "LF STYLE#" becomes an optional field, together with 'Customer Style #" both should be populated into DTC. "Customer Style #" is also a new col in DTC WIP document.
@@ -255,4 +258,7 @@ verify @beproduct/beproduct_master_data_sync.py  does it still work against curr
 
 # Phase 6 Preparation of Costing sheet
 - In addition to WIP document requests, Retrieve also Requests of DTC document "<Customer> LinePlan" e.g. "KTB LinePlan", using view "LINEPLAN_ITS_USE" (preferred) or "Full" if former not exists.
-- Once WIP and LinePlan are in Databricks, they are joined with "Lineplan Ref #" to from a "Costing_Chart"
+- Once WIP and LinePlan are in Databricks, they are joined with "Lineplan Ref #" to from a "Costing_Chart":
+    - transpose [(Main Vendor, Main Factory), (Vendor 1, Factory 1), (Vendor 2, Factory 2), (Vendor 3, Factory 3)] into 4 rows [Vendor, Factory]
+    - key = [Customer, IT-STYLE-KEY, SeasonCode, Brands, Lineplan Ref#, Vendor, Factory]
+    - Interested fields: <key>, 

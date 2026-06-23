@@ -14,23 +14,56 @@ MODES  (widget: mode)
 ---------------------
 PULL_ONLY         Pull MasterData + Directory from BeProduct → Delta tables.
                   Full refresh — existing tables are overwritten.
-PUSH_MASTER_DATA  Read beproduct_master_* Delta tables and push choice changes
-                  back to BeProduct. Uses PATCH semantics: only choices present
-                  in the payload are touched; absent choices are left unchanged.
-PUSH_DIRECTORY    Read beproduct_directory + beproduct_directory_contacts Delta
-                  tables and push record changes to BeProduct.
-PUSH_ALL          PUSH_MASTER_DATA + PUSH_DIRECTORY in one run.
+                  NOTE: directory_list() iterates ~3800 records at ~2 rec/s
+                  (~30 min); only run when a fresh snapshot is needed.
+PUSH_ONLY         Push both MasterData choices AND Directory changes back to
+                  BeProduct. Skips the slow pull entirely — reads from the
+                  existing Delta tables only.
+PUSH_MASTER_DATA  Push MasterData choices only (no pull, no directory push).
+                  Sends the full choices list from each beproduct_master_* table
+                  as an overwrite. Safe because dropdown values rarely change.
+PUSH_DIRECTORY    Push Directory changes only (no pull, no MasterData push).
+                  Change-detected: only rows where modified_at > extracted_at
+                  (or id IS NULL) are pushed. Fast when few records changed.
 
-TYPICAL ADMIN WORKFLOW
-----------------------
-1. Run PULL_ONLY        → inspect Delta tables in Databricks SQL / notebook
-2. Edit table rows:
-     - New company/contact  → add a row with id / contact_id = NULL
-     - Update existing      → edit relevant columns
-     - Deactivate a choice  → set active = false (NOT deleted unless
-                              delete_choice column is also set to true)
-3. Run PUSH_* with dry_run = true  → review planned changes in cell output
-4. Re-run with dry_run = false     → commit to BeProduct
+DIRECTORY CHANGE-TRACKING
+--------------------------
+beproduct_directory carries three timestamp columns for change detection:
+
+  extracted_at   When this row was last pulled from BeProduct (set by PULL_ONLY).
+                 NULL for admin-added rows that have never been pulled.
+  bp_modified_at BeProduct's own modifiedAt value for the record (from the API).
+                 Reflects when BeProduct last changed this company.
+  modified_at    When this Delta row was last changed — by the pull (= extracted_at
+                 after a fresh pull) or by an external upsert. This is the field
+                 admins/automation should SET to signal a pending change.
+
+PUSH filter: id IS NULL  OR  extracted_at IS NULL  OR  modified_at > extracted_at
+After a successful push the notebook writes  extracted_at = modified_at  back
+to the Delta row so it is not re-pushed on the next run.
+
+TYPICAL ADMIN WORKFLOW (external upsert → push)
+-------------------------------------------------
+1. An external pipeline upserts massaged data into beproduct_directory,
+   setting modified_at = current_timestamp() on changed rows:
+
+     MERGE INTO lft.beproduct.beproduct_directory AS tgt
+     USING <source_table> AS src
+     ON tgt.directory_id = src.directory_id
+     WHEN MATCHED AND (<fields changed> OR tgt.modified_at <= tgt.extracted_at)
+       THEN UPDATE SET
+         name = src.name, address = src.address, ...,
+         modified_at = current_timestamp()      -- flags for push
+     WHEN NOT MATCHED THEN INSERT (
+       id, directory_id, name, partner_type, ...,
+       extracted_at, bp_modified_at, modified_at
+     ) VALUES (
+       NULL, src.directory_id, src.name, src.partner_type, ...,
+       NULL, NULL, current_timestamp()          -- NULL id = Add on push
+     )
+
+2. Run this notebook with mode=PUSH_DIRECTORY, dry_run=true → review plan
+3. Re-run with dry_run=false → commits only pending rows to BeProduct
 
 API surface used
 ----------------
@@ -73,7 +106,7 @@ Parameters
 ----------
 catalog     : Databricks catalog    (default: lft)
 schema_name : Databricks schema     (default: beproduct)
-mode        : PULL_ONLY | PUSH_MASTER_DATA | PUSH_DIRECTORY | PUSH_ALL
+mode        : PULL_ONLY | PUSH_ONLY | PUSH_MASTER_DATA | PUSH_DIRECTORY
 dry_run     : true | false  — preview push changes without writing to BeProduct
 """
 
@@ -129,23 +162,35 @@ dbutils.widgets.text("schema_name", "beproduct", "Schema Name")
 dbutils.widgets.dropdown(
     "mode",
     "PULL_ONLY",
-    ["PULL_ONLY", "PUSH_MASTER_DATA", "PUSH_DIRECTORY", "PUSH_ALL"],
+    ["PULL_ONLY", "PUSH_ONLY", "PUSH_MASTER_DATA", "PUSH_DIRECTORY"],
     "Sync Mode",
 )
 dbutils.widgets.dropdown(
     "dry_run", "true", ["true", "false"], "Dry Run (push only)"
+)
+dbutils.widgets.dropdown(
+    "fetch_contacts", "false", ["false", "true"],
+    "Fetch contacts during pull (slow — extra 3800 API calls)",
 )
 
 # ── Read parameters ───────────────────────────────────────────────────────────
 CATALOG     = dbutils.widgets.get("catalog")
 SCHEMA_NAME = dbutils.widgets.get("schema_name")
 MODE        = dbutils.widgets.get("mode").upper()
-DRY_RUN     = dbutils.widgets.get("dry_run").lower() == "true"
+DRY_RUN        = dbutils.widgets.get("dry_run").lower() == "true"
+FETCH_CONTACTS = dbutils.widgets.get("fetch_contacts").lower() == "true"
 
-print(f"catalog:     {CATALOG}")
-print(f"schema_name: {SCHEMA_NAME}")
-print(f"mode:        {MODE}")
-print(f"dry_run:     {DRY_RUN}")
+print(f"catalog:        {CATALOG}")
+print(f"schema_name:    {SCHEMA_NAME}")
+print(f"mode:           {MODE}")
+print(f"dry_run:        {DRY_RUN}")
+print(f"fetch_contacts: {FETCH_CONTACTS}")
+
+# Derived mode flags — keep all mode logic in one place
+_DO_PULL_MASTER   = MODE == "PULL_ONLY"
+_DO_PULL_DIR      = MODE == "PULL_ONLY"
+_DO_PUSH_MASTER   = MODE in ("PUSH_ONLY", "PUSH_MASTER_DATA")
+_DO_PUSH_DIR      = MODE in ("PUSH_ONLY", "PUSH_DIRECTORY")
 
 
 def tbl(name: str) -> str:
@@ -252,67 +297,72 @@ def _parse_choices(api_result: Any) -> List[Dict]:
     return choices_raw if isinstance(choices_raw, list) else []
 
 
-print("=" * 80)
-print("PULL: MasterData")
-print("=" * 80)
+if not _DO_PULL_MASTER:
+    print(f"Skipping MasterData pull (mode={MODE})")
+else:
+    print("=" * 80)
+    print("PULL: MasterData")
+    print("=" * 80)
 
-_pull_now = datetime.now(timezone.utc).isoformat()
-_pull_stats: Dict[str, int] = {}
+    _pull_now = datetime.now(timezone.utc).isoformat()
+    _pull_stats: Dict[str, int] = {}
 
-for _data_type, _field_id in MASTER_DATA_FIELDS.items():
-    print(f"\n  [{_data_type}]  fieldId={_field_id}")
-    try:
-        _result = api.raw_api.get(f"MasterData/{_field_id}")
-        _choices = _parse_choices(_result)
+    for _data_type, _field_id in MASTER_DATA_FIELDS.items():
+        print(f"\n  [{_data_type}]  fieldId={_field_id}")
+        try:
+            _result = api.raw_api.get(f"MasterData/{_field_id}")
+            _choices = _parse_choices(_result)
 
-        if not _choices:
-            _ftype = _result.get("fieldType", "?") if isinstance(_result, dict) else "?"
-            print(f"    ⚠️  No Choices array (fieldType={_ftype}) — skipping")
-            _pull_stats[_data_type] = 0
-            continue
-
-        _rows: List[Dict] = []
-        for _c in _choices:
-            if not isinstance(_c, dict):
+            if not _choices:
+                _ftype = _result.get("fieldType", "?") if isinstance(_result, dict) else "?"
+                print(f"    ⚠️  No Choices array (fieldType={_ftype}) — skipping")
+                _pull_stats[_data_type] = 0
                 continue
-            # Different field types use different sub-keys for display value
-            _val = (
-                _c.get("value")
-                or _c.get("name")
-                or _c.get("code")
-                or _c.get("id")
-                or ""
-            )
-            _rows.append(
-                {
-                    "field_id":  _field_id,
-                    "value":     str(_val),
-                    "code":      str(_c["code"]) if _c.get("code") is not None else None,
-                    "active":    bool(_c.get("active", True)),
-                    "data_json": json.dumps(_c),
-                    "synced_at": _pull_now,
-                }
-            )
 
-        _full_path = tbl(f"beproduct_master_{_data_type}")
-        _df = spark.createDataFrame(_rows, schema=_MASTER_SCHEMA)
-        spark.sql(f"DROP TABLE IF EXISTS {_full_path}")
-        _df.write.format("delta").mode("overwrite").saveAsTable(_full_path)
-        _pull_stats[_data_type] = len(_rows)
-        print(f"    ✅ {len(_rows)} choices → beproduct_master_{_data_type}")
+            _rows: List[Dict] = []
+            for _c in _choices:
+                if not isinstance(_c, dict):
+                    continue
+                # Different field types use different sub-keys for display value
+                _val = (
+                    _c.get("value")
+                    or _c.get("name")
+                    or _c.get("code")
+                    or _c.get("id")
+                    or ""
+                )
+                _rows.append(
+                    {
+                        "field_id":  _field_id,
+                        "value":     str(_val),
+                        "code":      str(_c["code"]) if _c.get("code") is not None else None,
+                        "active":    bool(_c.get("active", True)),
+                        "data_json": json.dumps(_c),
+                        "synced_at": _pull_now,
+                    }
+                )
 
-    except Exception as _e:
-        print(f"    ❌ Error: {_e}")
-        import traceback; traceback.print_exc()
-        _pull_stats[_data_type] = -1
+            _full_path = tbl(f"beproduct_master_{_data_type}")
+            _df = spark.createDataFrame(_rows, schema=_MASTER_SCHEMA)
+            spark.sql(f"DROP TABLE IF EXISTS {_full_path}")
+            _df.write.format("delta").mode("overwrite").saveAsTable(_full_path)
+            _pull_stats[_data_type] = len(_rows)
+            print(f"    ✅ {len(_rows)} choices → beproduct_master_{_data_type}")
 
-_total_choices = sum(v for v in _pull_stats.values() if v > 0)
-_ok_fields = sum(1 for v in _pull_stats.values() if v >= 0)
-print(f"\n✅ MasterData pull done: {_total_choices} choices across {_ok_fields}/{len(MASTER_DATA_FIELDS)} fields")
+        except Exception as _e:
+            print(f"    ❌ Error: {_e}")
+            import traceback; traceback.print_exc()
+            _pull_stats[_data_type] = -1
+
+    _total_choices = sum(v for v in _pull_stats.values() if v > 0)
+    _ok_fields = sum(1 for v in _pull_stats.values() if v >= 0)
+    print(f"\n✅ MasterData pull done: {_total_choices} choices across {_ok_fields}/{len(MASTER_DATA_FIELDS)} fields")
 
 # COMMAND ----------
 # ============================================================================
 # CELL 5 — PULL: Directory records and contacts
+#
+# RUNS ONLY when mode = PULL_ONLY  (3800 records ≈ 30 min at ~2 rec/s).
 #
 # SDK:
 #   api.directory.directory_list()
@@ -326,42 +376,49 @@ print(f"\n✅ MasterData pull done: {_total_choices} choices across {_ok_fields}
 #
 # Output tables:
 #   beproduct_directory
-#     id           STRING  — BeProduct UUID (needed for Update; NULL for new rows)
-#     directory_id STRING  — human-readable partner code (e.g. "FACTORY001")
-#     name         STRING
-#     partner_type STRING  — VENDOR / FACTORY / etc.  CANNOT be changed after create
-#     address / country / state / zip / city / phone / fax / website / notes
-#     active       BOOLEAN
-#     data_json    STRING  — full raw company JSON
-#     synced_at    STRING
+#     id             STRING  — BeProduct UUID (needed for Update; NULL for new rows)
+#     directory_id   STRING  — human-readable partner code (e.g. "FACTORY001")
+#     name / partner_type / address / country / state / zip / city
+#     phone / fax / website / notes  STRING
+#     active         BOOLEAN
+#     data_json      STRING  — full raw company JSON
+#     extracted_at   STRING  — when this row was pulled (ISO-8601 UTC)
+#     bp_modified_at STRING  — BeProduct's own modifiedAt for this record
+#     modified_at    STRING  — when this Delta row was last changed.
+#                              Initially = extracted_at after a clean pull.
+#                              Set to current_timestamp() by external upserts
+#                              to flag pending changes for PUSH_DIRECTORY.
 #
 #   beproduct_directory_contacts
-#     directory_id STRING NOT NULL — parent company UUID (FK to beproduct_directory.id)
-#     contact_id   STRING          — BeProduct contact id (NULL → new contact to add)
-#     email / first_name / last_name / title / mobile_phone / work_phone / role
-#     active       BOOLEAN
-#     data_json    STRING
-#     synced_at    STRING
+#     directory_id / contact_id / email / first_name / last_name / title
+#     mobile_phone / work_phone / role  STRING
+#     active  BOOLEAN
+#     data_json / synced_at  STRING
 # ============================================================================
+
+# Schema definitions are unconditional — push cells also reference them.
 
 _DIRECTORY_SCHEMA = StructType(
     [
-        StructField("id",           StringType(),  nullable=True),
-        StructField("directory_id", StringType(),  nullable=True),
-        StructField("name",         StringType(),  nullable=True),
-        StructField("partner_type", StringType(),  nullable=True),
-        StructField("address",      StringType(),  nullable=True),
-        StructField("country",      StringType(),  nullable=True),
-        StructField("state",        StringType(),  nullable=True),
-        StructField("zip",          StringType(),  nullable=True),
-        StructField("city",         StringType(),  nullable=True),
-        StructField("phone",        StringType(),  nullable=True),
-        StructField("fax",          StringType(),  nullable=True),
-        StructField("website",      StringType(),  nullable=True),
-        StructField("notes",        StringType(),  nullable=True),
-        StructField("active",       BooleanType(), nullable=True),
-        StructField("data_json",    StringType(),  nullable=False),
-        StructField("synced_at",    StringType(),  nullable=False),
+        StructField("id",             StringType(),  nullable=True),
+        StructField("directory_id",   StringType(),  nullable=True),
+        StructField("name",           StringType(),  nullable=True),
+        StructField("partner_type",   StringType(),  nullable=True),
+        StructField("address",        StringType(),  nullable=True),
+        StructField("country",        StringType(),  nullable=True),
+        StructField("state",          StringType(),  nullable=True),
+        StructField("zip",            StringType(),  nullable=True),
+        StructField("city",           StringType(),  nullable=True),
+        StructField("phone",          StringType(),  nullable=True),
+        StructField("fax",            StringType(),  nullable=True),
+        StructField("website",        StringType(),  nullable=True),
+        StructField("notes",          StringType(),  nullable=True),
+        StructField("active",         BooleanType(), nullable=True),
+        StructField("data_json",      StringType(),  nullable=False),
+        # ── change-tracking columns ───────────────────────────────────────────
+        StructField("extracted_at",   StringType(),  nullable=True),   # set by pull
+        StructField("bp_modified_at", StringType(),  nullable=True),   # from BeProduct API
+        StructField("modified_at",    StringType(),  nullable=True),   # set by pull OR external upsert
     ]
 )
 
@@ -382,129 +439,253 @@ _CONTACTS_SCHEMA = StructType(
     ]
 )
 
-print("=" * 80)
-print("PULL: Directory (companies + contacts)")
-print("=" * 80)
-
-_dir_now = datetime.now(timezone.utc).isoformat()
-_dir_rows: List[Dict] = []
-_contact_rows: List[Dict] = []
-_dir_count = 0
-_contact_fetch_errors = 0
-
-for _rec in api.directory.directory_list():
-    _dir_count += 1
-    if not isinstance(_rec, dict):
-        continue
-
-    _rec_id = _rec.get("id")
-
-    _dir_rows.append(
-        {
-            "id":           str(_rec_id) if _rec_id else None,
-            "directory_id": _rec.get("directoryId"),
-            "name":         _rec.get("name"),
-            "partner_type": _rec.get("partnerType"),
-            "address":      _rec.get("address"),
-            "country":      _rec.get("country"),
-            "state":        _rec.get("state"),
-            "zip":          _rec.get("zip"),
-            "city":         _rec.get("city"),
-            "phone":        _rec.get("phone"),
-            "fax":          _rec.get("fax"),
-            "website":      _rec.get("website"),
-            "notes":        _rec.get("notes"),
-            "active":       bool(_rec.get("active", True)),
-            "data_json":    json.dumps(_rec),
-            "synced_at":    _dir_now,
-        }
-    )
-
-    # Fetch contacts for this company (keyed by company UUID)
-    if _rec_id:
-        try:
-            for _ct in api.directory.directory_contact_list(header_id=str(_rec_id)):
-                if not isinstance(_ct, dict):
-                    continue
-                _contact_rows.append(
-                    {
-                        "directory_id": str(_rec_id),
-                        "contact_id":   str(_ct["id"]) if _ct.get("id") else None,
-                        "email":        _ct.get("email"),
-                        "first_name":   _ct.get("firstName"),
-                        "last_name":    _ct.get("lastName"),
-                        "title":        _ct.get("title"),
-                        "mobile_phone": _ct.get("mobilePhone"),
-                        "work_phone":   _ct.get("workPhone"),
-                        "role":         _ct.get("role"),
-                        "active":       bool(_ct.get("active", True)),
-                        "data_json":    json.dumps(_ct),
-                        "synced_at":    _dir_now,
-                    }
-                )
-        except Exception as _ce:
-            print(f"  ⚠️  Contact fetch failed for company {_rec_id}: {_ce}")
-            _contact_fetch_errors += 1
-
-print(
-    f"\nFetched {_dir_count} companies, {len(_contact_rows)} contacts"
-    + (f"  ({_contact_fetch_errors} contact-fetch errors)" if _contact_fetch_errors else "")
-)
-
-if _dir_rows:
-    _df_dir = spark.createDataFrame(_dir_rows, schema=_DIRECTORY_SCHEMA)
-    spark.sql(f"DROP TABLE IF EXISTS {tbl('beproduct_directory')}")
-    _df_dir.write.format("delta").mode("overwrite").saveAsTable(tbl("beproduct_directory"))
-    print(f"✅ {len(_dir_rows)} companies → beproduct_directory")
+if not _DO_PULL_DIR:
+    print(f"Skipping Directory pull (mode={MODE})")
 else:
-    print("⚠️  No directory records — beproduct_directory not written")
+    print("=" * 80)
+    print("PULL: Directory (companies + contacts)  [~30 min for 3800 records]")
+    print("=" * 80)
 
-if _contact_rows:
-    _df_contacts = spark.createDataFrame(_contact_rows, schema=_CONTACTS_SCHEMA)
-    spark.sql(f"DROP TABLE IF EXISTS {tbl('beproduct_directory_contacts')}")
-    _df_contacts.write.format("delta").mode("overwrite").saveAsTable(
-        tbl("beproduct_directory_contacts")
+    _dir_now = datetime.now(timezone.utc).isoformat()
+    _dir_rows: List[Dict] = []
+    _contact_rows: List[Dict] = []
+    _dir_count = 0
+    _contact_fetch_errors = 0
+
+    for _rec in api.directory.directory_list():
+        _dir_count += 1
+        if not isinstance(_rec, dict):
+            continue
+
+        _rec_id   = _rec.get("id")
+        _bp_modAt = _rec.get("modifiedAt")
+
+        _dir_rows.append(
+            {
+                "id":             str(_rec_id) if _rec_id else None,
+                "directory_id":   _rec.get("directoryId"),
+                "name":           _rec.get("name"),
+                "partner_type":   _rec.get("partnerType"),
+                "address":        _rec.get("address"),
+                "country":        _rec.get("country"),
+                "state":          _rec.get("state"),
+                "zip":            _rec.get("zip"),
+                "city":           _rec.get("city"),
+                "phone":          _rec.get("phone"),
+                "fax":            _rec.get("fax"),
+                "website":        _rec.get("website"),
+                "notes":          _rec.get("notes"),
+                "active":         bool(_rec.get("active", True)),
+                "data_json":      json.dumps(_rec),
+                # Change-tracking: after a clean pull modified_at == extracted_at
+                # (no pending changes). External upserts set modified_at = now()
+                # to flag a row for the next PUSH_DIRECTORY run.
+                "extracted_at":   _dir_now,
+                "bp_modified_at": str(_bp_modAt) if _bp_modAt else None,
+                "modified_at":    _dir_now,
+            }
+        )
+
+        # Fetch contacts for this company — opt-in only (fetch_contacts=true)
+        if FETCH_CONTACTS and _rec_id:
+            try:
+                for _ct in api.directory.directory_contact_list(header_id=str(_rec_id)):
+                    if not isinstance(_ct, dict):
+                        continue
+                    _contact_rows.append(
+                        {
+                            "directory_id": str(_rec_id),
+                            "contact_id":   str(_ct["id"]) if _ct.get("id") else None,
+                            "email":        _ct.get("email"),
+                            "first_name":   _ct.get("firstName"),
+                            "last_name":    _ct.get("lastName"),
+                            "title":        _ct.get("title"),
+                            "mobile_phone": _ct.get("mobilePhone"),
+                            "work_phone":   _ct.get("workPhone"),
+                            "role":         _ct.get("role"),
+                            "active":       bool(_ct.get("active", True)),
+                            "data_json":    json.dumps(_ct),
+                            "synced_at":    _dir_now,
+                        }
+                    )
+            except Exception as _ce:
+                print(f"  ⚠️  Contact fetch failed for company {_rec_id}: {_ce}")
+                _contact_fetch_errors += 1
+
+    _contacts_note = (
+        f", {len(_contact_rows)} contacts"
+        + (f"  ({_contact_fetch_errors} errors)" if _contact_fetch_errors else "")
+        if FETCH_CONTACTS
+        else "  (contacts skipped — fetch_contacts=false)"
     )
-    print(f"✅ {len(_contact_rows)} contacts → beproduct_directory_contacts")
-else:
-    print("⚠️  No contacts found — beproduct_directory_contacts not written")
+    print(f"\nFetched {_dir_count} companies{_contacts_note}")
+
+    if _dir_rows:
+        _df_dir = spark.createDataFrame(_dir_rows, schema=_DIRECTORY_SCHEMA)
+        spark.sql(f"DROP TABLE IF EXISTS {tbl('beproduct_directory')}")
+        _df_dir.write.format("delta").mode("overwrite").saveAsTable(tbl("beproduct_directory"))
+        print(f"✅ {len(_dir_rows)} companies → beproduct_directory")
+    else:
+        print("⚠️  No directory records — beproduct_directory not written")
+
+    if _contact_rows:
+        _df_contacts = spark.createDataFrame(_contact_rows, schema=_CONTACTS_SCHEMA)
+        spark.sql(f"DROP TABLE IF EXISTS {tbl('beproduct_directory_contacts')}")
+        _df_contacts.write.format("delta").mode("overwrite").saveAsTable(
+            tbl("beproduct_directory_contacts")
+        )
+        print(f"✅ {len(_contact_rows)} contacts → beproduct_directory_contacts")
+    else:
+        print("⚠️  No contacts found — beproduct_directory_contacts not written")
 
 # COMMAND ----------
 # ============================================================================
-# CELL 6 — PUSH: MasterData choices  (skipped unless mode includes PUSH_MASTER_DATA)
+# CELL 5b — DATA MASSAGE: Upsert external data into beproduct_directory
+#
+# Run this cell AFTER PULL_ONLY and BEFORE PUSH_DIRECTORY / PUSH_ONLY.
+#
+# The template below shows the recommended MERGE pattern.
+# Replace the source query and field list, then uncomment spark.sql().
+#
+# HOW MODIFIED_AT DRIVES PUSH DETECTION
+# ──────────────────────────────────────
+# After PULL_ONLY every row has  modified_at == extracted_at  (no pending change).
+# This MERGE sets  modified_at = current_timestamp()  only on rows that differ
+# from the source, which is the signal that PUSH_DIRECTORY picks up.
+#
+# Row states after merge:
+#   id = UUID  + modified_at > extracted_at  → UPDATE to BeProduct on push
+#   id = NULL  (any timestamps)              → ADD   to BeProduct on push
+#   id = UUID  + modified_at == extracted_at → skip (already in sync)
+# ============================================================================
+
+_MERGE_TEMPLATE = f"""
+-- ================================================================
+-- MERGE massaged data → {tbl('beproduct_directory')}
+-- ================================================================
+-- Replace <your_source> with a table name or inline CTE.
+-- Adjust the MATCHED condition and SET/VALUES columns as needed.
+-- ================================================================
+
+MERGE INTO {tbl('beproduct_directory')} AS tgt
+USING (
+    -- TODO: replace with your source table or transformation query
+    -- Example:  SELECT * FROM lft.beproduct.your_staging_table
+    SELECT
+        directory_id,   -- match key (human-readable partner code)
+        name,
+        address,
+        country,
+        state,
+        zip,
+        city,
+        phone,
+        fax,
+        website,
+        notes,
+        active,
+        partner_type    -- used only for new inserts (cannot change after creation)
+    FROM <your_source>
+) AS src
+ON tgt.directory_id = src.directory_id
+
+-- ── Existing record: only update when something actually changed ─────────────
+WHEN MATCHED AND (
+       tgt.name     IS DISTINCT FROM src.name
+    OR tgt.address  IS DISTINCT FROM src.address
+    OR tgt.country  IS DISTINCT FROM src.country
+    OR tgt.state    IS DISTINCT FROM src.state
+    OR tgt.zip      IS DISTINCT FROM src.zip
+    OR tgt.city     IS DISTINCT FROM src.city
+    OR tgt.phone    IS DISTINCT FROM src.phone
+    OR tgt.fax      IS DISTINCT FROM src.fax
+    OR tgt.website  IS DISTINCT FROM src.website
+    OR tgt.notes    IS DISTINCT FROM src.notes
+    OR tgt.active   IS DISTINCT FROM src.active
+    -- TODO: add / remove field comparisons to match your source columns
+)
+THEN UPDATE SET
+    tgt.name        = src.name,
+    tgt.address     = src.address,
+    tgt.country     = src.country,
+    tgt.state       = src.state,
+    tgt.zip         = src.zip,
+    tgt.city        = src.city,
+    tgt.phone       = src.phone,
+    tgt.fax         = src.fax,
+    tgt.website     = src.website,
+    tgt.notes       = src.notes,
+    tgt.active      = src.active,
+    tgt.modified_at = current_timestamp()   -- ← flags this row for PUSH_DIRECTORY
+
+-- ── New record: id = NULL so PUSH_DIRECTORY calls Directory/Add ──────────────
+WHEN NOT MATCHED BY TARGET
+THEN INSERT (
+    id,
+    directory_id, name, partner_type,
+    address, country, state, zip, city, phone, fax, website, notes,
+    active,
+    data_json,
+    extracted_at, bp_modified_at,
+    modified_at
+)
+VALUES (
+    NULL,                       -- id = NULL  → Add on push; filled in after push
+    src.directory_id,
+    src.name,
+    src.partner_type,           -- set once; cannot change after creation
+    src.address, src.country, src.state, src.zip, src.city,
+    src.phone, src.fax, src.website, src.notes,
+    COALESCE(src.active, true),
+    NULL,                       -- data_json populated on next PULL_ONLY
+    NULL,                       -- extracted_at = NULL = never pulled from BeProduct
+    NULL,                       -- bp_modified_at = NULL = never pulled
+    current_timestamp()         -- modified_at flags the row for push immediately
+)
+
+-- ── Optional: deactivate records absent from the source ──────────────────────
+-- Uncomment if your source is authoritative (i.e. missing = deleted).
+-- WHEN NOT MATCHED BY SOURCE AND tgt.active = true
+-- THEN UPDATE SET
+--     tgt.active      = false,
+--     tgt.modified_at = current_timestamp()
+"""
+
+print("=" * 80)
+print("CELL 5b — DATA MASSAGE template (read-only display)")
+print("=" * 80)
+print("Copy and adapt the MERGE SQL below, then uncomment spark.sql().")
+print(_MERGE_TEMPLATE)
+
+# ── Uncomment and fill in your source query to run the merge ─────────────────
+# spark.sql(_MERGE_TEMPLATE)
+
+# COMMAND ----------
+# ============================================================================
+# CELL 6 — PUSH: MasterData choices
+#          Runs when mode = PUSH_ONLY or PUSH_MASTER_DATA.
 #
 # API: POST /api/{company}/MasterData/{fieldId}/Update
 # SDK: api.raw_api.post("MasterData/{fieldId}/Update", body=payload)
 #
-# Payload:
-#   {
-#     "choices": {
-#       "items": [
-#         {
-#           "value":       "<existing or new choice string>",  ← match key
-#           "code":        "<short code>",        ← optional
-#           "active":      true | false,           ← optional; false = deactivate
-#           "updateValue": "<new display string>", ← optional; renames the choice
-#           "deleteChoice": true                   ← optional; permanently removes
-#         }
-#       ]
-#     }
-#   }
+# Strategy: simple full-list overwrite.
+# Dropdown values are static and small (dozens of rows). The entire choices
+# list from each beproduct_master_* Delta table is sent as the desired state.
 #
-# Patch semantics:
-#   - Choices included in `items` are created (if new value) or updated.
-#   - Choices absent from `items` are left unchanged in BeProduct.
-#   - To deactivate: include with active=false.
-#   - To rename:     include with value=<old> + updateValue=<new>.
-#   - To delete:     include with value=<old> + deleteChoice=true.
+# PATCH semantics still apply server-side (choices absent from the payload
+# are untouched in BeProduct), but since the table holds ALL desired choices
+# after a pull + any admin edits, sending the full list achieves an effective
+# overwrite without needing a diff.
 #
-# The Delta table drives the desired state.
-# Optional extra columns admins can add to the table:
-#   update_value  STRING  — renames the choice to this new display string
-#   delete_choice BOOLEAN — permanently deletes the choice when true
+# To deactivate a choice: set active = false in the Delta table.
+# To add a new choice:    insert a row with the new value string.
+# No delete support (deactivate is the safe equivalent).
+#
+# Payload per field:
+#   {"choices": {"items": [{"value": "…", "code": "…", "active": true/false}, …]}}
 # ============================================================================
 
-if MODE not in ("PUSH_MASTER_DATA", "PUSH_ALL"):
+if not _DO_PUSH_MASTER:
     print(f"Skipping MasterData push (mode={MODE})")
 else:
     print("=" * 80)
@@ -526,7 +707,7 @@ else:
             print(f"    ⚠️  Empty table — skipping")
             continue
 
-        # Build choices items list
+        # Build flat choice items: value (required key), code, active
         _items: List[Dict[str, Any]] = []
         for _r in _rows:
             _val = _r.get("value", "")
@@ -535,13 +716,7 @@ else:
             _item: Dict[str, Any] = {"value": _val}
             if _r.get("code") is not None:
                 _item["code"] = _r["code"]
-            if _r.get("active") is not None:
-                _item["active"] = bool(_r["active"])
-            # Optional admin-managed columns
-            if _r.get("update_value"):
-                _item["updateValue"] = _r["update_value"]
-            if _r.get("delete_choice"):
-                _item["deleteChoice"] = True
+            _item["active"] = bool(_r.get("active", True))
             _items.append(_item)
 
         _payload = {"choices": {"items": _items}}
@@ -588,7 +763,7 @@ else:
 # they will be included in the Add payload directly (atomic create + contacts).
 # ============================================================================
 
-if MODE not in ("PUSH_DIRECTORY", "PUSH_ALL"):
+if not _DO_PUSH_DIR:
     print(f"Skipping Directory push (mode={MODE})")
 else:
     print("=" * 80)
@@ -599,12 +774,33 @@ else:
     print("\n─── Companies ───")
     try:
         _df_dir = spark.table(tbl("beproduct_directory"))
-        _company_rows = [r.asDict() for r in _df_dir.collect()]
+        _all_company_rows = [r.asDict() for r in _df_dir.collect()]
     except Exception as _e:
         print(f"  ❌ Cannot read beproduct_directory: {_e}")
-        _company_rows = []
+        _all_company_rows = []
+
+    # ── Change detection ──────────────────────────────────────────────────────
+    # Push only rows where:
+    #   id IS NULL          → new record (call Directory/Add)
+    #   extracted_at IS NULL → added externally, never pulled
+    #   modified_at > extracted_at → changed after the last pull (pending change)
+    def _is_pending(r: Dict) -> bool:
+        if not r.get("id"):
+            return True
+        if not r.get("extracted_at"):
+            return True
+        return (r.get("modified_at") or "") > (r.get("extracted_at") or "")
+
+    _company_rows = [r for r in _all_company_rows if _is_pending(r)]
+    _skipped = len(_all_company_rows) - len(_company_rows)
+    print(
+        f"  {len(_all_company_rows)} total rows  |  "
+        f"{len(_company_rows)} pending  |  {_skipped} already in sync (skipped)"
+    )
 
     _c_add = _c_upd = _c_err = 0
+    _pushed_update_ids: List[str] = []   # UUIDs of successfully updated companies
+    _pushed_add_codes:  List[str] = []   # directory_id codes of successfully added companies
 
     for _row in _company_rows:
         _rec_id      = _row.get("id")
@@ -653,10 +849,21 @@ else:
                 else:
                     _resp = api.directory.directory_add(fields=_payload)
                     _new_uuid = _resp.get("id") if isinstance(_resp, dict) else None
+                    if _new_uuid and _dir_id_code:
+                        # Stamp the returned UUID + mark as synced in the Delta table
+                        spark.sql(f"""
+                            UPDATE {tbl('beproduct_directory')}
+                            SET id           = '{_new_uuid}',
+                                extracted_at = current_timestamp(),
+                                modified_at  = current_timestamp()
+                            WHERE directory_id = '{_dir_id_code}' AND id IS NULL
+                        """)
                     print(
                         f"  ✅ Added: {_payload.get('name', '?')}"
                         f"  → id={_new_uuid}"
                     )
+                    if _dir_id_code:
+                        _pushed_add_codes.append(_dir_id_code)
                 _c_add += 1
 
             else:
@@ -672,6 +879,7 @@ else:
                         f"Directory/Update/{_rec_id}", body=_payload
                     )
                     print(f"  ✅ Updated: {_payload.get('name', '?')}  (id={_rec_id})")
+                    _pushed_update_ids.append(_rec_id)
                 _c_upd += 1
 
         except Exception as _e:
@@ -682,6 +890,19 @@ else:
             _c_err += 1
 
     print(f"\n  Companies — add: {_c_add}, update: {_c_upd}, errors: {_c_err}")
+
+    # ── Mark updated companies as synced (extracted_at ← now) ─────────────────
+    # For ADD rows the per-row UPDATE above already wrote the new UUID + timestamps.
+    # For UPDATE rows we do a single batched SQL to avoid N round-trips.
+    if not DRY_RUN and _pushed_update_ids:
+        _ids_sql = ", ".join(f"'{_i}'" for _i in _pushed_update_ids)
+        spark.sql(f"""
+            UPDATE {tbl('beproduct_directory')}
+            SET extracted_at = current_timestamp(),
+                modified_at  = current_timestamp()
+            WHERE id IN ({_ids_sql})
+        """)
+        print(f"  ✅ extracted_at updated for {len(_pushed_update_ids)} updated companies")
 
     # ── Contacts ───────────────────────────────────────────────────────────────
     print("\n─── Contacts ───")
@@ -789,14 +1010,16 @@ _all_tables = (
 
 print("Delta table row counts:")
 for _t in _all_tables:
+    # Use tableExists first — avoids SQLQueryContextLogger noise on missing tables.
+    if not spark.catalog.tableExists(f"{CATALOG}.{SCHEMA_NAME}.{_t}"):
+        print(f"  -  {_t}: (not created)")
+        continue
     try:
-        _cnt = spark.sql(
-            f"SELECT COUNT(*) AS c FROM {tbl(_t)}"
-        ).collect()[0]["c"]
+        _cnt = spark.sql(f"SELECT COUNT(*) AS c FROM {tbl(_t)}").collect()[0]["c"]
         _mark = "✓" if _cnt > 0 else "○"
         print(f"  {_mark}  {_t}: {_cnt}")
-    except Exception:
-        print(f"  -  {_t}: (not found)")
+    except Exception as _ex:
+        print(f"  ?  {_t}: (count failed — {_ex})")
 
 print()
 print("✅ Done")

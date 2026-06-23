@@ -76,6 +76,20 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
 
 ## Verified discoveries log (append-dated; do not delete)
 
+**BeProduct Directory (validated 2026-06-23):**
+- `api.directory.directory_list()` returns 3852 records (vendors, factories, mills).
+  `api.directory.directory_contact_list(header_id)` returns 0 contacts for ALL records —
+  confirmed by the org: no BeProduct user accounts have been attached to any
+  mill/factory/supplier. `beproduct_directory_contacts` therefore stays empty and
+  `fetch_contacts` widget defaults to `false` (skips the extra ~3800 API calls).
+  Do NOT assume contacts exist when reasoning about Directory data.
+- `beproduct_master_parent_vendor` and `beproduct_master_factory` each contain 3852
+  choices — same count as Directory records (they are the flattened choice lists
+  derived from the same partner database).
+- Directory pull throughput: ~2 records/sec via `directory_list()`, ~30 min for 3852
+  records. Pull is `PULL_ONLY` mode only. `PUSH_DIRECTORY` skips the pull and uses
+  change detection (`modified_at > extracted_at`) to push only pending rows.
+
 **DTC API (validated 2026-06-17):**
 - Sheet upsert: `PATCH /v1/sheets/{sheetId}/views/{viewId}` body
   `{"sheetData":[{...,"rowId"|"rowIndex":..}]}` → 204. A single PATCH **cannot mix**
