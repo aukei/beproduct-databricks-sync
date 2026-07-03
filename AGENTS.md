@@ -46,11 +46,17 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
 ### Current direction partition
 
 - **BeProduct → DTC**: Product Status, Style Description, Class, Sub Class, Division,
-  Brand, Garment Finish, Tech Pack Stage, Fabric Group, Placement.
-- **DTC → BeProduct**: Legacy Code (`customer_style_number`), Main Vendor (Sampling)
-  (`parent_vendor`), Main Factory (Sampling) (`factory`) [header];
-  Lot# (`drawing_number_walmart`) [colorway]; Main Factory Customer ID (no target → skipped).
-- **Keys** (match, not overwritten): LF Style# (`header_number`), Color/Wash (`colorName`).
+  Brand, Garment Finish, Tech Pack Stage, Fabric Group, Placement, Gender (pending DTC col);
+  BP Style# (new match key, pending DTC col), LF Style# (optional), Legacy Code (optional);
+  Supplier (default-fill "Supplier" when blank; pending DTC col).
+  **Filter**: styles with Product Status = "Finalized" are excluded from staging/DTC sync.
+- **DTC → BeProduct**: Main Vendor (Sampling) (`parent_vendor`), Main Factory
+  (Sampling) (`factory`) [header]; Lot# (`drawing_number_walmart`) [colorway];
+  Main Factory Customer ID (no target → skipped).
+  [REMOVED Phase 6]: "Legacy Code" DTC→BP. "Customer Style#" DTC column not created.
+- **Keys** (match, not overwritten): BP Style# (`header_number`), Color/Wash (`colorName`)
+  [in-request]; [Customer, BP Style# (header_number), SeasonCode, Brand (brand_hk)]
+  [composite/request-routing].
 - **BeProduct → DTC, image only (Phase 3)**: Style Image (`front_image_url` →
   DTC "Style Image"). Binary, so it does NOT ride the Phase 1 sheetData PATCH;
   uploaded by `beproduct_to_dtc_images` via the multipart images endpoint, only
@@ -71,8 +77,9 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
 4. **Notebooks can't run locally** (Spark/dbutils). Put deterministic logic in
    `dtc/python/sync/phase1.py` / `phase2.py` (pure-Python, unit-tested); keep
    notebooks as thin Spark/IO wrappers.
-5. **In-request match key = (LF Style#, Color/Wash)**; season+brand are fixed per
-   request. Brand is one-per-request and agrees with the request name.
+5. **In-request match key = (BP Style#, Color/Wash)**; season+brand are fixed per
+   request. Brand is one-per-request and agrees with the request name. (Phase 6:
+   was (LF Style#, Color/Wash). Composite key uses brand_hk, not brands_multi.)
 
 ## Verified discoveries log (append-dated; do not delete)
 
@@ -149,6 +156,45 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
   colorways=[{"id":colorway_id,"fields":{fieldId:val}}])` — colorway writes need the
   colorway **id**, so the transform carries `colorway_id` into staging
   (`colorways_json` from `beproduct_style_sync`).
+
+**BeProduct schema Phase 6 structural changes (validated live 2026-06-26):**
+- `header_number` field **renamed** in BeProduct from "LF Style Number" → "BP Style Number".
+  Field_id and data values **unchanged**. This field is the intended new match key for DTC
+  (target DTC column "BP Style#"). Staging column renamed `lf_style_number` → `bp_style_number`.
+- New field `lf_style_number` (field_id: `lf_style_number`, display name "LF STYLE NUMBER"):
+  completely separate from `header_number`. Currently `None` for all checked styles.
+  Will be populated by upstream integration. Pushed to DTC's **existing** "LF Style#" column.
+- New field `brand_hk` (field_id: `brand_hk`, display name "Brand"): single-value string.
+  Used as the Brand key in the composite key `[Customer, BP Style#, SeasonCode, Brand]`.
+  Replaces `brands_multi` for request-routing and scope checks. `brands_multi` ("BRANDS")
+  is retained in ktb_styles as non-key metadata.
+- Ignore field_id `brand` (display name "BRAND") — legacy, not the composite key Brand.
+- Composite key target: `[Customer, BP Style# (header_number), SeasonCode, Brand (brand_hk)]`
+- In-request match key target: `("BP Style#", "Color / Wash")` (was `("LF Style#", ...)`).
+- **No new "Legacy Code" BeProduct field.** The existing `customer_style_number` field
+  (CUSTOMER STYLE NUMBER / PLM #) is what DTC calls "Legacy Code". It will be populated by
+  upstream integration and flows BP→DTC (optional, sent when non-blank).
+  Previously "Legacy Code" was DTC→BP; that role now belongs to the new DTC "Customer Style#".
+- `customer_style_number` will also be populated by upstream. Both `lf_style_number` and
+  `customer_style_number` are upstream-filled; the sync reads them from BP and writes to DTC.
+
+**DTC WIP view columns — status (confirmed by scanning all 75 active KTB requests, 2026-07-02):**
+  Columns **NOT YET IN VIEW** (DTC admin must add; sync code is ready but dormant):
+  - `"BP Style#"` — **BLOCKER**: MATCH_KEY_COLS is already `("BP Style#", ...)` in code; sync will
+    produce `missing_bp_style` exceptions for all rows until DTC creates this column and the existing
+    "LF Style#" data is migrated to "BP Style#" by the DTC admin.
+  - `"Gender"` — Phase 1 mapping ready in `FIELD_MAPPING`; dormant until DTC adds column.
+  - `"Supplier"` — Phase 1 `DEFAULT_FILL_COLS` logic ready; dormant until DTC adds column.
+  Columns **DECIDED NOT TO CREATE**:
+  - `"Customer Style#"` — removed from `phase2.REVERSE_HEADER_FIELDS` (2026-07-02). No DTC→BP
+    path for `customer_style_number`. "Legacy Code" (BP→DTC only) is the only direction.
+  Columns **EXIST IN VIEW** (confirmed with data in ≥7 of 75 KTB requests, just blank on fresh ones):
+  - `"Legacy Code"` (7 requests), `"Garment Finish"` (7), `"Tech Pack Stage"` (16),
+    `"Main Vendor (Sampling)"` (23). These were wrongly classified as missing earlier; the view
+    definition GET (`GET /v1/views/{viewId}`) returns **403** for the sync API key (confirmed for
+    per-request view `69f04983501f3d9cf4fc379c` and document-level template `6a3907f6df772fd797ee5b7c`).
+    `allowed_cols` in push notebook now **UNIONs** data-scan result with `FALLBACK_COLS` to avoid
+    silently dropping these columns on fresh sheets where they're blank.
 
 **BeProduct Style Applications (sample status, validated 2026-06-19):**
 - A style has **applications** (`api.style.app_list(header_id)` →
@@ -267,10 +313,16 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
   read-only LabelText formula (`[factory]`); `customer_supplier_id` is a DropDown
   with only 2 predefined choices — neither is a suitable writable target.
 - DTC blanks do not clear BeProduct unless `push_blanks=true`.
-- `customer_style_number` / DTC "Legacy Code" direction is **DTC → BeProduct**
-  (Phase 2). If the value is entered directly in BeProduct it will NOT flow to DTC
-  (there is no BeProduct → DTC push for this field). Data should be entered in DTC
-  first. No code change — leave as-is per team decision 2026-06-18.
+- `customer_style_number` / DTC "Legacy Code" direction: **CHANGED in Phase 6
+  (2026-06-26)** to **BeProduct → DTC** (optional; populated from BP's
+  `customer_style_number` when non-blank). Previously "Legacy Code" was DTC→BP;
+  that role now belongs to the new DTC column **"Customer Style#"**. There is no
+  loop: "Legacy Code" (BP→DTC) and "Customer Style#" (DTC→BP) are different DTC
+  columns. **Note:** There is NO new BeProduct "Legacy Code" field — the existing
+  `customer_style_number` (CUSTOMER STYLE NUMBER / PLM #) is the source. Both
+  `lf_style_number` and `customer_style_number` will be populated by upstream
+  integration before flowing to DTC. **DTC "Customer Style#" column is NOT being
+  created (decision 2026-07-02)**. Removed from `phase2.REVERSE_HEADER_FIELDS`.
 - BeProduct `header_number` for style `127-WM2FF-K26` has a leading space
   (`' 127-WM2FF-K26'`). `phase1.norm()` strips it for matching so the sync
   functions correctly; the cosmetic issue should be fixed in BeProduct directly.

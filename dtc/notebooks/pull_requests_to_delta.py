@@ -13,7 +13,11 @@ projection); requests whose registered view is anything else are skipped + logge
 
 Each row carries the request's [request_reference, season_code, brands] plus the
 DTC rowId / rowIndex, so the table is keyed for reconciliation and push:
-  (customer, season_code, brands, lf_style_number, color_wash)  + row_id/row_index
+  (customer, season_code, brands, bp_style_number, color_wash)  + row_id/row_index
+
+Phase 6: match key column changed from "LF Style#" to "BP Style#". Both
+bp_style_number (from "BP Style#") and lf_style_number (from "LF Style#") are
+extracted; bp_style_number is the operative key for Phase 2 identity join.
 
 It also maintains the control table (requirement 1a): for each request it updates
 last_extracted, row_count and msgs. Empty requests (no rows) are allowed
@@ -70,6 +74,10 @@ FIXED_FIELDS = [
     StructField("brands", StringType()),
     StructField("row_id", StringType()),
     StructField("row_index", LongType()),
+    # Phase 6: bp_style_number (from DTC "BP Style#") is the new match key.
+    StructField("bp_style_number", StringType()),
+    # lf_style_number (from DTC "LF Style#") retained for backward compat;
+    # now stores the optional LF style number value (no longer the match key).
     StructField("lf_style_number", StringType()),
     StructField("color_wash", StringType()),
     StructField("extracted_at", TimestampType()),
@@ -182,6 +190,9 @@ def _build_records(r, rows):
             "brands": r.brands,
             "row_id": row.get("rowId"),
             "row_index": (int(row["rowIndex"]) if row.get("rowIndex") is not None else None),
+            # Phase 6: "BP Style#" is the new match key column in DTC.
+            "bp_style_number": phase1.norm(row.get("BP Style#")),
+            # "LF Style#" is now optional (BP->DTC); retained for completeness.
             "lf_style_number": phase1.norm(row.get("LF Style#")),
             "color_wash": phase1.norm(row.get("Color / Wash")),
             "extracted_at": now,

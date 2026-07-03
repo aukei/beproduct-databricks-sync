@@ -100,8 +100,9 @@ try:
     print(f"✅ Loaded {source_count} styles")
     
     # Check for duplicate style keys
-    print(f"\n🔍 Checking for duplicate style keys (LF Style # + Brands + Season + Year)...")
-    duplicate_styles = df_source.groupBy("lf_style_number", "brands", "season", "year") \
+    # Phase 6: key is now (BP Style# / bp_style_number, brand from brand_hk, season, year)
+    print(f"\n🔍 Checking for duplicate style keys (BP Style# + Brand + Season + Year)...")
+    duplicate_styles = df_source.groupBy("bp_style_number", "brand", "season", "year") \
         .count() \
         .filter(col("count") > 1)
     
@@ -112,7 +113,7 @@ try:
         
         # Log warning to the existing sync_meta table
         metadata_table = f"{catalog}.{schema}.{source_table}_sync_meta"
-        warning_summary = f"WARNING: Found {dup_count} duplicate style keys (LF Style # + Brands + Season + Year). Pipeline proceeding."
+        warning_summary = f"WARNING: Found {dup_count} duplicate style keys (BP Style# + Brand + Season + Year). Pipeline proceeding."
         
         spark.sql(f"""
             INSERT INTO {metadata_table}
@@ -130,7 +131,7 @@ try:
     # Show sample
     print(f"\n   Sample source data:")
     df_source.select(
-        "lf_style_number", "season", "year", "brands", "main_material_content"
+        "bp_style_number", "lf_style_number", "season", "year", "brand", "brands", "main_material_content"
     ).show(3, truncate=50)
     
 except Exception as e:
@@ -185,7 +186,7 @@ try:
     # Show sample
     print(f"\n   Sample after colorway explosion:")
     df_exploded_colors.select(
-        "lf_style_number", "brands", "color", "colorway_id", "main_material_content"
+        "bp_style_number", "lf_style_number", "brand", "color", "colorway_id", "main_material_content"
     ).show(5, truncate=50)
 
 except Exception as e:
@@ -339,9 +340,10 @@ try:
     print(f"   Example: 'KTB SS26 Wrangler'")
     
     # Derive DTC request name: "<Customer> <SeasonCode> <Brand>"
+    # Phase 6: use brand (from brand_hk single-value field), not brands (brands_multi).
     df_with_request_name = df_with_season.withColumn(
         "dtc_request_name",
-        concat_ws(" ", lit(customer_code), col("season_code"), col("brands"))
+        concat_ws(" ", lit(customer_code), col("season_code"), col("brand"))
     )
     
     # Show unique request names
@@ -371,14 +373,21 @@ print("=" * 80)
 try:
     print(f"🔄 Mapping BeProduct fields to DTC column names...")
     
-    # Field mapping: BeProduct column → DTC column
-    # Per requirements document (lines 44-45)
+    # Field mapping: BeProduct staging column → DTC column display name.
+    # Phase 6 update: bp_style_number -> "BP Style#" (new match key);
+    # lf_style_number -> "LF Style#" (optional); brand (brand_hk) -> "Brand" (key);
+    # customer_style_number -> "Legacy Code" (now BP->DTC optional);
+    # gender -> "Gender" (new DTC column, pending); supplier -> "Supplier" (default-fill).
     FIELD_MAPPING = {
-        # Compulsory fields
-        "lf_style_number": "LF Style#",
-        "brands": "Brand",
+        # Compulsory / key fields (Phase 6)
+        "bp_style_number": "BP Style#",    # NEW match key (was lf_style_number->"LF Style#")
+        "brand": "Brand",                  # from brand_hk (single-value)
         # Already derived: season_code, dtc_request_name
-        
+
+        # Optional BP->DTC fields (Phase 6)
+        "lf_style_number": "LF Style#",        # optional (new separate BP field)
+        "customer_style_number": "Legacy Code", # optional BP->DTC (was DTC->BP)
+
         # Interested fields
         "description": "Style Description",
         "product_status": "Product Status",
@@ -387,35 +396,40 @@ try:
         "division": "Division",
         "garment_finish": "Garment Finish",
         "techpack_stage": "Tech Pack Stage",
-        
+        "gender": "Gender",                    # Phase 6: new DTC column (pending creation)
+
+        # Default-fill: always staged as "Supplier"; only written to DTC when cell blank
+        "supplier": "Supplier",                # Phase 6: new DTC column (pending creation)
+
         # Denormalized fields
         "color": "Color / Wash",
         "fabric_group": "Fabric Group",
         "placement": "Placement",
-        
+
         # Image (deferred to separate notebook)
         "front_image_url": "Style Image URL",  # Not pushed yet
-        
+
         # Metadata (keep for internal tracking)
         "team": "team_code",
-        "customer_style_number": "customer_style_number_plm",
         "lot_code": "lot_code",
         "parent_vendor": "parent_vendor",
         "factory": "factory",
     }
-    
+
     # Create staging DataFrame with mapped columns
     df_staging = df_with_request_name.select(
         # Composite key
         col("dtc_request_name"),
-        col("lf_style_number"),
+        col("bp_style_number"),            # Phase 6: new primary BP style key
+        col("lf_style_number"),            # Phase 6: optional old LF style number
         col("color"),
-        col("colorway_id"),          # carried for Phase 2 DTC -> BeProduct Lot# pushback
+        col("colorway_id"),                # carried for Phase 2 DTC -> BeProduct Lot# pushback
         col("fabric_group"),
         col("placement"),
-        
+
         # DTC columns
-        col("brands"),
+        col("brand"),                      # Phase 6: from brand_hk (key field)
+        col("brands"),                     # brands_multi (retained as metadata)
         col("season"),
         col("year"),
         col("season_code"),
@@ -426,18 +440,22 @@ try:
         col("division"),
         col("garment_finish"),
         col("techpack_stage"),
+        col("gender"),                     # Phase 6: new field (pending DTC column creation)
         col("front_image_url"),
-        
+
+        # Default-fill columns: staged as constants; Phase 1 only writes when DTC cell is blank
+        lit("Supplier").alias("supplier"), # Phase 6: "Supplier" constant (pending DTC column)
+
         # Metadata
         col("team"),
-        col("customer_style_number"),
+        col("customer_style_number"),      # Phase 6: now BP->DTC optional (Legacy Code)
         col("lot_code"),
         col("parent_vendor"),
         col("factory"),
         col("folder_name"),
         col("id").alias("beproduct_style_id"),
         col("modified_at").alias("beproduct_modified_at"),
-        
+
         # Add sync metadata
         current_timestamp().alias("transformed_at"),
         current_date().alias("transform_date"),
@@ -450,8 +468,8 @@ try:
     # Show sample
     print(f"\n   Sample staging data:")
     df_staging.select(
-        "dtc_request_name", "lf_style_number", "color", 
-        "fabric_group", "placement", "brands", "sync_status"
+        "dtc_request_name", "bp_style_number", "lf_style_number", "color",
+        "fabric_group", "placement", "brand", "sync_status"
     ).show(5, truncate=50)
     
 except Exception as e:
@@ -474,8 +492,9 @@ try:
     validations = []
     
     # 1. Check required fields
+    # Phase 6: bp_style_number and brand (brand_hk) replace lf_style_number and brands.
     print(f"\n1️⃣ Checking required fields...")
-    required_fields = ["lf_style_number", "season_code", "brands", "color"]
+    required_fields = ["bp_style_number", "season_code", "brand", "color"]
     
     for field in required_fields:
         null_count = df_staging.where(col(field).isNull()).count()
@@ -519,9 +538,10 @@ try:
         print(f"   ✅ All request names valid")
     
     # 4. Check for duplicate composite keys
+    # Phase 6: key is now (dtc_request_name, bp_style_number, color, fabric_group)
     print(f"\n4️⃣ Checking for duplicate keys...")
     duplicates = df_staging.groupBy(
-        "dtc_request_name", "lf_style_number", "color", "fabric_group"
+        "dtc_request_name", "bp_style_number", "color", "fabric_group"
     ).count().where(col("count") > 1).count()
     
     if duplicates > 0:

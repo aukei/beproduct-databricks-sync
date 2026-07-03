@@ -137,7 +137,10 @@ app_registry_table_val = dbutils.widgets.get("app_registry_table").strip()
 # Values are Delta table column names
 # Note: Field names are case-sensitive and must match exactly!
 COMPULSORY_FIELDS = {
-    "LF Style Number": "lf_style_number",
+    # Phase 6: header_number field was renamed from "LF Style Number" to
+    # "BP Style Number" in BeProduct. The field_id (header_number) and data
+    # values are unchanged. Staging column renamed: lf_style_number -> bp_style_number.
+    "BP Style Number": "bp_style_number",
     "DESCRIPTION": "description",
     "TEAM": "team",
     "SEASON": "season",
@@ -150,13 +153,26 @@ INTERESTED_FIELDS = {
     "PRODUCT CATEGORY": "product_category",
     "PRODUCT SUB CATEGORY": "product_sub_category",
     "Division": "division",
-    "BRANDS": "brands",
+    # Phase 6: brand_hk single-value "Brand" field is the new composite-key brand.
+    # brands_multi ("BRANDS") is kept for reference but is no longer the key field.
+    "Brand": "brand",              # field_id brand_hk (NEW single-value key field)
+    "BRANDS": "brands",            # field_id brands_multi (kept as metadata)
     "GARMENT FINISH": "garment_finish",
     "TECHPACK STAGE": "techpack_stage",
     "Lot Code": "lot_code",
     "PARENT VENDOR": "parent_vendor",
     "FACTORY": "factory",
+    # Phase 6: new separate LF style number field (optional; currently empty for
+    # most styles). Field_id = lf_style_number (distinct from header_number).
+    "LF STYLE NUMBER": "lf_style_number",
+    # Phase 6: Gender field (field_id: gender). BP→DTC, pending DTC column creation.
+    "GENDER": "gender",
 }
+
+# Styles with this Product Status are excluded from all DTC sync processing.
+# They are still written to ktb_styles (full picture), but filtered out in the
+# transform so they never appear in staging or reach DTC.
+EXCLUDED_STATUSES = frozenset({"Finalized"})
 
 # BOM and Material fields (extracted by field ID from headerData)
 # Per requirements: colorways, BOM materials, material category/content, front image
@@ -365,7 +381,9 @@ try:
                 # Verify expected fields exist
                 print(f"\n      ✅ VERIFICATION - Checking for expected fields:")
                 expected = {
-                    "LF Style Number": "LFBP-WM1MJ-002",
+                    "BP Style Number": "LFBP-WM1MJ-002",   # Phase 6: renamed from "LF Style Number"
+                    "LF STYLE NUMBER": None,                # Phase 6: new optional field
+                    "Brand": None,                          # Phase 6: new brand_hk field
                     "Lot Code": "112394630",
                     "BRANDS": "['Wrangler']",  # Array
                     "CUSTOMER STYLE NUMBER / PLM #": "127-WM1MJ-XXXX-009",
@@ -397,11 +415,12 @@ try:
             
             # Try multiple ways to get LF Style number
             lf_style = (
-                style.get("LF_Style_number") or 
+                style.get("LF_Style_number") or
+                style.get("attributes", {}).get("BP Style Number") or
                 style.get("attributes", {}).get("LF Sytle Number") or
                 style.get("attributes", {}).get("LF_Style_number") or
                 style.get("attributes", {}).get("LF Style Number") or
-                "NO_LF"
+                "NO_BP_STYLE"
             )
             
             print(f"     Result {len(all_styles)}: folder='{folder_name}', lf_style={lf_style}, id={style_id}...")
@@ -443,6 +462,25 @@ except Exception as e:
 # Check if we got any data
 print(f"\n   Checking data...")
 print(f"   styles list length: {len(styles)}")
+
+# ---------------------------------------------------------------------------
+# Filter out styles whose Product Status is in EXCLUDED_STATUSES ("Finalized").
+# Applied BEFORE app enrichment so no app_get API calls are wasted on excluded
+# styles. The full raw list (all_styles) is unchanged for reporting purposes.
+# ---------------------------------------------------------------------------
+def _get_style_status(style: dict) -> str:
+    """Extract product_status value (field_id style_status) from a raw style record."""
+    for f in (style.get("headerData", {}) or {}).get("fields", []) or []:
+        if f.get("id") == "style_status":
+            return (f.get("value") or "")
+    return ""
+
+before_status_filter = len(styles)
+styles = [s for s in styles if _get_style_status(s) not in EXCLUDED_STATUSES]
+excluded_count = before_status_filter - len(styles)
+if excluded_count:
+    print(f"\n   🔵 Excluded {excluded_count} style(s) with status in {set(EXCLUDED_STATUSES)}"
+          f" ({before_status_filter} → {len(styles)} styles remaining)")
 
 HAS_DATA = len(styles) > 0
 

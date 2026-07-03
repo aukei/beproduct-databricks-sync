@@ -15,7 +15,9 @@ Decision rule (per requirement):
   For each live DTC sheet row, upload an image when BOTH hold:
     * the row's "Style Image" cell is NOT populated, AND
     * the matching BeProduct staging row has a valid front_image_url.
-  Match is on the in-request key (LF Style#, Color / Wash), same as Phase 1.
+  Match is on the in-request key (BP Style#, Color / Wash), same as Phase 1.
+  Phase 6: key column changed from "LF Style#" to "BP Style#"; staging column
+  changed from lf_style_number to bp_style_number.
 
 Rows that already have an image are skipped silently (idempotent re-run). Rows
 that are blank but whose BeProduct source has no usable URL are recorded as
@@ -195,11 +197,11 @@ def compute_image_uploads(
 
     Args:
         dtc_rows: current (freshly reloaded) DTC rows from the WIP_ITS_USE view;
-                  each must carry 'rowIndex', the match-key columns and the
-                  "Style Image" cell (absent => treated as blank).
+                  each must carry 'rowIndex', the match-key columns ("BP Style#",
+                  "Color / Wash") and the "Style Image" cell (absent => blank).
         bp_rows:  BeProduct staging rows targeting THIS request; keys are staging
-                  column names, including 'lf_style_number', 'color' and
-                  'front_image_url'.
+                  column names, including 'bp_style_number', 'color' and
+                  'front_image_url'. (Phase 6: was lf_style_number)
 
     Returns:
         ImagePlan. An upload is emitted only for a DTC row that is blank-image
@@ -211,9 +213,10 @@ def compute_image_uploads(
     lf_col, color_col = MATCH_KEY_COLS
 
     # Index BeProduct rows by the in-request key (first row wins on dup).
+    # Phase 6: key column changed from lf_style_number to bp_style_number.
     bp_index: Dict[Tuple[Optional[str], Optional[str]], Dict[str, Any]] = {}
     for bp in bp_rows:
-        key = (norm(bp.get("lf_style_number")), norm(bp.get("color")))
+        key = (norm(bp.get("bp_style_number")), norm(bp.get("color")))
         if key == (None, None):
             continue
         bp_index.setdefault(key, bp)

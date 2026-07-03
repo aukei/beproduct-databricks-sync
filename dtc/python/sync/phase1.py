@@ -8,24 +8,40 @@ workflow described in dtc/PHASE1_WORKFLOW.md:
   * map BeProduct (transformed/denormalized) staging rows to the real DTC
     WIP_ITS_USE column names, EXCLUDING "Style Image"
   * upsert BeProduct rows onto the current DTC rows using the in-request row
-    key (LF Style#, Color / Wash) -> UPDATE existing / INSERT new
+    key (BP Style#, Color / Wash) -> UPDATE existing / INSERT new
   * assign sparse-aware rowIndex for inserts, partitioned by (season, brand)
   * surface exceptions (mismatched scope, duplicate keys, unmapped data)
 
-Why (LF Style#, Color / Wash) as the in-request key
+Phase 6 structural update (2026-06-26):
+  - Match key changed from ("LF Style#", "Color / Wash") to
+    ("BP Style#", "Color / Wash"). BeProduct's header_number field was renamed
+    from "LF Style Number" to "BP Style Number" in BeProduct; the staging column
+    is now bp_style_number (was lf_style_number).
+  - Composite key for request routing: [Customer, BP Style#, SeasonCode, Brand]
+    where Brand comes from brand_hk (single-value field, not brands_multi).
+  - DTC "LF Style#" column is now OPTIONAL BeProduct->DTC (from the new separate
+    lf_style_number field); it is no longer a match key.
+  - DTC "Legacy Code" column is now OPTIONAL BeProduct->DTC, populated from
+    BP's customer_style_number. Previously it was DTC->BP (that role moved to the
+    new DTC "Customer Style#" column, handled in phase2.py).
+  - New DTC "BP STYLE#" column (informational copy of the BP Style# match key)
+    is also written BeProduct->DTC.
+
+Why (BP Style#, Color / Wash) as the in-request key
 ----------------------------------------------------
 DTC identifies a season as (Customer, SeasonCode) and the project guarantees
 exactly ONE brand per request, agreeing with the request name. So within a
-single request the (Seasoncode, Brand) part of the requirement-3a key
-(LF Style#, Seasoncode, Brand) is constant. The denormalization step explodes
-each style into one row per colorway, so the value that actually distinguishes
-rows inside a request is the colorway. Hence the row identity used for matching
-is (LF Style#, Color / Wash). This is also what the transform's own duplicate
-check uses. RowIndex is therefore numbered per request (= per season+brand).
+single request the (Seasoncode, Brand) part of the composite key is constant.
+The denormalization step explodes each style into one row per colorway, so the
+value that actually distinguishes rows inside a request is the colorway. Hence
+the row identity used for matching is (BP Style#, Color / Wash). RowIndex is
+therefore numbered per request (= per season+brand).
 
 Phase 1 pushes only BeProduct-OWNED columns (Product Status, Style Description,
 Class, Sub Class, Division, Brand, Garment Finish, Tech Pack Stage, Fabric Group,
-Placement; Style Image excluded). The DTC-owned columns (Legacy Code, Lot#,
+Placement, Gender, BP Style#, LF Style# (optional), Legacy Code (optional);
+Supplier (default-fill: "Supplier" only when DTC cell is blank);
+Style Image excluded). The DTC-owned columns (Lot#,
 Main Vendor (Sampling), Main Factory (Sampling), Main Factory Customer ID) flow
 the other way (DTC -> BeProduct) and live in sync/phase2.py; they are NOT in
 FIELD_MAPPING so a field is never synced in both directions.
@@ -49,26 +65,33 @@ from typing import Any, Dict, List, Optional, Tuple
 STYLE_IMAGE_COL = "Style Image"  # never written in Phase 1 (requirement 3a)
 
 # In-request row identity (see module docstring).
-MATCH_KEY_COLS: Tuple[str, str] = ("LF Style#", "Color / Wash")
+# Phase 6: changed from ("LF Style#", "Color / Wash") to ("BP Style#", "Color / Wash").
+MATCH_KEY_COLS: Tuple[str, str] = ("BP Style#", "Color / Wash")
 
 # BeProduct staging column -> DTC WIP_ITS_USE column display name.
 # Only columns that actually exist in the view are mapped; anything else would
 # make the PATCH fail with "'<col>' is not found in the mapping."
 FIELD_MAPPING: Dict[str, str] = {
     # --- match-key / required ---
-    "lf_style_number": "LF Style#",
+    "bp_style_number": "BP Style#",    # Phase 6: was lf_style_number->"LF Style#"
     "color": "Color / Wash",
-    "brands": "Brand",            # constant per request (== request brand)
+    "brand": "Brand",                  # Phase 6: from brand_hk (single-value)
+    # --- optional BeProduct-owned fields (pushed when non-blank) ---
+    "lf_style_number": "LF Style#",    # Phase 6: now optional (new separate BP field)
+    "customer_style_number": "Legacy Code",  # Phase 6: now BP->DTC optional (was DTC->BP)
     # --- updatable non-key fields (BeProduct-owned, pushed BeProduct -> DTC) ---
     "product_status": "Product Status",
     "description": "Style Description",
     "product_category": "Class",
     "product_sub_category": "Sub Class",
-    "division": "Division",       # was "Division?"; the '?' column was renamed
+    "division": "Division",            # was "Division?"; the '?' column was renamed
     "garment_finish": "Garment Finish",
     "techpack_stage": "Tech Pack Stage",
     "fabric_group": "Fabric Group",
     "placement": "Placement",
+    "gender": "Gender",                # Phase 6: new field (pending DTC column creation)
+    # --- default-fill (only written when DTC cell is blank; see DEFAULT_FILL_COLS) ---
+    "supplier": "Supplier",            # Phase 6: new DTC column; default = "Supplier"
     # --- image (mapped for reference but EXCLUDED from every push) ---
     "front_image_url": STYLE_IMAGE_COL,
 }
@@ -76,8 +99,15 @@ FIELD_MAPPING: Dict[str, str] = {
 # DTC-owned columns: these are written DTC -> BeProduct in Phase 2 and are
 # therefore deliberately NOT in FIELD_MAPPING (we never push them BeProduct -> DTC,
 # to keep each field one-directional and avoid sync loops). See sync/phase2.py.
-#   "Legacy Code", "Lot#", "Main Vendor (Sampling)",
-#   "Main Factory (Sampling)", "Main Factory Customer ID"
+#   "Lot#", "Main Vendor (Sampling)", "Main Factory (Sampling)",
+#   "Main Factory Customer ID"
+# Note: "Legacy Code" IS in FIELD_MAPPING (BP->DTC); "Customer Style#" is NOT
+# created as a DTC column.
+
+# Columns that are only filled when the DTC cell is currently blank — existing
+# non-blank DTC values are NEVER overwritten (write-once default fill).
+# Used in diff_updatable_fields() and respected for UPDATE ops; INSERT always fills.
+DEFAULT_FILL_COLS: frozenset = frozenset({"Supplier"})
 
 # Sentinel written to a stale DTC row's "Product Status" when the BeProduct style
 # behind it has moved to a different request (key change). It is intentionally NOT
@@ -209,10 +239,15 @@ def diff_updatable_fields(
 
     Only fields present in the BeProduct payload are considered (Phase 1 sets
     indicated fields; it does not blank out fields BeProduct has no value for).
+
+    DEFAULT_FILL_COLS (e.g. "Supplier") are skipped for UPDATE when the DTC row
+    already has a non-blank value — they are write-once defaults, never overwritten.
     """
     target = build_target_payload(bp_row, allowed_cols=allowed_cols, include_keys=False)
     changed: Dict[str, str] = {}
     for col, new_val in target.items():
+        if col in DEFAULT_FILL_COLS and norm(dtc_row.get(col)) is not None:
+            continue  # DTC already has a value; never overwrite a default-fill col
         if norm(dtc_row.get(col)) != norm(new_val):
             changed[col] = new_val
     return changed
@@ -314,18 +349,18 @@ def compute_upsert(
     seen_bp_keys: set = set()
 
     for bp in bp_rows:
-        key = (norm(bp.get("lf_style_number")), norm(bp.get("color")))
+        key = (norm(bp.get("bp_style_number")), norm(bp.get("color")))
 
         # required key present?
         if key[0] is None:
             plan.exceptions.append(UpsertException(
-                "missing_lf_style", key, "BeProduct row has no lf_style_number"))
+                "missing_bp_style", key, "BeProduct row has no bp_style_number"))
             continue
 
         # scope check: brand & season must agree with the request
         if enforce_scope:
             bp_season = norm(bp.get("season_code"))
-            bp_brand = norm(bp.get("brands"))
+            bp_brand = norm(bp.get("brand"))
             if req_season is not None and bp_season is not None and bp_season != req_season:
                 plan.exceptions.append(UpsertException(
                     "season_mismatch", key,
@@ -396,12 +431,12 @@ def compute_orphan_marks(
 ) -> List[UpsertOp]:
     """
     Find DTC rows in THIS request whose BeProduct style has moved to a DIFFERENT
-    request (its key field - LF Style#, brand or season - changed in BeProduct),
+    request (its key field - BP Style#, brand or season - changed in BeProduct),
     and produce UPDATE ops that set "Product Status" = REMOVED_STATUS ("(removed)").
 
     This does NOT delete rows: it flags the stale row so the DTC user sees an
     invalid status and knows the row migrated to another request. We only mark a
-    row when its (LF Style#, Color / Wash) key:
+    row when its (BP Style#, Color / Wash) key:
       * is NOT present in this request's current BeProduct rows, AND
       * IS present in BeProduct under a different request (moved_elsewhere_keys).
     Rows that are simply user-entered / unrelated (key not seen anywhere in
@@ -409,10 +444,10 @@ def compute_orphan_marks(
 
     Args:
         dtc_rows:             current DTC rows for this request (need rowId/rowIndex,
-                              "LF Style#", "Color / Wash", "Product Status").
-        bp_keys_this_request: set of (lf, color) keys present in BeProduct for THIS
+                              "BP Style#", "Color / Wash", "Product Status").
+        bp_keys_this_request: set of (bp_style, color) keys present in BeProduct for THIS
                               request (already norm()'d).
-        moved_elsewhere_keys: set of (lf, color) keys present in BeProduct under a
+        moved_elsewhere_keys: set of (bp_style, color) keys present in BeProduct under a
                               DIFFERENT request (already norm()'d).
 
     Returns:

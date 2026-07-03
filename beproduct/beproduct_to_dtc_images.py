@@ -21,7 +21,8 @@ state and never acts on stale data.
 
 Workflow (per in-scope resolved request):
   1. Reload the sheet live and note, per row, whether "Style Image" is populated.
-  2. Match each row to its BeProduct staging row on (LF Style#, Color / Wash).
+  2. Match each row to its BeProduct staging row on (BP Style#, Color / Wash).
+     Phase 6: match key changed from (LF Style#, ...) to (BP Style#, ...).
   3. For rows that are blank-image AND whose BeProduct row has a valid
      front_image_url: download the image from the BeProduct CDN, then POST it to
      the DTC image endpoint at that rowIndex / columnname="Style Image".
@@ -77,6 +78,8 @@ SYNC_LOG_SCHEMA = StructType([
     StructField("dtc_request_name", StringType()),
     StructField("request_id", StringType()),
     StructField("operation", StringType()),
+    # Phase 6 note: this column now stores bp_style_number values (renamed in BP).
+    # Column kept as "lf_style_number" for Delta schema backward compatibility.
     StructField("lf_style_number", StringType()),
     StructField("color", StringType()),
     StructField("match_key", StringType()),

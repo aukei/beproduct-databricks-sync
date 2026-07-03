@@ -22,7 +22,7 @@ from sync import phase1
 
 API_KEY = "49A127E0942071B4BD440DD00386C6B3"
 REQUEST_ID = "6a26581854e92e7acd8fa71b"   # KTB FW26 Wrangler (sacrificial)
-SENTINEL_LF = "ZZ_PHASE1_LIVE_TEST"
+SENTINEL_BP = "ZZ_PHASE1_LIVE_TEST"  # Phase 6: was SENTINEL_LF
 
 failures = []
 def check(c, m):
@@ -43,28 +43,30 @@ print(f"Current rows: {len(rows)} | view cols: {len(allowed)}")
 # would otherwise resolve the update to a different physical row - correct per the
 # key, but not what this single-row assertion expects).
 from collections import Counter
+# Phase 6: match key column is now "BP Style#" (was "LF Style#").
 key_counts = Counter(
-    (phase1.norm(r.get("LF Style#")), phase1.norm(r.get("Color / Wash"))) for r in rows
+    (phase1.norm(r.get("BP Style#")), phase1.norm(r.get("Color / Wash"))) for r in rows
 )
 target = next(
     r for r in rows
-    if phase1.norm(r.get("LF Style#")) and phase1.norm(r.get("Color / Wash"))
-    and key_counts[(phase1.norm(r.get("LF Style#")), phase1.norm(r.get("Color / Wash")))] == 1
+    if phase1.norm(r.get("BP Style#")) and phase1.norm(r.get("Color / Wash"))
+    and key_counts[(phase1.norm(r.get("BP Style#")), phase1.norm(r.get("Color / Wash")))] == 1
 )
 orig_status = target.get("Product Status")
 new_status = "Proto" if phase1.norm(orig_status) != "Proto" else "Production"
-print(f"Update target rowId={target['rowId']} LF={target['LF Style#']!r} "
+print(f"Update target rowId={target['rowId']} BP Style#={target['BP Style#']!r} "
       f"Product Status {orig_status!r} -> {new_status!r}")
 
 bp_rows = [
     {  # UPDATE existing row
-        "lf_style_number": target["LF Style#"], "color": target["Color / Wash"],
-        "brands": scope["brand"], "season_code": scope["season_code"],
+        # Phase 6: use bp_style_number (from "BP Style#" DTC column) and brand.
+        "bp_style_number": target["BP Style#"], "color": target["Color / Wash"],
+        "brand": scope["brand"], "season_code": scope["season_code"],
         "product_status": new_status,
     },
     {  # INSERT new sentinel row
-        "lf_style_number": SENTINEL_LF, "color": "TestColor",
-        "brands": scope["brand"], "season_code": scope["season_code"],
+        "bp_style_number": SENTINEL_BP, "color": "TestColor",
+        "brand": scope["brand"], "season_code": scope["season_code"],
         "product_status": "Proto", "description": "phase1 live test",
     },
 ]
@@ -88,7 +90,7 @@ check(resp_u.get("status_code") == 204 and resp_i.get("status_code") == 204,
 time.sleep(2)
 after = c.get_sheet(sid, vid)["sheetData"]
 upd_row = next((r for r in after if r.get("rowId") == target["rowId"]), None)
-ins_row = next((r for r in after if phase1.norm(r.get("LF Style#")) == SENTINEL_LF), None)
+ins_row = next((r for r in after if phase1.norm(r.get("BP Style#")) == SENTINEL_BP), None)
 check(upd_row is not None and phase1.norm(upd_row.get("Product Status")) == phase1.norm(new_status),
       "UPDATE applied on live DTC row")
 check(ins_row is not None, "INSERT created a new live DTC row")
@@ -110,7 +112,7 @@ final = c.get_sheet(sid, vid)["sheetData"]
 rb = next((r for r in final if r.get("rowId") == target["rowId"]), None)
 check(rb is not None and phase1.norm(rb.get("Product Status")) == phase1.norm(orig_status),
       "update reverted to original Product Status")
-check(not any(phase1.norm(r.get("LF Style#")) == SENTINEL_LF for r in final),
+check(not any(phase1.norm(r.get("BP Style#")) == SENTINEL_BP for r in final),
       "inserted sentinel deleted")
 
 print("\n" + "=" * 70)

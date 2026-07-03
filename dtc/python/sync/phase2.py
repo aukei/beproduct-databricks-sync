@@ -7,11 +7,17 @@ partition these columns are NEVER pushed BeProduct -> DTC (see sync/phase1.py):
 
     DTC column                  BeProduct target                       level
     --------------------------  -------------------------------------  --------
-    Legacy Code                 fieldId "customer_style_number"        header
+    Customer Style#             fieldId "customer_style_number"        header
     Main Vendor (Sampling)      fieldId "parent_vendor"                header
     Main Factory (Sampling)     fieldId "factory"                      header
     Lot#                        fieldId "drawing_number_walmart"       colorway
     Main Factory Customer ID    (no BeProduct field yet -> SKIPPED)    -
+
+Phase 6 update (2026-06-26):
+    "Legacy Code" DTC column was REMOVED from REVERSE_HEADER_FIELDS. It is now
+    a BeProduct->DTC field (populated from BP's customer_style_number in Phase 1).
+    The new DTC column "Customer Style#" takes the DTC->BP role for
+    customer_style_number.
 
 The actual write uses the BeProduct SDK in one call per style:
 
@@ -28,7 +34,8 @@ Input contract (one dict per DTC row, already joined to BeProduct identity):
     {
         "beproduct_style_id": "<style header id>",   # required
         "colorway_id":        "<colorway id>" | None, # required only for Lot#
-        "lf_style_number":    "...", "color": "...",  # for logging / exceptions
+        "bp_style_number":    "...", "color": "...",  # for logging / exceptions
+                                                      # Phase 6: was lf_style_number
         "dtc": { "<DTC column>": value, ... },        # incoming DTC values
         "bp":  { "<DTC column>": value, ... },        # current BeProduct values
                                                       #   (optional; enables NOOP diff)
@@ -55,7 +62,10 @@ from .phase1 import norm  # reuse the same normalisation rules
 # ---------------------------------------------------------------------------
 
 REVERSE_HEADER_FIELDS: Dict[str, str] = {
-    "Legacy Code": "customer_style_number",
+    # Phase 6: "Legacy Code" removed (now BP->DTC in phase1.FIELD_MAPPING).
+    # "Customer Style#" DTC column decided NOT to be created; no DTC->BP for
+    # customer_style_number. Flow is single-direction: BP customer_style_number
+    # -> DTC "Legacy Code" only.
     "Main Vendor (Sampling)": "parent_vendor",
     "Main Factory (Sampling)": "factory",
 }
@@ -67,6 +77,11 @@ REVERSE_COLORWAY_FIELDS: Dict[str, str] = {
 
 # DTC columns with no BeProduct target yet: never written, reported if non-blank.
 UNSUPPORTED_FIELDS = ("Main Factory Customer ID",)
+
+# NOTE: "Legacy Code" and "Customer Style#" are intentionally absent from all
+# Phase 2 dicts. "Legacy Code" is BeProduct->DTC only (see phase1.FIELD_MAPPING),
+# populated from BP customer_style_number. "Customer Style#" DTC column is not
+# being created; there is no DTC->BP path for customer_style_number.
 
 ALL_PHASE2_COLUMNS = (
     tuple(REVERSE_HEADER_FIELDS) + tuple(REVERSE_COLORWAY_FIELDS) + UNSUPPORTED_FIELDS
@@ -139,7 +154,7 @@ def build_beproduct_updates(
 
     for r in rows:
         style_id = r.get("beproduct_style_id")
-        key = (norm(r.get("lf_style_number")), norm(r.get("color")))
+        key = (norm(r.get("bp_style_number")), norm(r.get("color")))  # Phase 6: was lf_style_number
         if not style_id:
             plan.exceptions.append(Phase2Exception(
                 "missing_style_id", None,

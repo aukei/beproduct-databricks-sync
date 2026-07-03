@@ -4,6 +4,40 @@ Verified live against the BeProduct "KTB" folder schema on 2026-06-17
 (api.style.folder_schema / folder_colorway_schema, folder id
 37dcc63a-4754-4bb8-8d34-8c07a4145fcd).
 
+Phase 6 structural update (2026-06-26):
+  - header_number field renamed in BP from "LF Style Number" → "BP Style Number".
+    The field_id (header_number) and data values are UNCHANGED.
+  - New BP field lf_style_number (name "LF STYLE NUMBER"): separate from header_number.
+    Will be populated by upstream integration; currently empty for most styles.
+    Feeds the EXISTING DTC "LF Style#" column (NOT a new DTC column).
+  - New BP field brand_hk (name "Brand"): single-value brand string used in the
+    composite key. Replaces brands_multi ("BRANDS") in the key. Ignore field_id 'brand'
+    (old BRAND field, single-value legacy, not to be confused with brand_hk).
+  - Composite key target: [Customer, BP Style# (header_number), SeasonCode, Brand (brand_hk)]
+  - In-request row match key target: ("BP Style#", "Color / Wash")
+  - NO new BeProduct "Legacy Code" field. The existing customer_style_number field
+    (CUSTOMER STYLE NUMBER / PLM #) is what DTC calls "Legacy Code". Populated by
+    upstream integration; flows BP→DTC optional (was DTC→BP before Phase 6).
+  - DTC "Customer Style#" column: DECIDED NOT TO CREATE (2026-07-02). No DTC→BP
+    path for customer_style_number. Removed from phase2.REVERSE_HEADER_FIELDS.
+  - "BP STYLE#" (new DTC column, PENDING): will hold header_number (BP Style Number).
+    This is the new in-request match key once created. Until then MATCH_KEY_COLS is
+    set to ("BP Style#", ...) in code but will fail to match until column exists and
+    DTC admin migrates "LF Style#" data into "BP Style#".
+
+PENDING DTC column creation (as of 2026-07-02, confirmed by scanning all 75 active KTB requests):
+  - "BP Style#"  — BLOCKER for match key switch; sync produces missing_bp_style until created
+  - "Gender"     — dormant Phase 1 mapping until created
+  - "Supplier"   — dormant Phase 1 default-fill until created
+  NOT PENDING (already exist in the view, just blank on some/older requests):
+  - "Legacy Code", "Garment Finish", "Tech Pack Stage", "Main Vendor (Sampling)"
+  NOTE: DTC "Customer Style#" is NOT being created (decision 2026-07-02).
+  NOTE: GET /v1/views/{viewId} returns 403 for the sync API key (confirmed for all view IDs
+  including the document-level template 6a3907f6df772fd797ee5b7c). Per-request view ID used
+  for sheet data access remains 69f04983501f3d9cf4fc379c. Since the view definition endpoint
+  is inaccessible, allowed_cols uses a data-scan union with FALLBACK_COLS so Phase-1-owned
+  columns are always sent even when blank on a fresh sheet.
+
 JSONPath conventions (against a Style record from api.style.attributes_list):
   - Header fields live in an ARRAY: headerData.fields[] = [{id, name, type, value}, ...]
     Select by the stable fieldId, e.g.   headerData.fields[id="style_status"].value
@@ -17,11 +51,15 @@ JSONPath conventions (against a Style record from api.style.attributes_list):
 Sync direction (one-way per field; see AGENTS.md "field mapping" for code locations):
   BeProduct -> DTC (Phase 1, phase1.FIELD_MAPPING):
     Product Status, Style Description, Class, Sub Class, Division, Brand,
-    Garment Finish, Tech Pack Stage, Fabric Group, Placement
+    Garment Finish, Tech Pack Stage, Fabric Group, Placement, Gender (pending DTC col);
+    BP Style# (new key; pending DTC col), LF Style# (optional), Legacy Code (optional);
+    Supplier (default-fill "Supplier" when DTC cell blank; pending DTC col)
   DTC -> BeProduct (Phase 2, phase2.REVERSE_*):
-    Legacy Code, Lot#, Main Vendor (Sampling), Main Factory (Sampling),
+    Lot#, Main Vendor (Sampling), Main Factory (Sampling),
     Main Factory Customer ID (no BeProduct target yet -> skipped)
-  key (used for matching, not overwritten): LF Style#, Color / Wash
+  [REMOVED Phase 6]: "Legacy Code" DTC→BP. "Customer Style#" DTC column not created.
+  key (used for matching, not overwritten): BP Style# + Color / Wash (in-request);
+    [Customer, BP Style#, SeasonCode, Brand] (composite/request-routing)
   BeProduct -> DTC image only (Phase 3, phase3 / beproduct_to_dtc_images):
     Style Image (binary; uploaded via the multipart images endpoint, only when
     the DTC cell is blank and BeProduct has a valid front_image_url. NEVER
@@ -31,16 +69,17 @@ DTC column                 | BeProduct field name           | fieldId           
 ---------------------------+--------------------------------+--------------------------+------------------------------------------------------------+------------------------------------------------------------
 Product Status             | PRODUCT STATUS                 | style_status             | headerData.fields[id="style_status"].value                 |
 Style Image                | (front image)                  | -                        | headerData.frontImage.origin                               | Phase 3 only: binary upload to blank cells (images endpoint); excluded from Phase 1 PATCH
-LF Style#                  | LF Style Number                | header_number            | headerData.fields[id="header_number"].value                | match key
+BP Style#                  | BP Style Number                | header_number            | headerData.fields[id="header_number"].value                | TARGET match key. DTC column PENDING CREATION. Field renamed from "LF Style Number" to "BP Style Number" in BP (field_id unchanged). Code already targets this; sync is blocked until DTC creates column + migrates "LF Style#" data.
+LF Style#                  | LF STYLE NUMBER                | lf_style_number          | headerData.fields[id="lf_style_number"].value              | OPTIONAL BP→DTC. Existing DTC column. Receives the new BP lf_style_number field value (will be populated by upstream integration; currently empty). NOT a new DTC column.
 Active / Dropped           | (blank)                        | -                        | (not sourced from BeProduct)                               |
-Legacy Code                | CUSTOMER STYLE NUMBER / PLM #  | customer_style_number    | headerData.fields[id="customer_style_number"].value        | name has a trailing space before "#"
+Legacy Code                | CUSTOMER STYLE NUMBER / PLM #  | customer_style_number    | headerData.fields[id="customer_style_number"].value        | CHANGED to BP→DTC (optional). Source = existing BP field customer_style_number; no new BP "Legacy Code" field. Populated by upstream integration; sent to DTC when non-blank.
+Gender                     | GENDER                         | gender                   | headerData.fields[id="gender"].value                       | Phase 6: BP→DTC. DTC column PENDING CREATION. Values: Ladies/Mens/Girls/None/'' (validated live).
+Supplier                   | (constant, not from BP)        | -                        | (hardcoded default "Supplier")                             | Phase 6: new DTC column PENDING CREATION. Default-fill only: written as "Supplier" when DTC cell blank; existing DTC values never overwritten (DEFAULT_FILL_COLS in phase1).
 Style Description          | DESCRIPTION                    | header_name              | headerData.fields[id="header_name"].value                  |
 Class                      | PRODUCT CATEGORY               | product_category         | headerData.fields[id="product_category"].value             |
 Sub Class                  | PRODUCT SUB CATEGORY           | product_sub_category     | headerData.fields[id="product_sub_category"].value         |
 Division                   | Division                       | division_hk              | headerData.fields[id="division_hk"].value                  | name is mixed-case "Division" (not "DIVISION")
-Brand                      | BRANDS                         | brands_multi             | headerData.fields[id="brands_multi"].value[0]              | MultiSelect; value is a list of plain STRINGS. Setup
-                           |                                |                          |                                                            | guarantees exactly 1 selection -> take [0] (NOT [0].value).
-                           |                                |                          |                                                            | Guard for empty list ([] occurs on some styles).
+Brand                      | Brand                          | brand_hk                 | headerData.fields[id="brand_hk"].value                     | NEW key field: single-value string. Use brand_hk, NOT field_id='brand' (old legacy BRAND field) and NOT brands_multi (multi-select BRANDS). Constant per DTC request.
 Color / Wash               | COLOR NAME                     | color_name               | colorways[].colorName                                      | match key; exposed as top-level colorName per colorway
 Garment Finish             | GARMENT FINISH                 | garment_finish           | headerData.fields[id="garment_finish"].value               |
 LP Ref#                    | (blank)                        | -                        | (not sourced from BeProduct)                               |
@@ -55,6 +94,7 @@ Main Factory (Sampling)    | FACTORY                        | factory           
 Main Factory Customer ID   | (blank)                        | -                        | (not sourced from BeProduct)                               |
 Fabric Group               | MAIN MATERIAL CONTENT          | core_main_material       | headerData.fields[id="core_main_material"].value           | type LabelMaterial (value is structured, not a plain string)
 Placement                  | MAIN MATERIAL CONTENT          | core_main_material       | headerData.fields[id="core_main_material"].value           | same source field as Fabric Group (confirm intended)
+BP STYLE#                  | BP Style Number                | header_number            | headerData.fields[id="header_number"].value                | NEW DTC column to hold BP's style number. Populated BP→DTC. Same source as "BP Style#" match key column.
 
 Last-minute schema changes captured here (2026-06-17):
   1. BRANDS (and CUSTOMER) are MultiSelect lists of plain strings; with the
@@ -64,3 +104,35 @@ Last-minute schema changes captured here (2026-06-17):
      (colorways[].fields.drawing_number_walmart). It is filled by the DTC->BeProduct
      Phase 2 push, hence empty in BeProduct now. The old header-level "Lot Code" is
      deprecated and must not be read.
+
+Phase 6 changes (2026-06-26, validated live):
+  3. header_number field RENAMED from "LF Style Number" to "BP Style Number" in
+     BeProduct. Field_id and data values unchanged. The old ktb_styles column
+     "lf_style_number" (populated from header_number) is renamed to "bp_style_number".
+  4. New BeProduct field: lf_style_number (field_id "lf_style_number", name "LF STYLE
+     NUMBER"). Separate from header_number. Currently empty for most styles; will be
+     populated by upstream integration. Pushed optionally to EXISTING DTC "LF Style#".
+  5. New BeProduct field: brand_hk (field_id "brand_hk", name "Brand"). Single-value
+     string. Used as the Brand in the composite key. brands_multi ("BRANDS") is retained
+     in ktb_styles for reference but is no longer the key field.
+  6. NO new BeProduct "Legacy Code" field. The existing customer_style_number
+     (CUSTOMER STYLE NUMBER / PLM #) is the "Legacy Code" source. It will be populated
+     by upstream integration; flows BP→DTC (was DTC→BP before Phase 6).
+   7. DTC "Customer Style#" column: DECIDED NOT TO CREATE (2026-07-02). Removed from
+      phase2.REVERSE_HEADER_FIELDS. No DTC→BP for customer_style_number.
+   8. DTC "BP Style#" (NEW COLUMN, PENDING): BP→DTC, carries header_number value; new
+      in-request match key once created. Code already writes to this column; sync will
+      fail to match existing rows until DTC creates column and migrates data from "LF Style#".
+   9. BeProduct styles with Product Status = "Finalized" are EXCLUDED from DTC sync
+      (filtered in beproduct_style_sync.py before app enrichment). Valid sync statuses:
+      Proto, Pre-Line, SMS, Production (any status not equal to "Finalized").
+  10. New DTC column "Gender" (PENDING): BP→DTC from BP field_id `gender`. Values:
+      Ladies/Mens/Girls/'' (confirmed live). Code staged in FIELD_MAPPING + INTERESTED_FIELDS.
+  11. New DTC column "Supplier" (PENDING): default-fill "Supplier" when DTC cell blank;
+      never overwrites existing DTC values (DEFAULT_FILL_COLS in phase1). Staged as
+      lit("Supplier") in transform. Not sourced from any BeProduct field.
+  12. DTC view definition GET /v1/views/{viewId} returns 403 for all view IDs with the
+      current sync API key (confirmed 2026-07-02, including document-level template
+      6a3907f6df772fd797ee5b7c and per-request view 69f04983501f3d9cf4fc379c). The
+      allowed_cols fallback now UNIONs the data-scan result with FALLBACK_COLS so
+      Phase-1-owned columns that are blank on a fresh sheet are still allowed in PATCH.

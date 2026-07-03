@@ -35,6 +35,9 @@
 
 - BeProduct has full timestamp with timezone (UTC). DTC output timestamp as UTC (on retrieve). DTC expects input timestamp in user profile timezone, treat as +0800 HKT in current setup.
 
+- set http proxy to http://100.64.0.7:8888 before running DTC API tests.
+
+
 # Phase 1 $25
 
 ## Objectives
@@ -250,13 +253,20 @@ verify @beproduct/beproduct_master_data_sync.py  does it still work against curr
 - Directory "update" is actually massaging another table to upsert record to this directory master. Add a cell containing a template merge SQL that cater the modifiedAt logic, and admin can supply the actual merge statement later.
 
 
-# Phase 6 Structural clean up
-- BeProduct Style contains a new field id = "IT-STYLE-KEY"
-- This replace "LF_STYLE#" in the composite key that identify a Style. This field also get created on DTC WIP doc and other downstream pipeline. i.e. (Customer, IT-STYLE-KEY, Seasoncode, Brand) is style composite key.
-- "LF STYLE#" becomes an optional field, together with 'Customer Style #" both should be populated into DTC. "Customer Style #" is also a new col in DTC WIP document.
-- Update beproduct and DTC sync pipeline. These 3 fields are from BeProduct to DTC only, Turned read only in DTC.
+# Phase 6 Structural clean up $12
+- BeProduct Style contains 2 new fields LABEL = "BP STYLE NUMBER", "Brand", no "Legacy code" 
+- "BP STYLE NUMBER"  replace "LF_STYLE#" in the composite key that identify a Style.
+    - BP "BP Style Number" -> DTC "BP Style#"
+- "Brand" not "Brands" in the composite key. Its field_id is 'brand_hk'. Ignore field_id 'brand'.
+- i.e. composite key is now [Customer, BP Style#, seasoncode, Brand]
+- "LF STYLE NUMBER" is now an optional field on Beproduct Style. Both "LF STYLE#" and "Legacy Code" are now populated from BeProduct to DTC. They are both optional fields (i.e. can be blank). 
+    - BP "Customer Style#" -> DTC "Legacy Code"
+    - BP "LF Style#" -> DTC "LF Style#"
+- add BeProduct style "Gender" -> DTC "Gender"
+- DTC WIP document also add field "BP STYLE#" to hold BeProduct's value.
+- Validate above with BeProduct Data. If good, update all related sync pipeline and relevant docs sections.
 
-# Phase 6 Preparation of Costing sheet
+# Phase 7 Preparation of Costing sheet
 - In addition to WIP document requests, Retrieve also Requests of DTC document "<Customer> LinePlan" e.g. "KTB LinePlan", using view "LINEPLAN_ITS_USE" (preferred) or "Full" if former not exists.
 - Once WIP and LinePlan are in Databricks, they are joined with "Lineplan Ref #" to from a "Costing_Chart":
     - transpose [(Main Vendor, Main Factory), (Vendor 1, Factory 1), (Vendor 2, Factory 2), (Vendor 3, Factory 3)] into 4 rows [Vendor, Factory]

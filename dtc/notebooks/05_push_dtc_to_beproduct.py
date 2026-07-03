@@ -7,19 +7,23 @@ Reverse of Phase 1. A small set of DTC-OWNED columns are written from the pulled
 DTC data back into the corresponding BeProduct style:
 
     DTC column                  BeProduct target (fieldId)             level
-    Legacy Code                 customer_style_number                  header
+    Customer Style#             customer_style_number                  header
     Main Vendor (Sampling)      parent_vendor                          header
     Main Factory (Sampling)     factory                                header
     Lot#                        drawing_number_walmart                 colorway
     Main Factory Customer ID    (no target yet -> skipped/logged)      -
 
+Phase 6 update (2026-06-26):
+    "Legacy Code" replaced by "Customer Style#" as the DTC->BP vehicle for
+    customer_style_number. "Legacy Code" is now BeProduct->DTC (Phase 1).
+
 Inputs (already produced by the daily pipeline):
   - DTC pulled table:  lft.beproduct.dtc_wip_<customer>   (pull_requests_to_delta)
-        -> request_reference, lf_style_number, color_wash, data_json, row_id
+        -> request_reference, bp_style_number, color_wash, data_json, row_id
   - BeProduct staging: lft.beproduct.<staging_table>      (beproduct_to_dtc_transform)
-        -> dtc_request_name, lf_style_number, color, colorway_id, beproduct_style_id
+        -> dtc_request_name, bp_style_number, color, colorway_id, beproduct_style_id
 
-Identity resolution: DTC row (request, lf, color) -> BeProduct (style_id, colorway_id)
+Identity resolution: DTC row (request, bp_style, color) -> BeProduct (style_id, colorway_id)
 via the staging table. Current BeProduct values are read LIVE (attributes_get) per
 candidate style so NOOP diffing is accurate (the staging 'lot_code' is the legacy
 header value, not the colorway Lot#). Writes go through the BeProduct SDK:
@@ -67,6 +71,8 @@ SYNC_LOG_SCHEMA = StructType([
     StructField("customer", StringType()),
     StructField("beproduct_style_id", StringType()),
     StructField("colorway_id", StringType()),
+    # Phase 6 note: this column now stores bp_style_number values (renamed in BP).
+    # Column kept as "lf_style_number" for Delta schema backward compatibility.
     StructField("lf_style_number", StringType()),
     StructField("color", StringType()),
     StructField("dtc_request_name", StringType()),
@@ -137,17 +143,18 @@ LOG_COLS = ["log_time", "run_id", "environment", "customer", "beproduct_style_id
 
 # COMMAND ----------
 
-# Identity map from staging: (request, norm lf, norm color) -> (style_id, colorway_id)
+# Identity map from staging: (request, norm bp_style, norm color) -> (style_id, colorway_id)
+# Phase 6: match key is now bp_style_number (was lf_style_number).
 try:
     sdf = spark.table(staging_full).select(
-        "dtc_request_name", "lf_style_number", "color", "colorway_id", "beproduct_style_id")
+        "dtc_request_name", "bp_style_number", "color", "colorway_id", "beproduct_style_id")
 except Exception as e:
     raise RuntimeError(f"Cannot read staging table {staging_full}: {e}")
 
 identity = {}
 for r in sdf.collect():
-    key = (r["dtc_request_name"], phase1.norm(r["lf_style_number"]), phase1.norm(r["color"]))
-    # last write wins; staging keys are unique per (request, lf, color)
+    key = (r["dtc_request_name"], phase1.norm(r["bp_style_number"]), phase1.norm(r["color"]))
+    # last write wins; staging keys are unique per (request, bp_style, color)
     identity[key] = (r["beproduct_style_id"], r["colorway_id"])
 print(f"Staging identity rows: {len(identity)}")
 
@@ -161,7 +168,7 @@ except Exception as e:
     dbutils.notebook.exit("NO_DTC_TABLE")
 
 dtc_rows = ddf.select(
-    "request_reference", "lf_style_number", "color_wash", "row_id", "data_json"
+    "request_reference", "bp_style_number", "color_wash", "row_id", "data_json"
 ).collect()
 print(f"DTC rows pulled: {len(dtc_rows)}")
 
@@ -169,7 +176,7 @@ joined = []        # phase2 input rows
 unmatched = 0
 for r in dtc_rows:
     req = r["request_reference"]
-    lf = phase1.norm(r["lf_style_number"])
+    bp_style = phase1.norm(r["bp_style_number"])    # Phase 6: was lf_style_number
     color = phase1.norm(r["color_wash"])
     try:
         full = json.loads(r["data_json"]) if r["data_json"] else {}
@@ -179,17 +186,17 @@ for r in dtc_rows:
     # skip rows with nothing to push
     if not any(phase1.norm(v) is not None for v in dtc_vals.values()):
         continue
-    ident = identity.get((req, lf, color))
+    ident = identity.get((req, bp_style, color))
     if not ident:
         unmatched += 1
-        log(None, None, lf, color, req, r["row_id"], "match", "UNMATCHED", "error",
+        log(None, None, bp_style, color, req, r["row_id"], "match", "UNMATCHED", "error",
             "no_beproduct_identity",
             "DTC row has no matching BeProduct staging (style moved/not in BeProduct?)")
         continue
     style_id, colorway_id = ident
     joined.append({
         "beproduct_style_id": style_id, "colorway_id": colorway_id,
-        "lf_style_number": lf, "color": color,
+        "bp_style_number": bp_style, "color": color,       # Phase 6: was lf_style_number
         "_req": req, "_row_id": r["row_id"], "dtc": dtc_vals,
     })
 
@@ -242,7 +249,7 @@ for ex in plan.exceptions:
 calls = phase2.to_sdk_calls(plan)
 print(f"Styles to update: {len(calls)}")
 
-# Map style_id -> a representative joined row (for logging lf/req).
+# Map style_id -> a representative joined row (for logging bp_style/req).
 rep = {}
 for j in joined:
     rep.setdefault(j["beproduct_style_id"], j)
@@ -258,14 +265,14 @@ for c in calls:
             api.style.attributes_update(
                 header_id=sid, fields=c["fields"], colorways=c["colorways"])
         ok += 1
-        log(sid, None, r.get("lf_style_number"), r.get("color"), r.get("_req"),
+        log(sid, None, r.get("bp_style_number"), r.get("color"), r.get("_req"),
             r.get("_row_id"), "push", "UPDATE", "ok",
             "dry_run" if dry_run else "",
             f"header={len(c['fields'])} colorways={len(c['colorways'])}",
             {"fields": c["fields"], "colorways": c["colorways"]})
     except Exception as e:
         failed += 1
-        log(sid, None, r.get("lf_style_number"), r.get("color"), r.get("_req"),
+        log(sid, None, r.get("bp_style_number"), r.get("color"), r.get("_req"),
             r.get("_row_id"), "push", "UPDATE", "error", "attributes_update_failed",
             str(e)[:300], {"fields": c["fields"], "colorways": c["colorways"]})
 

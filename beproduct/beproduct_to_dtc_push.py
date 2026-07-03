@@ -64,6 +64,8 @@ SYNC_LOG_SCHEMA = StructType([
     StructField("dtc_request_name", StringType()),
     StructField("request_id", StringType()),
     StructField("operation", StringType()),
+    # Phase 6 note: this column now stores bp_style_number values (renamed in BP).
+    # Column kept as "lf_style_number" for Delta schema backward compatibility.
     StructField("lf_style_number", StringType()),
     StructField("color", StringType()),
     StructField("match_key", StringType()),
@@ -154,6 +156,12 @@ connector = DTCConnector(api_key=api_key, environment=environment, workspace_nam
 # validated to exist in the KTB WIP WIP_ITS_USE view.
 FALLBACK_COLS = {c for c in phase1.FIELD_MAPPING.values() if c != phase1.STYLE_IMAGE_COL}
 
+# NOTE: GET /v1/views/{viewId} returns 403 for the API key used by this job;
+# get_view_column_names() falls back to a data-scan of sheet cells. This misses
+# columns that exist in the view definition but are blank in all current rows
+# (e.g. "Garment Finish" on a fresh request). Fix: UNION the data-scan result
+# with FALLBACK_COLS so Phase-1-owned columns are always allowed.
+
 LOG_COLS = ["log_time", "run_id", "stage", "environment", "dtc_request_name", "request_id",
             "operation", "lf_style_number", "color", "match_key", "status", "reason",
             "detail", "payload"]
@@ -175,13 +183,14 @@ inserted_request_ids = set()  # request_ids that had at least one successful INS
 
 # Global live-key map for orphan / moved-key detection (requirement: point 1).
 # Built from the FULL staging (all live BeProduct rows, NOT delta-filtered) so we
-# can tell when a (LF Style#, Color) key has MOVED to a different request because
-# a key field (LF Style#, brand or season) changed in BeProduct. A DTC row left
+# can tell when a (BP Style#, Color) key has MOVED to a different request because
+# a key field (BP Style#, brand or season) changed in BeProduct. A DTC row left
 # behind in the old request is then flagged Product Status="(removed)".
+# Phase 6: key column changed from lf_style_number to bp_style_number.
 key_to_requests = {}
 for r in (spark.table(staging_full)
-          .select("dtc_request_name", "lf_style_number", "color").collect()):
-    k = (phase1.norm(r["lf_style_number"]), phase1.norm(r["color"]))
+          .select("dtc_request_name", "bp_style_number", "color").collect()):
+    k = (phase1.norm(r["bp_style_number"]), phase1.norm(r["color"]))
     if k == (None, None):
         continue
     key_to_requests.setdefault(k, set()).add(r["dtc_request_name"])
@@ -198,7 +207,10 @@ for name, m in mapping.items():
     try:
         sheet = connector.get_sheet(sheet_id, view_id)
         dtc_rows = sheet.get("sheetData", [])
-        allowed = set(connector.get_view_column_names(sheet_id, view_id)) or set(FALLBACK_COLS)
+        # Union with FALLBACK_COLS: ensures Phase-1-owned columns are always
+        # allowed even when blank on a fresh sheet (view def returns 403 so the
+        # data-scan fallback would miss them).
+        allowed = set(connector.get_view_column_names(sheet_id, view_id)) | set(FALLBACK_COLS)
     except Exception as e:
         print(f"  ❌ Failed to read DTC sheet: {e}")
         log(log_rows, name, request_id, "ERROR", None, "error", "sheet_read_failed", str(e)[:300])
@@ -338,8 +350,9 @@ if not dry_run:
             if pushed_list else F.array().cast("array<array<string>>")
         error_set = F.array(*[F.array(F.lit(a), F.lit(b), F.lit(c)) for (a, b, c) in error_list]) \
             if error_list else F.array().cast("array<array<string>>")
+        # Phase 6: sync_status update keyed by (dtc_request_name, bp_style_number, color)
         keytuple = F.array(F.col("dtc_request_name"),
-                           F.trim(F.col("lf_style_number")), F.trim(F.col("color")))
+                           F.trim(F.col("bp_style_number")), F.trim(F.col("color")))
         upd = upd.withColumn(
             "sync_status",
             F.when(F.array_contains(error_set, keytuple), F.lit("error"))
