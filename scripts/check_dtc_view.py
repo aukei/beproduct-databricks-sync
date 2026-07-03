@@ -40,9 +40,11 @@ DTC_ENV        = "uat"
 DTC_WORKSPACE  = "KTB"
 DTC_DOCUMENT   = "KTB WIP"
 
-# Document-level WIP_ITS_USE view definition ID (provided by DTC admin).
-# GET /v1/views/{DOC_VIEW_ID} should return the authoritative column list.
-DOC_VIEW_ID    = "6a3907f6df772fd797ee5b7c"
+# WIP_ITS_USE view definition ID for the KTB WIP document (per-request view).
+# Confirmed 2026-07-03: this view has 194 dynamicFields and is the one used for
+# all sync PATCH operations.  The earlier ID 6a3907f6df772fd797ee5b7c belongs to
+# the "XTS Master" document (only 8 fields) — do not use it.
+DOC_VIEW_ID    = "69f04983501f3d9cf4fc379c"
 
 # ── Phase 6 column requirements ────────────────────────────────────────────────
 # Columns the sync pipeline writes to (BeProduct → DTC, Phase 1).
@@ -267,9 +269,9 @@ print("       if a row already has a value in this column, it is never overwritt
 
 if not VIEW_DEF_COLS:
     print()
-    print("  4. View definition permission — GET /v1/views/{viewId} returns 403 for")
-    print(f"       the sync API key. Granting read access to view ID {DOC_VIEW_ID!r}")
-    print("       would allow the sync to validate column names more reliably.")
+    print("  4. View definition access — GET /v1/views/{viewId} is not accessible.")
+    print(f"       Correct KTB WIP_ITS_USE view ID: {DOC_VIEW_ID!r}")
+    print("       Ensure proxy http://100.64.0.7:8888 is set when running this script.")
 
 hr("═")
 print("  Check complete.")

@@ -189,10 +189,12 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
   - `"Customer Style#"` — removed from `phase2.REVERSE_HEADER_FIELDS` (2026-07-02). No DTC→BP
     path for `customer_style_number`. "Legacy Code" (BP→DTC only) is the only direction.
   Columns **EXIST IN VIEW** (confirmed with data in ≥7 of 75 KTB requests, just blank on fresh ones):
-  - `"Legacy Code"` (7 requests), `"Garment Finish"` (7), `"Tech Pack Stage"` (16),
-    `"Main Vendor (Sampling)"` (23). These were wrongly classified as missing earlier; the view
-    definition GET (`GET /v1/views/{viewId}`) returns **403** for the sync API key (confirmed for
-    per-request view `69f04983501f3d9cf4fc379c` and document-level template `6a3907f6df772fd797ee5b7c`).
+  - `"Legacy Code"` (9 rows), `"Garment Finish"` (69), `"Tech Pack Stage"` (141),
+    `"Main Vendor (Sampling)"` (46), `"BP Style#"` (0 — in view def, all blank),
+    `"Gender"` (0 — in view def, all blank), `"Supplier"` (2 rows).
+    All confirmed via `GET /v1/views/69f04983501f3d9cf4fc379c` → **194 dynamicFields**
+    (2026-07-03, with proxy). The earlier view ID `6a3907f6df772fd797ee5b7c` is a
+    different document ("XTS Master", 8 fields) — do not use for KTB WIP.
     `allowed_cols` in push notebook now **UNIONs** data-scan result with `FALLBACK_COLS` to avoid
     silently dropping these columns on fresh sheets where they're blank.
 
