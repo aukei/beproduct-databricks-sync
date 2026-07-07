@@ -266,7 +266,19 @@ verify @beproduct/beproduct_master_data_sync.py  does it still work against curr
 - DTC WIP document also add field "BP STYLE#" to hold BeProduct's value.
 - Validate above with BeProduct Data. If good, update all related sync pipeline and relevant docs sections.
 
-# Phase 7 Preparation of Costing sheet
+
+# phase 7 Retrieve Sample information
+For each style, of the 6 Sample apps: Proto, PreLine, SMS, Fit, PP, TOP, retrieve the list of "submits" history (if any) and populate corresponding fields on DTC rows.
+- Proto Sample - 
+- PreLine Sample -> Pre-Line Sample Submission Status
+- SMS Sample -> Development Sample Testing Status
+- Fit Sample -> 1st Fit Sample Approval Status
+- PP Sample -> 2nd Fit Sample Approval Status
+- TOP Sample - 
+Include in the field the complete list of submits info, use submitStatus and submitStatusDate of first size:[name, sizes[0].submitStatus, sizes[0].submitStatusDate] 
+
+
+# Phase 8 Preparation of Costing sheet
 - In addition to WIP document requests, Retrieve also Requests of DTC document "<Customer> LinePlan" e.g. "KTB LinePlan", using view "LINEPLAN_ITS_USE" (preferred) or "Full" if former not exists.
 - Once WIP and LinePlan are in Databricks, they are joined with "Lineplan Ref #" to from a "Costing_Chart":
     - transpose [(Main Vendor, Main Factory), (Vendor 1, Factory 1), (Vendor 2, Factory 2), (Vendor 3, Factory 3)] into 4 rows [Vendor, Factory]

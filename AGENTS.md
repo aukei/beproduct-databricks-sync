@@ -38,10 +38,11 @@ fieldId, JSONPath, sync direction. Always update it first, then the code constan
 | DTC → BeProduct (no target yet) | `UNSUPPORTED_FIELDS` | `dtc/python/sync/phase2.py` |
 | BeProduct extraction (raw → master) | `COMPULSORY_FIELDS` / `INTERESTED_FIELDS` | `beproduct/beproduct_style_sync.py` |
 | BeProduct sample-app status (title → column prefix) | `SAMPLE_APPS` | `beproduct/beproduct_style_sync.py` + `beproduct/00_init_style_app_registry.py` |
+| BeProduct sample submits → DTC (Phase 7) | `SAMPLE_SUBMIT_FIELDS` + `format_sample_field` | `dtc/python/sync/samples.py` (+ `phase1.FIELD_MAPPING`, transform staging) |
 | BeProduct → DTC transform (denormalize) | `FIELD_MAPPING` + staging `select` | `beproduct/beproduct_to_dtc_transform.py` |
 
 Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
-`dtc/tests/test_phase3.py`.
+`dtc/tests/test_phase3.py`, `dtc/tests/test_samples.py`.
 
 ### Current direction partition
 
@@ -50,6 +51,13 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
   BP Style# (new match key, pending DTC col), LF Style# (optional), Legacy Code (optional);
   Supplier (default-fill "Supplier" when blank; pending DTC col).
   **Filter**: styles with Product Status = "Finalized" are excluded from staging/DTC sync.
+- **BeProduct → DTC (Phase 7, sample submit history)**: All 6 apps now mapped.
+  Proto → "Proto Sample - Sample Status", PreLine → "Pre-line Sample - Status",
+  SMS → "SMS - Sample Status", Fit → "1st Fit Sample Approval Status",
+  PP → "2nd Fit Sample Approval Status", TOP → "TOP Sample Approval Status".
+  Each value is a JSON list of `[submit_name, submitStatus, submitStatusDate]`
+  (first size per submit). All 6 DTC columns confirmed in the 198-field view
+  (2026-07-07). Note: "Pre-line Sample - Status" uses lowercase 'l' and dash.
 - **DTC → BeProduct**: Main Vendor (Sampling) (`parent_vendor`), Main Factory
   (Sampling) (`factory`) [header]; Lot# (`drawing_number_walmart`) [colorway];
   Main Factory Customer ID (no target → skipped).
@@ -236,7 +244,12 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
 - Good verification candidates (rich sample data): `Iris - Test- Top-111` (Proto
   Approved + Fit Requested + TOP Approved), `Boy  Short Sleeve Tee` (Proto+PP),
   `LFBP-1WTP0003` (Proto+SMS), `HOODED-K263` (Proto, 27 POMs).
-- DTC push of sample status is **not yet wired** — data lands only in `ktb_styles`.
+- DTC push of sample status is **wired for all 6 apps (Phase 7)**: Proto/PreLine/SMS/Fit/PP/TOP
+  → DTC status columns via `sync.samples.format_sample_field` (transform UDF) +
+  `phase1.FIELD_MAPPING`. Each DTC cell gets a JSON list of `[submit_name,
+  submitStatus, submitStatusDate]` (first size per submit). All 6 DTC columns confirmed in
+  the 198-field view (2026-07-07). Format/selection is pure-Python + unit-tested
+  (`dtc/tests/test_samples.py`); the raw `{prefix}_sample_json` storage is unchanged.
 
 ## Decisions on record
 

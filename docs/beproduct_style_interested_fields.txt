@@ -54,6 +54,11 @@ Sync direction (one-way per field; see AGENTS.md "field mapping" for code locati
     Garment Finish, Tech Pack Stage, Fabric Group, Placement, Gender (pending DTC col);
     BP Style# (new key; pending DTC col), LF Style# (optional), Legacy Code (optional);
     Supplier (default-fill "Supplier" when DTC cell blank; pending DTC col)
+  BeProduct -> DTC (Phase 7, sample-app submit history; sync.samples.format_sample_field):
+    PreLine -> "Pre-Line Sample Submission Status", SMS -> "Development Sample Testing Status",
+    Fit -> "1st Fit Sample Approval Status", PP -> "2nd Fit Sample Approval Status".
+    Value = JSON list of [submit_name, submitStatus, submitStatusDate] (first size per submit).
+    Proto/TOP captured in ktb_styles but not yet pushed.
   DTC -> BeProduct (Phase 2, phase2.REVERSE_*):
     Lot#, Main Vendor (Sampling), Main Factory (Sampling),
     Main Factory Customer ID (no BeProduct target yet -> skipped)
@@ -95,6 +100,10 @@ Main Factory Customer ID   | (blank)                        | -                 
 Fabric Group               | MAIN MATERIAL CONTENT          | core_main_material       | headerData.fields[id="core_main_material"].value           | type LabelMaterial (value is structured, not a plain string)
 Placement                  | MAIN MATERIAL CONTENT          | core_main_material       | headerData.fields[id="core_main_material"].value           | same source field as Fabric Group (confirm intended)
 BP STYLE#                  | BP Style Number                | header_number            | headerData.fields[id="header_number"].value                | NEW DTC column to hold BP's style number. Populated BP→DTC. Same source as "BP Style#" match key column.
+Pre-Line Sample Submission Status | PreLine Sample app       | preline_sample (app)     | app_get(PreLine).data.submits[]  (first size per submit)   | Phase 7 BP→DTC. Value = JSON list [submit_name, submitStatus, submitStatusDate]. staging col preline_sample_status. sync.samples.format_sample_field.
+Development Sample Testing Status | SMS Sample app           | sms_sample (app)         | app_get(SMS).data.submits[]      (first size per submit)   | Phase 7 BP→DTC. staging col sms_sample_status.
+1st Fit Sample Approval Status | Fit Sample app             | fit_sample (app)         | app_get(Fit).data.submits[]      (first size per submit)   | Phase 7 BP→DTC. staging col fit_sample_status.
+2nd Fit Sample Approval Status | PP Sample app              | pp_sample (app)          | app_get(PP).data.submits[]       (first size per submit)   | Phase 7 BP→DTC. staging col pp_sample_status.
 
 Last-minute schema changes captured here (2026-06-17):
   1. BRANDS (and CUSTOMER) are MultiSelect lists of plain strings; with the

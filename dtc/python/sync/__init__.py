@@ -15,5 +15,6 @@ Databricks. Notebooks supply the Spark/IO wrappers around them.
 from . import phase1
 from . import phase2
 from . import registry
+from . import samples
 
-__all__ = ["phase1", "phase2", "registry"]
+__all__ = ["phase1", "phase2", "registry", "samples"]

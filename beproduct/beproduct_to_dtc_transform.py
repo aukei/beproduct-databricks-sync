@@ -40,15 +40,26 @@ print("=" * 80)
 from pyspark.sql.functions import (
     explode, col, lit, concat, concat_ws, current_timestamp, 
     current_date, array, when, coalesce, upper, trim, size, right, substring,
-    from_json
+    from_json, udf
 )
 from pyspark.sql.types import (
     StructType, StructField, StringType, TimestampType, ArrayType
 )
-import logging
+import logging, sys
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Phase 7: pure-Python sample-app formatter (unit-tested in dtc/tests/test_samples.py).
+# The DTC python modules are deployed to /Workspace/Repos/beproduct-sync/DTC/python.
+for _p in ("/Workspace/Repos/beproduct-sync/DTC/python",
+           "/Workspace/Repos/beproduct-sync/dtc/python"):
+    if _p not in sys.path:
+        sys.path.append(_p)
+from sync.samples import format_sample_field, SAMPLE_SUBMIT_FIELDS
+
+# Spark UDF wrapper: raw {prefix}_sample_json (JSON string) -> DTC status string.
+format_sample_udf = udf(format_sample_field, StringType())
 
 # Configure parameters
 dbutils.widgets.text("catalog", "lft", "Catalog Name")
@@ -345,7 +356,22 @@ try:
         "dtc_request_name",
         concat_ws(" ", lit(customer_code), col("season_code"), col("brand"))
     )
-    
+
+    # Phase 7: format each sample app's raw submit history (ktb_styles
+    # {prefix}_sample_json) into the DTC status string via the pure-Python UDF.
+    # SAMPLE_SUBMIT_FIELDS maps raw column -> {staging, dtc}; only the 4 active
+    # apps (PreLine / SMS / Fit / PP) are produced here.
+    for _raw_col, _spec in SAMPLE_SUBMIT_FIELDS.items():
+        _staging_col = _spec["staging"]
+        if _raw_col in df_with_request_name.columns:
+            df_with_request_name = df_with_request_name.withColumn(
+                _staging_col, format_sample_udf(col(_raw_col))
+            )
+        else:
+            # Raw column absent (older ktb_styles) -> emit empty so schema is stable.
+            print(f"   ⚠️  {_raw_col} not in source; {_staging_col} set to '' ")
+            df_with_request_name = df_with_request_name.withColumn(_staging_col, lit(""))
+
     # Show unique request names
     print(f"\n   Unique DTC request names:")
     df_with_request_name.select("dtc_request_name") \
@@ -442,6 +468,14 @@ try:
         col("techpack_stage"),
         col("gender"),                     # Phase 6: new field (pending DTC column creation)
         col("front_image_url"),
+
+        # Phase 7: sample-app submit-history status strings (BeProduct → DTC, all 6)
+        col("proto_sample_status"),        # -> "Proto Sample - Sample Status"
+        col("preline_sample_status"),      # -> "Pre-line Sample - Status"
+        col("sms_sample_status"),          # -> "SMS - Sample Status"
+        col("fit_sample_status"),          # -> "1st Fit Sample Approval Status"
+        col("pp_sample_status"),           # -> "2nd Fit Sample Approval Status"
+        col("top_sample_status"),          # -> "TOP Sample Approval Status"
 
         # Default-fill columns: staged as constants; Phase 1 only writes when DTC cell is blank
         lit("Supplier").alias("supplier"), # Phase 6: "Supplier" constant (pending DTC column)

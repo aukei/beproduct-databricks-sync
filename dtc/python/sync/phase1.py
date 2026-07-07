@@ -90,6 +90,16 @@ FIELD_MAPPING: Dict[str, str] = {
     "fabric_group": "Fabric Group",
     "placement": "Placement",
     "gender": "Gender",                # Phase 6: new field (pending DTC column creation)
+    # --- Phase 7: sample-app submit history (BeProduct → DTC, all 6 apps) ---
+    # Formatted by sync.samples.format_sample_field in the transform; each value is
+    # a JSON list of [submit_name, submitStatus, submitStatusDate] (first size).
+    # DTC column presence confirmed 2026-07-07 (198-field view) except Pre-Line (*).
+    "proto_sample_status":   "Proto Sample - Sample Status",
+    "preline_sample_status": "Pre-line Sample - Status",      # note: lowercase 'l', dash
+    "sms_sample_status":     "SMS - Sample Status",
+    "fit_sample_status":     "1st Fit Sample Approval Status",
+    "pp_sample_status":      "2nd Fit Sample Approval Status",
+    "top_sample_status":     "TOP Sample Approval Status",
     # --- default-fill (only written when DTC cell is blank; see DEFAULT_FILL_COLS) ---
     "supplier": "Supplier",            # Phase 6: new DTC column; default = "Supplier"
     # --- image (mapped for reference but EXCLUDED from every push) ---

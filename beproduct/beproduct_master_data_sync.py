@@ -906,12 +906,18 @@ else:
 
     # ── Contacts ───────────────────────────────────────────────────────────────
     print("\n─── Contacts ───")
-    try:
-        _df_ct = spark.table(tbl("beproduct_directory_contacts"))
-        _contact_push_rows = [r.asDict() for r in _df_ct.collect()]
-    except Exception as _e:
-        print(f"  ❌ Cannot read beproduct_directory_contacts: {_e}")
+    _contacts_tbl = tbl("beproduct_directory_contacts")
+    if not spark.catalog.tableExists(_contacts_tbl):
+        print(f"  ⚪ {_contacts_tbl} does not exist yet — skipping.")
+        print(f"     (Run mode=PULL_ONLY with fetch_contacts=true to create it.)")
         _contact_push_rows = []
+    else:
+        try:
+            _df_ct = spark.table(_contacts_tbl)
+            _contact_push_rows = [r.asDict() for r in _df_ct.collect()]
+        except Exception as _e:
+            print(f"  ❌ Cannot read {_contacts_tbl}: {_e}")
+            _contact_push_rows = []
 
     _ct_add = _ct_upd = _ct_err = 0
 
