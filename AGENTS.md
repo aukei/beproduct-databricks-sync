@@ -15,6 +15,13 @@ sheets), staged through **Databricks/Delta**.
   back into the BeProduct style.
 - **Phase 3 — BeProduct → DTC image** (`docs/PHASE3_WORKFLOW.md`): upload the front
   image into the DTC "Style Image" cell (binary, separate step).
+- **Phase 7 — BeProduct → DTC sample history**: push BeProduct sample-app submit
+  history (all 6 apps: Proto/PreLine/SMS/Fit/PP/TOP) into the matching DTC status
+  columns as JSON lists of `[submit_name, submitStatus, submitStatusDate]`.
+- **Phase 8a — DTC FABRIC → Delta**: pull `"KTB FABRIC"` document sheets (Adoption=Y
+  rows only) into `lft.beproduct.dtc_fabric_ktb` + `dtc_fabric_registry`. Runs as an
+  independent parallel task in the DAG (`pull_fabric_dtc`, gated by `run_phase8a`).
+- **Phase 8b** (planned): upsert adopted fabric rows into BeProduct Material Master.
 
 Each field syncs **one way only** (no loops). Direction table below.
 Components, data flow, and the full ADB data model: `docs/ARCHITECTURE.md`.
@@ -248,8 +255,30 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
   → DTC status columns via `sync.samples.format_sample_field` (transform UDF) +
   `phase1.FIELD_MAPPING`. Each DTC cell gets a JSON list of `[submit_name,
   submitStatus, submitStatusDate]` (first size per submit). All 6 DTC columns confirmed in
-  the 198-field view (2026-07-07). Format/selection is pure-Python + unit-tested
-  (`dtc/tests/test_samples.py`); the raw `{prefix}_sample_json` storage is unchanged.
+  the 198-field view (2026-07-07). Note: "Pre-line Sample - Status" uses lowercase 'l' and dash.
+
+**DTC FABRIC document (KTB, validated 2026-07-16):**
+- Document "KTB FABRIC", Workspace "KTB". **39 active requests** in two patterns:
+  - DEV sheets:  `"KTB <season> <brand> - DEV"` — master development sheet per brand
+  - Mill sheets: `"KTB <season> <brand>-<MILLCODE>"` — mill-specific allocation sheets
+- **WIP_ITS_USE view**: id `6a0ac943fedfa0ca7ff2bf48`, **119 dynamicFields**.
+  Same view name as WIP document; different per-request view ID.
+- **Adoption (Y/N)**: filter field. 0 adopted rows in UAT as of 2026-07-16 (UAT data
+  not yet populated). Phase 8a code filters to Adoption=Y at pull time; logic is ready.
+- **Key staging columns** (DTC field → Delta column):
+  `"ITS_Key"` → `its_key` (system key; proxy for future "LF MATERIAL ID"),
+  `"Mill Fabric Article #"` → `mill_fabric_code`, `"Mill Name"` → `mill_name`,
+  `"Material Class"` → `material_class`, `"Fabric Type"` → `fabric_type`,
+  `"Fabric Content"` → `fabric_content` (MATERIAL DESCRIPTION proxy),
+  `"KB Fabric Code (SAP Code)"` → `kb_fabric_code`.
+- **"LF MATERIAL ID" and "MATERIAL DESCRIPTION"** NOT yet in the view — DTC admin
+  must add before Phase 8b can map to BeProduct Material Master.
+- **Phase 8a Delta tables**: `dtc_fabric_<customer>` (Adoption=Y rows) +
+  `dtc_fabric_registry` (request metadata, same structure as dtc_request_registry).
+- **Job task**: `pull_fabric_dtc` gated by `run_phase8a=true`; runs in parallel with
+  the WIP chain after `wait_cluster`. Notebook: `dtc/notebooks/pull_fabric_to_delta.py`.
+- Do NOT use view ID `6a0ac943fedfa0ca7ff2bf48` for WIP document operations —
+  that ID belongs to FABRIC only.
 
 ## Decisions on record
 
@@ -409,7 +438,9 @@ Pre-warmed cluster pool also eliminates the ~290 s cold start.
 python3 dtc/tests/test_phase1.py        # Phase 1 core unit tests
 python3 dtc/tests/test_phase2.py        # Phase 2 core unit tests
 python3 dtc/tests/test_phase3.py        # Phase 3 image-upload core unit tests
+python3 dtc/tests/test_samples.py       # Phase 7 sample formatter unit tests
 python3 dtc/tests/test_phase1_live.py   # live reversible DTC write test (needs UAT)
+python scripts/check_dtc_view.py        # DTC WIP_ITS_USE column readiness check
 python scripts/upload_notebooks.py --dry-run   # preview Databricks notebook upload
 python scripts/upload_notebooks.py             # deploy notebooks to Databricks
 python scripts/deploy_job.py --dry-run         # preview multi-task job definition
