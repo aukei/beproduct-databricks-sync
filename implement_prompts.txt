@@ -269,18 +269,35 @@ verify @beproduct/beproduct_master_data_sync.py  does it still work against curr
 
 # phase 7 Retrieve Sample information
 For each style, of the 6 Sample apps: Proto, PreLine, SMS, Fit, PP, TOP, retrieve the list of "submits" history (if any) and populate corresponding fields on DTC rows.
-- Proto Sample - 
-- PreLine Sample -> Pre-Line Sample Submission Status
-- SMS Sample -> Development Sample Testing Status
+- Proto Sample -> Proto Sample - Sample Status
+- PreLine Sample -> Pre-line Sample - Status
+- SMS Sample -> SMS - Sample Status
 - Fit Sample -> 1st Fit Sample Approval Status
 - PP Sample -> 2nd Fit Sample Approval Status
-- TOP Sample - 
+- TOP Sample -> TOP Sample Approval Status 
 Include in the field the complete list of submits info, use submitStatus and submitStatusDate of first size:[name, sizes[0].submitStatus, sizes[0].submitStatusDate] 
 
+# phase 8a Upload DTC Fabric sheets to Databricks, prepare to further upsert to BeProduct Material master.
+In DTC workspace <customer> i.e. KTB, there are sheets of document "<customer> FABRIC" i.e. "KTB FABRIC". They contains material information to be sync to BeProduct in phase 8B. Here focus On
+- Upload all DTC sheets of name "<customer> <seasoncode> <brand>", e.g. "KTB SS28 Blue Bell". Use the view 'WIP_ITS_USE' like the above WIP document. 
+- Upload only DTC field "Adoption (Y/N)" = Y rows.
+- Trace DTC sheets name uploaded, also similar to WIP document, for potential data push back from BeProduct.
+- Key fields of each Fabric (and thus BeProduct Material master compulsory fields): "LF MATERIAL ID", "MATERIAL DESCRIPTION", "MATERIAL CATEGORY", "FABRIC/MATERIAL TYPE", "MILL FABRIC CODE", 'MILL/SUPPLIER NAME"
+- known DTC -> BeProduct field mapping (to be confirm)
+    "LF MATERIAL ID" -> "LF MATERIAL ID" 
+    ? -> "MATERIAL DESCRIPTION"
+    ? -> "MATERIAL CATEGORY", 
+    ? -> "FABRIC/MATERIAL TYPE", 
+    ? -> "MILL FABRIC CODE", 
+    ? -> "MILL/SUPPLIER NAME"
 
-# Phase 8 Preparation of Costing sheet
+# phase 8b
+
+
+# Phase 9 Preparation of Costing sheet
 - In addition to WIP document requests, Retrieve also Requests of DTC document "<Customer> LinePlan" e.g. "KTB LinePlan", using view "LINEPLAN_ITS_USE" (preferred) or "Full" if former not exists.
-- Once WIP and LinePlan are in Databricks, they are joined with "Lineplan Ref #" to from a "Costing_Chart":
+- Once WIP and LinePlan are in Databricks, they are joined with WIP "Lineplan Ref #(GC)" to LinePlan "Lineplan Ref #" to from a "Costing_Chart":
     - transpose [(Main Vendor, Main Factory), (Vendor 1, Factory 1), (Vendor 2, Factory 2), (Vendor 3, Factory 3)] into 4 rows [Vendor, Factory]
-    - key = [Customer, IT-STYLE-KEY, SeasonCode, Brands, Lineplan Ref#, Vendor, Factory]
+    - Style - Color level
+    - key = [Customer, BP_Style_no, LF_style_no, Legacy Code, SeasonCode, Brand, Color_name, Lineplan Ref#, Vendor, Factory]
     - Interested fields: <key>, 

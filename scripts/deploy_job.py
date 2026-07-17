@@ -20,10 +20,11 @@ DAG
 ---
     wait_cluster ─┬─► bp_style_sync ─► transform ─┐
                   │                                ├─► request_manager ─► gate_phase1 ─► phase1_push ─┐
-                  └─► pull_dtc ───────────────────┘         │                                         │
-                          │                                   └─► gate_phase3 ──────────────┐          │
-                          └─► gate_phase2 ─► phase2_push                                    ├─► repull_dtc ─► phase3_images
-                                                                                            (also depends phase1_push, run_if=ALL_DONE)
+                  ├─► pull_dtc ───────────────────┘         │                                         │
+                  │       │                                   └─► gate_phase3 ──────────────┐          │
+                  │       └─► gate_phase2 ─► phase2_push                                    ├─► repull_dtc ─► phase3_images
+                  │                                                                         (run_if=ALL_DONE)
+                  └─► gate_phase8a ─► pull_fabric_dtc   (parallel, independent of WIP chain)
 
 Cluster
 -------
@@ -114,9 +115,11 @@ JOB_PARAMS = {
     "run_phase1": "true",
     "run_phase2": "true",
     "run_phase3": "true",
+    "run_phase8a": "true",          # Phase 8a: pull DTC FABRIC sheets
     "push_blanks": "false",
     "img_http_timeout": "30",
     "img_max_uploads": "0",
+    "fabric_document": "KTB FABRIC", # DTC document name for Phase 8a
 }
 
 
@@ -128,6 +131,7 @@ def P(name: str) -> str:
 # Convenience refs
 CAT, SCH = P("catalog"), P("schema")
 CUST, WS, DOC, ENV = P("customer"), P("dtc_workspace"), P("dtc_document"), P("dtc_environment")
+FABRIC_DOC = P("fabric_document")
 DRY = P("dry_run")
 
 
@@ -227,6 +231,23 @@ def build_tasks():
         "dtc_environment": ENV, "dtc_workspace": WS, "dry_run": DRY,
         "http_timeout": P("img_http_timeout"), "max_uploads": P("img_max_uploads"),
     }, depends=[dep("repull_dtc")]))
+
+    # ── Phase 8a — Pull DTC FABRIC sheets → dtc_fabric_<customer> ──────────────
+    # Runs in parallel with the WIP sync chain (independent of Steps 1-8).
+    # Gated by run_phase8a=true so it can be disabled without changing the job.
+    tasks.append(gate_task("gate_phase8a", "run_phase8a",
+                           depends=[dep("wait_cluster")]))
+    tasks.append(nb_task("pull_fabric_dtc", f"{NB_DTC}/pull_fabric_to_delta", {
+        "dtc_environment": ENV,
+        "customer":        CUST,
+        "dtc_workspace":   WS,
+        "dtc_document":    FABRIC_DOC,
+        "catalog":         CAT,
+        "schema":          SCH,
+        "write_mode":      "overwrite",
+        "refresh_registry": "true",
+        "max_workers":     "4",
+    }, depends=[dep("gate_phase8a", outcome="true")]))
 
     return tasks
 
