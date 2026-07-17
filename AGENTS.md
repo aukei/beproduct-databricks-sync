@@ -261,22 +261,26 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
 - Document "KTB FABRIC", Workspace "KTB". **39 active requests** in two patterns:
   - DEV sheets:  `"KTB <season> <brand> - DEV"` — master development sheet per brand
   - Mill sheets: `"KTB <season> <brand>-<MILLCODE>"` — mill-specific allocation sheets
-- **WIP_ITS_USE view**: id `6a0ac943fedfa0ca7ff2bf48`, **119 dynamicFields**.
+- **WIP_ITS_USE view**: id `6a0ac943fedfa0ca7ff2bf48`, **120 dynamicFields**
+  (updated 2026-07-17 — "LF Material ID" added).
   Same view name as WIP document; different per-request view ID.
 - **Adoption (Y/N)**: filter field. 0 adopted rows in UAT as of 2026-07-16 (UAT data
   not yet populated). Phase 8a code filters to Adoption=Y at pull time; logic is ready.
 - **Key staging columns** (DTC field → Delta column):
-  `"ITS_Key"` → `its_key` (system key; proxy for future "LF MATERIAL ID"),
+  `"LF Material ID"` → `lf_material_id` (BP Material Master primary key; confirmed 2026-07-17),
+  `"ITS_Key"` → `its_key` (DTC system row key),
   `"Mill Fabric Article #"` → `mill_fabric_code`, `"Mill Name"` → `mill_name`,
   `"Material Class"` → `material_class`, `"Fabric Type"` → `fabric_type`,
-  `"Fabric Content"` → `fabric_content` (MATERIAL DESCRIPTION proxy),
+  `"Fabric Content"` → `fabric_content` (→ BP Material Description),
   `"KB Fabric Code (SAP Code)"` → `kb_fabric_code`.
-- **"LF MATERIAL ID" and "MATERIAL DESCRIPTION"** NOT yet in the view — DTC admin
-  must add before Phase 8b can map to BeProduct Material Master.
+- **Sheet-type switch** (`include_test_sheets` widget, default `false`):
+  `false` = PROD sheets only (clean `<customer> <season> <brand>`, no suffix);
+  `true`  = include DEV + MILL sheets (needed in UAT where all current sheets have suffixes).
 - **Phase 8a Delta tables**: `dtc_fabric_<customer>` (Adoption=Y rows) +
   `dtc_fabric_registry` (request metadata, same structure as dtc_request_registry).
 - **Job task**: `pull_fabric_dtc` gated by `run_phase8a=true`; runs in parallel with
   the WIP chain after `wait_cluster`. Notebook: `dtc/notebooks/pull_fabric_to_delta.py`.
+- **SSOT field mapping**: `docs/beproduct_material_interested_fields.txt`
 - Do NOT use view ID `6a0ac943fedfa0ca7ff2bf48` for WIP document operations —
   that ID belongs to FABRIC only.
 

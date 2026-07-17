@@ -3,7 +3,7 @@
 Phase 8a — Pull DTC FABRIC sheets → Delta
 ==========================================
 
-Pulls every active in-scope request from the DTC "<customer> FABRIC" document
+Pulls active in-scope requests from the DTC "<customer> FABRIC" document
 (e.g. "KTB FABRIC") and lands all **Adoption (Y/N) = Y** rows into one Delta
 table per customer:
 
@@ -16,38 +16,42 @@ It also maintains a lightweight registry:
 which mirrors the shape of dtc_request_registry so the same tooling can be
 reused for Phase 8b (potential BeProduct Material Master upsert).
 
-Request naming in the KTB FABRIC document follows two patterns:
-  "<customer> <seasoncode> <brand> - DEV"      master development sheet per brand
-  "<customer> <seasoncode> <brand>-<MILLCODE>" mill-specific sheet
+Sheet naming in the KTB FABRIC document follows three patterns:
 
-Both types are pulled.  season_code and brand are extracted from the reference
-so they can be used as join keys in Phase 8b.
+  PROD  "<customer> <season> <brand>"             real production data
+  DEV   "<customer> <season> <brand> - DEV"       dev/test master sheet (space-dash-space-DEV)
+  MILL  "<customer> <season> <brand>-<MILLCODE>"  mill-specific sheet (no space before dash)
 
-Key staging columns sourced from the WIP_ITS_USE view (119 fields, id
-6a0ac943fedfa0ca7ff2bf48):
+By default (include_test_sheets=false) ONLY PROD sheets are pulled.
+Set include_test_sheets=true to also include DEV and MILL sheets — useful in
+UAT where all current sheets have these suffixes and 0 PROD sheets exist.
 
-    its_key            ← DTC "ITS_Key"              (system row key; future LF MATERIAL ID)
-    mill_fabric_code   ← DTC "Mill Fabric Article #" (MILL FABRIC CODE)
-    mill_name          ← DTC "Mill Name"             (MILL/SUPPLIER NAME)
-    material_class     ← DTC "Material Class"        (MATERIAL CATEGORY)
-    fabric_type        ← DTC "Fabric Type"           (FABRIC/MATERIAL TYPE)
-    fabric_content     ← DTC "Fabric Content"        (MATERIAL DESCRIPTION proxy)
+Key staging columns (WIP_ITS_USE view, 120 fields, id 6a0ac943fedfa0ca7ff2bf48,
+confirmed 2026-07-17):
+
+    lf_material_id     ← DTC "LF Material ID"        (BeProduct Material Master key)
+    its_key            ← DTC "ITS_Key"               (DTC system row key)
+    mill_fabric_code   ← DTC "Mill Fabric Article #"  (MILL FABRIC CODE)
+    mill_name          ← DTC "Mill Name"              (MILL/SUPPLIER NAME)
+    material_class     ← DTC "Material Class"         (MATERIAL CATEGORY)
+    fabric_type        ← DTC "Fabric Type"            (FABRIC/MATERIAL TYPE)
+    fabric_content     ← DTC "Fabric Content"         (→ BP Material Description)
     kb_fabric_code     ← DTC "KB Fabric Code (SAP Code)"
-    adoption           ← DTC "Adoption (Y/N)"        (filter: keep Y only)
-
-Fields "LF MATERIAL ID" and "MATERIAL DESCRIPTION" are not yet in the view;
-they will be added by DTC admin as part of Phase 8b preparation.
+    adoption           ← DTC "Adoption (Y/N)"         (filter: keep Y only)
 
 Parameters (widgets):
-    dtc_environment   uat | prod        (default: uat)
-    customer          e.g. KTB          (default: KTB)
-    dtc_workspace     DTC workspace     (default: KTB)
-    dtc_document      DTC document name (default: KTB FABRIC)
-    catalog           Unity Catalog     (default: lft)
-    schema            schema            (default: beproduct)
-    write_mode        overwrite|append  (default: overwrite)
-    refresh_registry  true|false        (default: true)
-    max_workers       parallel threads  (default: 4)
+    dtc_environment     uat | prod        (default: uat)
+    customer            e.g. KTB          (default: KTB)
+    dtc_workspace       DTC workspace     (default: KTB)
+    dtc_document        DTC document name (default: KTB FABRIC)
+    catalog             Unity Catalog     (default: lft)
+    schema              schema            (default: beproduct)
+    write_mode          overwrite|append  (default: overwrite)
+    refresh_registry    true|false        (default: true)
+    include_test_sheets true|false        (default: false)
+      false → PROD sheets only (name = <customer> <season> <brand>, no suffix)
+      true  → ALL sheets including DEV and MILL-code sheets
+    max_workers         parallel threads  (default: 4)
 """
 
 # COMMAND ----------
@@ -84,12 +88,13 @@ FIXED_FIELDS = [
     StructField("row_id",             StringType()),
     StructField("row_index",          LongType()),
     # Key fabric identity fields (Phase 8b compulsory / known mapping)
-    StructField("its_key",            StringType()),   # DTC "ITS_Key"     → LF MATERIAL ID
+    StructField("lf_material_id",     StringType()),   # DTC "LF Material ID" → BP Material Master key
+    StructField("its_key",            StringType()),   # DTC "ITS_Key"         → DTC system row key
     StructField("mill_fabric_code",   StringType()),   # DTC "Mill Fabric Article #"
     StructField("mill_name",          StringType()),   # DTC "Mill Name"
     StructField("material_class",     StringType()),   # DTC "Material Class"
     StructField("fabric_type",        StringType()),   # DTC "Fabric Type"
-    StructField("fabric_content",     StringType()),   # DTC "Fabric Content" (≈ MATERIAL DESCRIPTION)
+    StructField("fabric_content",     StringType()),   # DTC "Fabric Content" → BP Material Description
     StructField("kb_fabric_code",     StringType()),   # DTC "KB Fabric Code (SAP Code)"
     StructField("adoption",           StringType()),   # DTC "Adoption (Y/N)"
     # Full row payload for forward-compatibility
@@ -104,25 +109,28 @@ FABRIC_VIEW_NAME = "WIP_ITS_USE"
 
 # COMMAND ----------
 
-dbutils.widgets.text("dtc_environment",  "uat",        "DTC Environment")
-dbutils.widgets.text("customer",         "KTB",        "Customer code")
-dbutils.widgets.text("dtc_workspace",    "KTB",        "DTC Workspace")
-dbutils.widgets.text("dtc_document",     "KTB FABRIC", "DTC Document name")
-dbutils.widgets.text("catalog",          "lft",        "Catalog")
-dbutils.widgets.text("schema",           "beproduct",  "Schema")
-dbutils.widgets.text("write_mode",       "overwrite",  "overwrite | append")
-dbutils.widgets.text("refresh_registry", "true",       "Refresh registry before pull")
-dbutils.widgets.text("max_workers",      "4",          "Parallel get_sheet() threads")
+dbutils.widgets.text("dtc_environment",    "uat",        "DTC Environment")
+dbutils.widgets.text("customer",           "KTB",        "Customer code")
+dbutils.widgets.text("dtc_workspace",      "KTB",        "DTC Workspace")
+dbutils.widgets.text("dtc_document",       "KTB FABRIC", "DTC Document name")
+dbutils.widgets.text("catalog",            "lft",        "Catalog")
+dbutils.widgets.text("schema",             "beproduct",  "Schema")
+dbutils.widgets.text("write_mode",         "overwrite",  "overwrite | append")
+dbutils.widgets.text("refresh_registry",   "true",       "Refresh registry before pull")
+dbutils.widgets.text("include_test_sheets","false",
+    "false=PROD only | true=include DEV + MILL sheets")
+dbutils.widgets.text("max_workers",        "4",          "Parallel get_sheet() threads")
 
-environment       = dbutils.widgets.get("dtc_environment").strip().lower()
-customer          = dbutils.widgets.get("customer").strip().upper()
-workspace         = dbutils.widgets.get("dtc_workspace").strip()
-document          = dbutils.widgets.get("dtc_document").strip()
-catalog           = dbutils.widgets.get("catalog")
-schema            = dbutils.widgets.get("schema")
-write_mode        = dbutils.widgets.get("write_mode").strip().lower()
-refresh_registry  = dbutils.widgets.get("refresh_registry").strip().lower() == "true"
-max_workers       = int(dbutils.widgets.get("max_workers") or 4)
+environment          = dbutils.widgets.get("dtc_environment").strip().lower()
+customer             = dbutils.widgets.get("customer").strip().upper()
+workspace            = dbutils.widgets.get("dtc_workspace").strip()
+document             = dbutils.widgets.get("dtc_document").strip()
+catalog              = dbutils.widgets.get("catalog")
+schema               = dbutils.widgets.get("schema")
+write_mode           = dbutils.widgets.get("write_mode").strip().lower()
+refresh_registry     = dbutils.widgets.get("refresh_registry").strip().lower() == "true"
+include_test_sheets  = dbutils.widgets.get("include_test_sheets").strip().lower() == "true"
+max_workers          = int(dbutils.widgets.get("max_workers") or 4)
 
 fabric_table_full    = f"{catalog}.{schema}.dtc_fabric_{customer.lower()}"
 fabric_reg_full      = f"{catalog}.{schema}.dtc_fabric_registry"
@@ -132,10 +140,12 @@ now = datetime.now(timezone.utc)
 print("=" * 72)
 print("PHASE 8a — Pull DTC FABRIC sheets → Delta")
 print("=" * 72)
-print(f"  Document  : {document}  (workspace={workspace}, env={environment})")
-print(f"  Output    : {fabric_table_full}")
-print(f"  Registry  : {fabric_reg_full}")
-print(f"  write_mode: {write_mode}  |  refresh_registry: {refresh_registry}")
+print(f"  Document          : {document}  (workspace={workspace}, env={environment})")
+print(f"  Output            : {fabric_table_full}")
+print(f"  Registry          : {fabric_reg_full}")
+print(f"  write_mode        : {write_mode}  |  refresh_registry: {refresh_registry}")
+print(f"  include_test_sheets: {include_test_sheets}  "
+      f"({'DEV+MILL+PROD' if include_test_sheets else 'PROD only (no - DEV / -MILLCODE suffix)'})")
 
 # COMMAND ----------
 
@@ -183,37 +193,64 @@ _FABRIC_REF_RE = re.compile(
     r"(?P<season>[A-Z]{2}\d{2})\s+"
     r"(?P<rest>.+)$"
 )
+# Matches a hyphen NOT preceded by a space — signals a MILL-code suffix.
+# e.g. "Blue Bell-HUBO"  or  "Blue Bell-SHAOXING KEQIAO BURUN TRADE CO.,LTD"
+_MILL_DASH_RE = re.compile(r"(?<! )-")
+
 
 def _parse_fabric_ref(ref: str):
     """
-    Parse a FABRIC request reference into parts.
+    Classify a FABRIC request reference and extract (season_code, brand,
+    sheet_type, mill_code).
 
-    Patterns:
-      "KTB SS28 Blue Bell - DEV"     → season_code=SS28, brand=Blue Bell, type=DEV
-      "KTB SS28 Blue Bell-HUBO"      → season_code=SS28, brand=Blue Bell, type=MILL, mill=HUBO
-      "KTB FW28 Wrangler - DEV"      → season_code=FW28, brand=Wrangler, type=DEV
+    sheet_type values:
+      PROD   "<customer> <season> <brand>"             no suffix — real production
+      DEV    "<customer> <season> <brand> - DEV"       dev/test master sheet
+      MILL   "<customer> <season> <brand>-<MILLCODE>"  mill-specific sheet
+
+    Examples:
+      "KTB SS28 Blue Bell"                           → PROD, brand=Blue Bell
+      "KTB SS28 Blue Bell - DEV"                     → DEV,  brand=Blue Bell
+      "KTB SS28 Blue Bell-HUBO"                      → MILL, brand=Blue Bell, mill=HUBO
+      "KTB SS28 Blue Bell-SHAOXING KEQIAO BURUN..."  → MILL, brand=Blue Bell, mill=SHAOXING...
     """
     m = _FABRIC_REF_RE.match(ref or "")
     if not m:
         return None, None, "UNKNOWN", None
-    season_code = m.group("season")
-    rest = m.group("rest").strip()
 
-    # DEV sheet: ends with " - DEV" (space-dash-space)
+    season_code = m.group("season")
+    rest        = m.group("rest").strip()
+
+    # 1. DEV sheet: ends with " - DEV" (space – hyphen – space – DEV)
     if rest.endswith(" - DEV"):
         brand = rest[:-6].strip()
         return season_code, brand, "DEV", None
 
-    # Mill sheet: "<brand>-<MILLCODE>" — last hyphen-separated token is the mill code
-    # Mill codes are short alphanumeric (no spaces); brand may contain spaces
-    mill_split = rest.rsplit("-", 1)
-    if len(mill_split) == 2 and " " not in mill_split[1].strip():
-        brand    = mill_split[0].strip()
-        mill_code = mill_split[1].strip()
+    # 2. MILL sheet: contains a hyphen NOT preceded by a space
+    #    Split on the FIRST such hyphen (leftmost brand, rightmost mill code)
+    mill_match = _MILL_DASH_RE.search(rest)
+    if mill_match:
+        split_pos = mill_match.start()
+        brand     = rest[:split_pos].strip()
+        mill_code = rest[split_pos + 1:].strip()
         return season_code, brand, "MILL", mill_code
 
-    # Fallback: whole rest is the brand
-    return season_code, rest, "UNKNOWN", None
+    # 3. PROD sheet: plain "<brand>", no suffix
+    return season_code, rest, "PROD", None
+
+
+def _is_in_scope(sheet_type: str, include_test: bool) -> bool:
+    """
+    Return True if the sheet should be pulled given the include_test_sheets flag.
+
+    include_test=False (default/production):
+        Only PROD sheets — real production data, no DEV or MILL suffix.
+    include_test=True (development/UAT):
+        All sheets including DEV and MILL.
+    """
+    if include_test:
+        return True
+    return sheet_type == "PROD"
 
 
 # COMMAND ----------
@@ -244,13 +281,14 @@ def _build_records(r, rows, season_code, brand, sheet_type, mill_code):
             "row_id":            row.get("rowId"),
             "row_index":         (int(row["rowIndex"])
                                   if row.get("rowIndex") is not None else None),
-            # Key fabric identity fields
-            "its_key":           row.get("ITS_Key"),
+            # Key fabric identity fields (confirmed in 120-field view, 2026-07-17)
+            "lf_material_id":    row.get("LF Material ID"),     # → BP Material Master key
+            "its_key":           row.get("ITS_Key"),            # DTC system row key
             "mill_fabric_code":  row.get("Mill Fabric Article #"),
             "mill_name":         row.get("Mill Name"),
             "material_class":    row.get("Material Class"),
             "fabric_type":       row.get("Fabric Type"),
-            "fabric_content":    row.get("Fabric Content"),
+            "fabric_content":    row.get("Fabric Content"),     # → BP Material Description
             "kb_fabric_code":    row.get("KB Fabric Code (SAP Code)"),
             "adoption":          row.get("Adoption (Y/N)"),
             "extracted_at":      now,
@@ -259,13 +297,32 @@ def _build_records(r, rows, season_code, brand, sheet_type, mill_code):
     return records
 
 
-# Filter to eligible requests (WIP_ITS_USE view present)
-eligible    = [r for r in reg_rows if r.view_name == FABRIC_VIEW_NAME]
-skipped_cnt = len(reg_rows) - len(eligible)
-if skipped_cnt:
-    print(f"  ⏭️  {skipped_cnt} request(s) skipped (view_name ≠ {FABRIC_VIEW_NAME!r})")
+# ── Scope filter ──────────────────────────────────────────────────────────────
+# Step 1: view must be WIP_ITS_USE (same as WIP doc filtering)
+# Step 2: apply include_test_sheets filter on sheet_type (PROD / DEV / MILL)
+eligible_all = [r for r in reg_rows if r.view_name == FABRIC_VIEW_NAME]
+skipped_view = len(reg_rows) - len(eligible_all)
+if skipped_view:
+    print(f"  ⏭️  {skipped_view} request(s) skipped (view_name ≠ {FABRIC_VIEW_NAME!r})")
 
-print(f"\nFetching {len(eligible)} FABRIC sheet(s) with {max_workers} worker(s) …")
+# Classify each request and apply sheet-type filter
+eligible = []
+skipped_type = []
+for r in eligible_all:
+    sc, brand_p, stype, mill_p = _parse_fabric_ref(r.request_reference)
+    if _is_in_scope(stype, include_test_sheets):
+        eligible.append(r)
+    else:
+        skipped_type.append((r.request_reference, stype))
+
+if skipped_type:
+    print(f"  ⏭️  {len(skipped_type)} request(s) excluded by include_test_sheets=false:")
+    for ref, st in skipped_type:
+        print(f"       [{st}] {ref}")
+
+scope_label = "ALL (PROD+DEV+MILL)" if include_test_sheets else "PROD only"
+print(f"\nFetching {len(eligible)}/{len(eligible_all)} FABRIC sheet(s) "
+      f"({scope_label}) with {max_workers} worker(s) …")
 
 all_records    = []
 fetch_errors   = {}
@@ -286,7 +343,7 @@ with ThreadPoolExecutor(max_workers=max_workers) as pool:
                             if _norm_adoption(row.get("Adoption (Y/N)")) == "Y"]
             recs = _build_records(r_obj, rows, season_code, brand, sheet_type, mill_code)
             all_records.extend(recs)
-            print(f"  ✅ {ref:<55} rows={len(rows):3d}  adopted={len(adopted_rows)}")
+            print(f"  ✅ [{sheet_type:<4}] {ref:<52} rows={len(rows):3d}  adopted={len(adopted_rows)}")
         except Exception as e:
             fetch_errors[r.request_id] = str(e)
             print(f"  ❌ {ref}: {e}")

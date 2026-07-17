@@ -1,0 +1,70 @@
+DTC FABRIC → BeProduct Material Master field mapping (Phase 8)
+==============================================================
+Confirmed live against the DTC "KTB FABRIC" document WIP_ITS_USE view
+(view id 6a0ac943fedfa0ca7ff2bf48, 120 dynamicFields, 2026-07-17).
+
+Phase 8a: Pull DTC FABRIC sheets → Delta (dtc_fabric_<customer>).
+Phase 8b: Upsert adopted rows → BeProduct Material Master (planned).
+
+Scope / filter
+--------------
+Only rows where DTC "Adoption (Y/N)" = "Y" are written to Delta.
+Sheet-type switch (include_test_sheets widget in pull_fabric_to_delta):
+  false (default/production): PROD sheets only — named "<customer> <season> <brand>"
+  true  (UAT/dev):            ALL sheets including DEV (" - DEV" suffix) and MILL
+                              ("-<MILLCODE>" no-space-dash suffix)
+
+Sheet naming patterns in "KTB FABRIC":
+  PROD  "KTB SS28 Blue Bell"               real production sheet (future)
+  DEV   "KTB SS28 Blue Bell - DEV"         dev/test master development sheet
+  MILL  "KTB SS28 Blue Bell-HUBO"          mill-specific allocation sheet
+
+Sync direction (all DTC → BeProduct for Phase 8b)
+--------------------------------------------------
+  DTC "LF Material ID"        → BeProduct  lf_material_id   (PRIMARY KEY / match key)
+  DTC "Fabric Content"        → BeProduct  Material Description
+  DTC "Material Class"        → BeProduct  Material Category
+  DTC "Fabric Type"           → BeProduct  Fabric / Material Type
+  DTC "Mill Fabric Article #" → BeProduct  Mill Fabric Code
+  DTC "Mill Name"             → BeProduct  Mill / Supplier Name
+  DTC "KB Fabric Code (SAP Code)" → BeProduct  KB / SAP Fabric Code
+
+Key:
+  DTC "ITS_Key"               → staging   its_key     (DTC system row key; not a BP field)
+  DTC "Adoption (Y/N)"        → staging   adoption    (filter only; not pushed to BP)
+
+DTC column               | Delta column      | BeProduct field        | Notes
+─────────────────────────┼───────────────────┼────────────────────────┼────────────────────────────────────
+LF Material ID           | lf_material_id    | LF Material ID         | PRIMARY MATCH KEY for BP Material Master.
+                         |                   |                        | Added to DTC view 2026-07-17 (120 fields).
+Fabric Content           | fabric_content    | Material Description   | DTC "Fabric Content" is the source for
+                         |                   |                        | the BP Material Description field.
+Material Class           | material_class    | Material Category      |
+Fabric Type              | fabric_type       | Fabric / Material Type |
+Mill Fabric Article #    | mill_fabric_code  | Mill Fabric Code       |
+Mill Name                | mill_name         | Mill / Supplier Name   |
+KB Fabric Code (SAP Code)| kb_fabric_code    | KB / SAP Code          |
+ITS_Key                  | its_key           | (none — DTC system key)| Unique row key within a FABRIC sheet.
+                         |                   |                        | Acts as surrogate until LF Material ID
+                         |                   |                        | is populated.
+Adoption (Y/N)           | adoption          | (filter only)          | Only Y rows are pulled into Delta.
+Brand                    | brand             | (routing only)         | Parsed from request_reference.
+Season                   | season_code       | (routing only)         | Parsed from request_reference.
+sheet_type               | sheet_type        | (routing only)         | PROD / DEV / MILL (parsed from ref name)
+mill_code                | mill_code         | (routing only)         | Mill code suffix for MILL-type sheets.
+
+DTC columns NOT yet in view (to be added by DTC admin for Phase 8b):
+  (none currently — all key fields confirmed present 2026-07-17)
+
+BeProduct Material Master fields (Phase 8b target — to be confirmed):
+  LF Material ID          → match/upsert key (fieldId TBC)
+  Material Description    → from DTC Fabric Content (fieldId TBC)
+  Material Category       → from DTC Material Class (fieldId TBC)
+  Fabric / Material Type  → from DTC Fabric Type (fieldId TBC)
+  Mill Fabric Code        → from DTC Mill Fabric Article # (fieldId TBC)
+  Mill / Supplier Name    → from DTC Mill Name (fieldId TBC)
+  NOTE: BeProduct Material Master fieldIds to be confirmed when Phase 8b is implemented.
+  The sync direction is DTC → BeProduct (adoption-gated).
+
+Known DTC → BeProduct mapping (confirmed 2026-07-17):
+  "LF Material ID" → "LF Material ID"   (same label; fieldId TBC in BP Material Master)

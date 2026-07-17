@@ -115,7 +115,8 @@ JOB_PARAMS = {
     "run_phase1": "true",
     "run_phase2": "true",
     "run_phase3": "true",
-    "run_phase8a": "true",          # Phase 8a: pull DTC FABRIC sheets
+    "run_phase8a": "true",           # Phase 8a: pull DTC FABRIC sheets
+    "include_test_sheets": "false",  # false=PROD sheets only; true=include DEV+MILL (for UAT)
     "push_blanks": "false",
     "img_http_timeout": "30",
     "img_max_uploads": "0",
@@ -238,15 +239,16 @@ def build_tasks():
     tasks.append(gate_task("gate_phase8a", "run_phase8a",
                            depends=[dep("wait_cluster")]))
     tasks.append(nb_task("pull_fabric_dtc", f"{NB_DTC}/pull_fabric_to_delta", {
-        "dtc_environment": ENV,
-        "customer":        CUST,
-        "dtc_workspace":   WS,
-        "dtc_document":    FABRIC_DOC,
-        "catalog":         CAT,
-        "schema":          SCH,
-        "write_mode":      "overwrite",
-        "refresh_registry": "true",
-        "max_workers":     "4",
+        "dtc_environment":     ENV,
+        "customer":            CUST,
+        "dtc_workspace":       WS,
+        "dtc_document":        FABRIC_DOC,
+        "catalog":             CAT,
+        "schema":              SCH,
+        "write_mode":          "overwrite",
+        "refresh_registry":    "true",
+        "include_test_sheets": P("include_test_sheets"),
+        "max_workers":         "4",
     }, depends=[dep("gate_phase8a", outcome="true")]))
 
     return tasks
