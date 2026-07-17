@@ -377,31 +377,44 @@ else:
 
 # COMMAND ----------
 
-# ── Update registry row_count + last_extracted ───────────────────────────────
-# Count how many Adoption=Y rows were loaded per request_id.
+# ── Update registry row_count + last_extracted (batched MERGE) ───────────────
+# Single MERGE INTO replaces N serial UPDATE statements — same fix as
+# pull_masters_to_delta.py (old per-request loop took ~179 s for 66 rows there;
+# see docs/PERFORMANCE.md). One Spark job instead of 39.
 from collections import Counter
+from pyspark.sql.types import LongType as _LongType
+
 adopted_counts = Counter(r["request_id"] for r in all_records)
+ts_iso = now.isoformat()
 
-ts = now.isoformat()
-updated_regs = 0
-for r in eligible:
-    row_count = adopted_counts.get(r.request_id, 0)
-    msg = f"pulled adopted={row_count}"
-    try:
-        spark.sql(f"""
-          UPDATE {fabric_reg_full}
-          SET last_extracted = timestamp('{ts}'),
-              row_count      = {row_count},
-              msgs           = '{msg}',
-              updated_at     = timestamp('{ts}')
-          WHERE environment  = '{environment}'
-            AND request_id   = '{r.request_id}'
-        """)
-        updated_regs += 1
-    except Exception as e:
-        print(f"  ⚠️  Registry update failed for {r.request_reference}: {e}")
+ctrl_rows = [
+    (environment, r.request_id, adopted_counts.get(r.request_id, 0),
+     f"pulled adopted={adopted_counts.get(r.request_id, 0)}")
+    for r in eligible
+]
 
-print(f"\n✅ Registry updated for {updated_regs} request(s)")
+if ctrl_rows:
+    ctrl_schema = StructType([
+        StructField("environment", StringType()),
+        StructField("request_id",  StringType()),
+        StructField("row_count",   LongType()),
+        StructField("msg",         StringType()),
+    ])
+    (spark.createDataFrame(ctrl_rows, ctrl_schema)
+          .createOrReplaceTempView("_fabric_ctrl_src"))
+    spark.sql(f"""
+      MERGE INTO {fabric_reg_full} t
+      USING _fabric_ctrl_src s
+        ON t.environment = s.environment
+       AND t.request_id  = s.request_id
+      WHEN MATCHED THEN UPDATE SET
+        t.last_extracted = timestamp('{ts_iso}'),
+        t.row_count      = s.row_count,
+        t.msgs           = s.msg,
+        t.updated_at     = timestamp('{ts_iso}')
+    """)
+
+print(f"✅ Registry updated for {len(ctrl_rows)} request(s)  (single MERGE)")
 
 # COMMAND ----------
 
