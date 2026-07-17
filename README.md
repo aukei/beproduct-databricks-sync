@@ -26,14 +26,17 @@ job 294837488757511), defined in `scripts/deploy_job.py`.
 |----------|-------------|
 | [QUICK_START.md](QUICK_START.md) | Setup, how to use, which notebook to run |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Components, full pipeline DAG, and ADB data model |
-| [docs/PHASE1_WORKFLOW.md](docs/PHASE1_WORKFLOW.md) | BeProduct → DTC style field upsert |
+| [docs/PHASE1_WORKFLOW.md](docs/PHASE1_WORKFLOW.md) | BeProduct → DTC style field upsert (Phases 1 + 7 ride same push) |
 | [docs/PHASE2_WORKFLOW.md](docs/PHASE2_WORKFLOW.md) | DTC → BeProduct pushback |
 | [docs/PHASE3_WORKFLOW.md](docs/PHASE3_WORKFLOW.md) | BeProduct image → DTC "Style Image" |
+| [docs/PHASE5_WORKFLOW.md](docs/PHASE5_WORKFLOW.md) | BeProduct Master Data & Directory sync (admin utility, not in DAG) |
+| [docs/PHASE7_WORKFLOW.md](docs/PHASE7_WORKFLOW.md) | Sample-app submit history → DTC status columns |
 | [docs/BEPRODUCT_GUIDE.md](docs/BEPRODUCT_GUIDE.md) | BeProduct SDK/API + BeProduct tables on ADB |
 | [docs/DTC_GUIDE.md](docs/DTC_GUIDE.md) | DTC API + DTC tables on ADB |
-| [docs/DIAGRAM.md](docs/DIAGRAM.md) | Pipeline data-flow block diagram (Databricks-centred) |
+| [docs/DIAGRAM.md](docs/DIAGRAM.md) | Pipeline data-flow Mermaid diagram (render locally — PNG/SVG not committed) |
 | [docs/beproduct_style_interested_fields.txt](docs/beproduct_style_interested_fields.txt) | **Style field-mapping SSOT** (DTC column ⇄ BeProduct fieldId ⇄ direction) |
 | [docs/beproduct_material_interested_fields.txt](docs/beproduct_material_interested_fields.txt) | **Material field-mapping SSOT** (DTC FABRIC ⇄ BeProduct Material Master) |
+| [docs/costing_interested_fields.txt](docs/costing_interested_fields.txt) | **Costing chart field-mapping SSOT** (WIP × LinePlan → costing_chart) |
 | [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | Pipeline performance history and optimisations |
 | [AGENTS.md](AGENTS.md) | Durable log of verified API behaviour, field directions & project invariants |
 

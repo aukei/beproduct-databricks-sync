@@ -14,7 +14,10 @@ This document is the single reference for **components**, **data flow**, and the
 - Component API/SDK + per-side tables: `DTC_GUIDE.md`, `BEPRODUCT_GUIDE.md`
 - Style field-mapping SSOT: `beproduct_style_interested_fields.txt`
 - Material field-mapping SSOT: `beproduct_material_interested_fields.txt`
-- Pipeline diagram (Databricks-centred): `DIAGRAM.md` / `DIAGRAM.png`
+- Costing chart field-mapping SSOT: `costing_interested_fields.txt`
+- Phase 5 (Master Data): `PHASE5_WORKFLOW.md`
+- Phase 7 (Sample history): `PHASE7_WORKFLOW.md`
+- Pipeline diagram (Mermaid source, render locally): `DIAGRAM.md`
 - Verified API behaviour & invariants: `../AGENTS.md`
 
 ---

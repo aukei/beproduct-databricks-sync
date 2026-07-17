@@ -1,0 +1,111 @@
+Costing Chart — field mapping & data sources (Phase 9a)
+=========================================================
+Confirmed live against DTC UAT 2026-07-17.
+
+Purpose
+-------
+Phase 9a joins the DTC WIP master chart with the DTC LinePlan to produce a
+denormalized "Costing Chart" at the Style × Color × Vendor/Factory slot level.
+Output: `lft.beproduct.costing_chart` (full overwrite each run).
+
+Input tables
+------------
+  lft.beproduct.dtc_wip_ktb        WIP rows (all fields in data_json)
+  lft.beproduct.dtc_lineplan_ktb   LinePlan rows (all fields in data_json)
+
+Join key
+--------
+  WIP  "Lineplan Ref #"  =  LinePlan  "Lineplan Ref #"
+  NOTE: WIP column is plain "Lineplan Ref #" (no "(GC)" suffix — the spec
+  annotation "(GC)" is not the literal DTC column name).
+
+Vendor / Factory slot structure
+--------------------------------
+Each WIP row (style × color) produces up to 4 costing rows by transposing:
+
+  factory_slot | vendor_col (WIP)           | factory_col (WIP)
+  ─────────────┼────────────────────────────┼────────────────────────────────
+  Main         | Main Vendor (Sampling)      | Main Factory (Sampling)
+  1            | Vendor 1                   | Factory 1
+  2            | Vendor 2                   | Factory 2
+  3            | Vendor 3                   | Factory 3
+
+Rows where the vendor column is blank are dropped.
+A style × color may produce 1–4 costing rows.
+
+Costing chart columns
+----------------------
+costing_chart column   | Source table | DTC source field / derivation
+───────────────────────┼──────────────┼──────────────────────────────────────────────────────────
+customer               | WIP (fixed)  | request_reference prefix
+season_code            | WIP (fixed)  | season_code column
+brand                  | WIP JSON     | "Brand"
+bp_style_no            | WIP (fixed)  | bp_style_number column (= "BP Style#" in DTC)
+lf_style_no            | WIP (fixed)  | lf_style_number column (= "LF Style#" in DTC)
+legacy_code            | WIP JSON     | "Legacy Code"
+style_description      | WIP JSON     | "Style Description"
+color_name             | WIP (fixed)  | color_wash column (= "Color / Wash" in DTC)
+lineplan_ref           | WIP JSON     | "Lineplan Ref #"
+fabric_content         | WIP JSON     | "Fabric Group"                (WIP "Content" col)
+gender                 | WIP JSON     | "Gender"                      (may be blank)
+class_name             | WIP JSON     | "Class"
+sub_class              | WIP JSON     | "Sub Class"
+factory_slot           | derived      | "Main" | "1" | "2" | "3"
+supplier_type          | LinePlan JSON| "INTERNAL/ SOURCED"           (→ Supplier Type)
+supplier               | WIP JSON     | vendor column for the slot
+factory                | WIP JSON     | factory column for the slot
+production_country     | WIP JSON     | "Factory Production Country for [Main Factory | Factory 1-3]"
+order_quantity         | LinePlan     | "PROJECTED VOLUME (season)"   (aggregated first per ref)
+target_ldp             | LinePlan     | "TARGET SAP w/ Tariff impact" (lowercase 'i')
+target_fob             | LinePlan     | "TARGET FOB"
+hts_code               | WIP JSON     | "Main Factory HTS Code" / "Factory [1-3] - HTS code"
+duty_rate_us           | WIP JSON     | "Main Factory Duty Rate (US)" / "Factory [1-3] - Duty Rate (US)"
+duty_rate_ca           | WIP JSON     | "Main Factory Duty Rate (CA)" / "Factory [1-3] - Duty Rate (CA)"
+duty_rate_mx           | WIP JSON     | "Main Factory Duty Rate (MX)" / "Factory [1-3] - Duty Rate (MX)"
+tariff_rate            | NULL         | Phase 9b: NT Orbit Duty Tools API (not yet implemented)
+updated_at             | derived      | current_timestamp() at build time
+
+WIP HTS / Duty field names (exact DTC column names, confirmed 2026-07-17)
+--------------------------------------------------------------------------
+  Main Factory HTS Code           Main Factory Duty Rate (US/CA/MX)
+  Factory 1 - HTS code            Factory 1 - Duty Rate (US/CA/MX)
+  Factory 2 - HTS code            Factory 2 - Duty Rate (US/CA/MX)
+  Factory 3 - HTS code            Factory 3 - Duty Rate (US/CA/MX)
+
+  Tariff Rate fields ("Main Factory Tariff rate", "Factory 1/2/3 - Tariff rate"):
+  NOT PRESENT in WIP_ITS_USE view as of 2026-07-17. tariff_rate = NULL placeholder.
+
+LinePlan field names (exact DTC column names — all UPPERCASE, confirmed 2026-07-17)
+-------------------------------------------------------------------------------------
+  "Lineplan Ref #"                join key to WIP
+  "PROJECTED VOLUME (season)"     → order_quantity
+  "TARGET SAP w/ Tariff impact"   → target_ldp     (lowercase 'i' in "impact")
+  "TARGET FOB"                    → target_fob
+  "INTERNAL/ SOURCED"             → supplier_type   (slash-space in name)
+
+  View: "Full" (id 69f0788555010bb745140ac4, 30 fields).
+  No "LINEPLAN_ITS_USE" view exists in UAT; pull_lineplan_to_delta tries it first
+  and falls back to "Full".
+
+LinePlan grouping note
+-----------------------
+LinePlan may have multiple rows per "Lineplan Ref #" (different colors / regions).
+The join uses the FIRST non-null value per ref# for order_quantity / target_ldp /
+target_fob / supplier_type (Spark first() with ignorenulls=True).
+
+Phase 9b plan
+-------------
+For costing rows where hts_code IS NULL or duty_rate_* IS NULL or tariff_rate IS NULL:
+  1. Call NT Orbit Duty Tools 3rd-party API (with result caching).
+  2. Fill in the values on costing_chart.
+  3. If any row fetched from NT Orbit, push updated HTS / Duty / Tariff values
+     back to the corresponding per-slot WIP columns via Phase 1 PATCH.
+
+Costing chart key
+-----------------
+  [customer, season_code, brand, bp_style_no, lf_style_no, color_name,
+   lineplan_ref, factory_slot, supplier, factory]
+
+The table is FULLY OVERWRITTEN on every Phase 9a run (no incremental).
+All prior Phase 9b-filled values are also overwritten; Phase 9b must re-run
+after each Phase 9a rebuild to re-populate tariff_rate / HTS gaps.

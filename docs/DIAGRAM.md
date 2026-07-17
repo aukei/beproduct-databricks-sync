@@ -2,6 +2,12 @@
 
 > Databricks-centred view of all implemented sync pipelines.
 > `BeProduct_DTC_sync_dag` — job 294837488757511. Updated 2026-07-18.
+>
+> **Render locally:**
+> ```bash
+> npx -y @mermaid-js/mermaid-cli -i docs/DIAGRAM.md -o /tmp/diagram.svg -b white
+> ```
+> PNG/SVG renders are not committed — generate on demand from this source.
 
 ```mermaid
 flowchart TB
