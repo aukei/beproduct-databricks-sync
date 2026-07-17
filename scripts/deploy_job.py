@@ -25,6 +25,7 @@ DAG
                   │       └─► gate_phase2 ─► phase2_push                                    ├─► repull_dtc ─► phase3_images
                   │                                                                         (run_if=ALL_DONE)
                   └─► gate_phase8a ─► pull_fabric_dtc   (parallel, independent of WIP chain)
+                  └─► gate_phase9a ─► pull_lineplan_dtc ─► build_costing_chart  (parallel)
 
 Cluster
 -------
@@ -117,6 +118,8 @@ JOB_PARAMS = {
     "run_phase3": "true",
     "run_phase8a": "true",           # Phase 8a: pull DTC FABRIC sheets
     "include_test_sheets": "false",  # false=PROD sheets only; true=include DEV+MILL (for UAT)
+    "run_phase9a": "true",           # Phase 9a: pull LinePlan + build costing chart
+    "lineplan_document": "KTB LinePlan",  # DTC document name for Phase 9a
     "push_blanks": "false",
     "img_http_timeout": "30",
     "img_max_uploads": "0",
@@ -132,7 +135,8 @@ def P(name: str) -> str:
 # Convenience refs
 CAT, SCH = P("catalog"), P("schema")
 CUST, WS, DOC, ENV = P("customer"), P("dtc_workspace"), P("dtc_document"), P("dtc_environment")
-FABRIC_DOC = P("fabric_document")
+FABRIC_DOC   = P("fabric_document")
+LINEPLAN_DOC = P("lineplan_document")
 DRY = P("dry_run")
 
 
@@ -250,6 +254,30 @@ def build_tasks():
         "include_test_sheets": P("include_test_sheets"),
         "max_workers":         "4",
     }, depends=[dep("gate_phase8a", outcome="true")]))
+
+    # ── Phase 9a — Pull LinePlan + Build Costing Chart ─────────────────────────
+    # Runs in parallel with the WIP chain (independent after wait_cluster).
+    # pull_lineplan_dtc feeds build_costing_chart which also needs pull_dtc (WIP data).
+    tasks.append(gate_task("gate_phase9a", "run_phase9a",
+                           depends=[dep("wait_cluster")]))
+    tasks.append(nb_task("pull_lineplan_dtc", f"{NB_DTC}/pull_lineplan_to_delta", {
+        "dtc_environment": ENV,
+        "customer":        CUST,
+        "dtc_workspace":   WS,
+        "dtc_document":    LINEPLAN_DOC,
+        "catalog":         CAT,
+        "schema":          SCH,
+        "write_mode":      "overwrite",
+        "max_workers":     "4",
+    }, depends=[dep("gate_phase9a", outcome="true")]))
+
+    # build_costing_chart needs BOTH dtc_wip_ktb (from pull_dtc) and
+    # dtc_lineplan_ktb (from pull_lineplan_dtc) to be ready.
+    tasks.append(nb_task("build_costing_chart", f"{NB_DTC}/build_costing_chart", {
+        "catalog":  CAT,
+        "schema":   SCH,
+        "customer": CUST,
+    }, depends=[dep("pull_lineplan_dtc"), dep("pull_dtc")]))
 
     return tasks
 

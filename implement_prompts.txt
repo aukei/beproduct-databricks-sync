@@ -291,13 +291,39 @@ In DTC workspace <customer> i.e. KTB, there are sheets of document "<customer> F
     ? -> "MILL FABRIC CODE", 
     ? -> "MILL/SUPPLIER NAME"
 
-# phase 8b
+# phase 8b upload dtc_fabric to BeProduct
 
 
-# Phase 9 Preparation of Costing sheet
-- In addition to WIP document requests, Retrieve also Requests of DTC document "<Customer> LinePlan" e.g. "KTB LinePlan", using view "LINEPLAN_ITS_USE" (preferred) or "Full" if former not exists.
+
+# Phase 9a Preparation of Costing sheet
+- In addition to WIP / Fabric document requests, Retrieve also Requests of DTC document "<Customer> LinePlan" e.g. "KTB LinePlan", using view "LINEPLAN_ITS_USE" (preferred) or "Full" if former not exists.
 - Once WIP and LinePlan are in Databricks, they are joined with WIP "Lineplan Ref #(GC)" to LinePlan "Lineplan Ref #" to from a "Costing_Chart":
     - transpose [(Main Vendor, Main Factory), (Vendor 1, Factory 1), (Vendor 2, Factory 2), (Vendor 3, Factory 3)] into 4 rows [Vendor, Factory]
     - Style - Color level
     - key = [Customer, BP_Style_no, LF_style_no, Legacy Code, SeasonCode, Brand, Color_name, Lineplan Ref#, Vendor, Factory]
-    - Interested fields: <key>, 
+    - Interested fields: 
+BP Style#              - Master Chart
+LF Style#              - Master Chart
+Style Description      - Master Chart
+Season                 - Master Chart
+Brand                  - Master Chart
+Fabric Content         - Master Chart "Content" column
+Gender                 - Master Chart (not yet available in source currently)
+Class                  - Master Chart
+Sub Class              - Master Chart
+Supplier Type          - Generated from Master Chart data
+Supplier               - Main Vendor (Sampling) / Vendor 1 / Vendor 2 / Vendor 3
+Factory                - Main Factory (Sampling) / Factory 1 / Factory 2 / Factory 3
+Production Country     - Master Chart
+Order Quantity         - Line Plan "Projected Volume (Season)" column
+Target LDP             - Line Plan "Target SAP w/ Tariff Impact" column
+HTS Code               - Master Chart "[Main Factory|Factory 1-3 -] HTS code" or if blank, Retrieve from NT Orbit Duty Tools
+Duty Rate (US)         - Master Chart "[Main Factory|Factory 1-3 -] - Duty Rate (US)" or if blank, Retrieve from NT Orbit Duty Tools
+Duty Rate (CA)         - Master Chart "[Main Factory|Factory 1-3 -] - Duty Rate (CA)" or if blank, Retrieve from NT Orbit Duty Tools
+Duty Rate (MX)         - Master Chart "[Main Factory|Factory 1-3 -] - Duty Rate (MX)" or if blank, Retrieve from NT Orbit Duty Tools
+Tariff Rate            - Master Chart "[Main Factory|Factory 1-3 -] - Tariff rate" or if blank, Retrieve from NT Orbit Duty Tools
+Target FOB             - Line Plan
+    - a sample table with desired fields is at lft.beproduct.Costing_Chart
+    - at each refresh, fully overwrite this costing_chart using eligible fresh data
+    - "NT Orbit Duty Tools" is calling a 3rd party API with some optimization in caching results. Intended in phase 9b.
+    - Once (9b) finished, if there are changes in Costing chart HTS code or any of the 3 Duty rates or Tariff rates, i.e. any row called the 3rd party API, push the value back to Master chart  corresponding field. 

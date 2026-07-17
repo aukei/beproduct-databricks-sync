@@ -1,0 +1,322 @@
+# Databricks notebook source
+"""
+Phase 9a — Build Costing Chart
+================================
+
+Joins the DTC WIP master chart with the DTC LinePlan to produce a denormalized
+"Costing Chart" at the Style × Color × Vendor/Factory level.
+
+Inputs
+------
+  lft.beproduct.dtc_wip_<customer>         WIP rows (data_json contains all fields)
+  lft.beproduct.dtc_lineplan_<customer>    LinePlan rows (data_json)
+
+Join key
+--------
+  WIP "Lineplan Ref #"  =  LinePlan "Lineplan Ref #"
+  (note: WIP column is plain "Lineplan Ref #"; spec said "(GC)" but actual
+   DTC column name has no suffix — confirmed live 2026-07-17)
+
+Transpose
+---------
+  Each WIP row (style × color) is expanded into up to 4 costing rows by
+  exploding the four vendor/factory pairs:
+    slot  vendor_col                factory_col
+    ────  ──────────────────────    ──────────────────────────
+    Main  "Main Vendor (Sampling)"  "Main Factory (Sampling)"
+    1     "Vendor 1"                "Factory 1"
+    2     "Vendor 2"                "Factory 2"
+    3     "Vendor 3"                "Factory 3"
+  Slots where vendor is blank are dropped.  A style may produce 1–4 rows.
+
+HTS / Duty / Tariff
+-------------------
+  Read from the corresponding WIP fields per slot.
+  "Tariff Rate" is NOT currently in WIP view — Phase 9b will fill it from
+  NT Orbit Duty Tools.  The column is present (null) as a placeholder.
+
+Output
+------
+  lft.beproduct.costing_chart   — fully overwritten on every run
+
+Costing chart schema (field → source):
+  customer            from WIP request_reference
+  season_code         from WIP
+  brand               from WIP data_json "Brand"
+  bp_style_no         from WIP data_json "BP Style#"
+  lf_style_no         from WIP data_json "LF Style#"
+  legacy_code         from WIP data_json "Legacy Code"
+  style_description   from WIP data_json "Style Description"
+  color_name          from WIP data_json "Color / Wash"
+  lineplan_ref        from WIP data_json "Lineplan Ref #"
+  fabric_content      from WIP data_json "Fabric Group"   (WIP "Content" column)
+  gender              from WIP data_json "Gender"
+  class               from WIP data_json "Class"
+  sub_class           from WIP data_json "Sub Class"
+  factory_slot        derived  "Main" | "1" | "2" | "3"
+  supplier_type       from LinePlan "INTERNAL/ SOURCED"   (→ Costing Supplier Type)
+  supplier            vendor column for the slot
+  factory             factory column for the slot
+  production_country  from WIP per-slot production country field
+  order_quantity      from LinePlan "PROJECTED VOLUME (season)"
+  target_ldp          from LinePlan "TARGET SAP w/ Tariff impact"
+  target_fob          from LinePlan "TARGET FOB"
+  hts_code            from WIP per-slot HTS field  (Phase 9b: NT Orbit fallback)
+  duty_rate_us        from WIP per-slot duty (US)  (Phase 9b: NT Orbit fallback)
+  duty_rate_ca        from WIP per-slot duty (CA)  (Phase 9b: NT Orbit fallback)
+  duty_rate_mx        from WIP per-slot duty (MX)  (Phase 9b: NT Orbit fallback)
+  tariff_rate         NULL placeholder              (Phase 9b: from NT Orbit)
+  updated_at          current timestamp
+
+Phase 9b hook
+-------------
+  After this notebook runs, Phase 9b will:
+    1. For rows where hts_code / duty_rate_* / tariff_rate are null,
+       call the NT Orbit Duty Tools API (with caching).
+    2. Fill in the values on costing_chart.
+    3. Push changed values back to the corresponding WIP "HTS code" / "Duty Rate"
+       fields (the per-slot WIP columns).
+"""
+
+# COMMAND ----------
+
+import sys
+sys.path.append("/Workspace/Repos/beproduct-sync/DTC/python")
+
+from functools import reduce
+from datetime import datetime, timezone
+
+from pyspark.sql import functions as F, DataFrame
+from pyspark.sql.types import StringType, StructType, StructField, TimestampType, LongType
+
+# ── Parameters ────────────────────────────────────────────────────────────────
+dbutils.widgets.text("catalog",   "lft",       "Catalog")
+dbutils.widgets.text("schema",    "beproduct", "Schema")
+dbutils.widgets.text("customer",  "KTB",       "Customer code")
+
+catalog  = dbutils.widgets.get("catalog")
+schema   = dbutils.widgets.get("schema")
+customer = dbutils.widgets.get("customer").strip().upper()
+
+wip_table      = f"{catalog}.{schema}.dtc_wip_{customer.lower()}"
+lineplan_table = f"{catalog}.{schema}.dtc_lineplan_{customer.lower()}"
+output_table   = f"{catalog}.{schema}.costing_chart"
+
+now = datetime.now(timezone.utc)
+
+print("=" * 72)
+print("PHASE 9a — Build Costing Chart")
+print("=" * 72)
+print(f"  WIP input     : {wip_table}")
+print(f"  LinePlan input: {lineplan_table}")
+print(f"  Output        : {output_table}")
+
+# COMMAND ----------
+
+# ── Helper: extract a field from data_json ────────────────────────────────────
+def jcol(json_col: str, field_name: str, alias: str):
+    """get_json_object wrapper using bracket notation (handles spaces + special chars)."""
+    return F.get_json_object(F.col(json_col), f"$['{field_name}']").alias(alias)
+
+# COMMAND ----------
+
+# ── Step 1: Extract WIP fields from data_json ─────────────────────────────────
+print("\nStep 1: Extracting WIP fields …")
+wip_raw = spark.table(wip_table)
+print(f"  WIP rows: {wip_raw.count()}")
+
+wip = wip_raw.select(
+    # Routing / key
+    F.col("customer"),
+    F.col("season_code"),
+    F.col("request_reference"),
+    # Style identity (from fixed columns + data_json)
+    F.col("bp_style_number").alias("bp_style_no"),
+    F.col("lf_style_number").alias("lf_style_no"),
+    F.col("color_wash").alias("color_name"),
+    jcol("data_json", "Legacy Code",       "legacy_code"),
+    jcol("data_json", "Style Description", "style_description"),
+    jcol("data_json", "Brand",             "brand"),
+    jcol("data_json", "Fabric Group",      "fabric_content"),   # "Content" col in WIP
+    jcol("data_json", "Gender",            "gender"),
+    jcol("data_json", "Class",             "class_"),           # avoid Python keyword
+    jcol("data_json", "Sub Class",         "sub_class"),
+    jcol("data_json", "Lineplan Ref #",    "lineplan_ref"),
+    # Vendor / Factory pairs (4 slots)
+    jcol("data_json", "Main Vendor (Sampling)",   "vendor_main"),
+    jcol("data_json", "Main Factory (Sampling)",  "factory_main"),
+    jcol("data_json", "Vendor 1",                 "vendor_1"),
+    jcol("data_json", "Factory 1",                "factory_1"),
+    jcol("data_json", "Vendor 2",                 "vendor_2"),
+    jcol("data_json", "Factory 2",                "factory_2"),
+    jcol("data_json", "Vendor 3",                 "vendor_3"),
+    jcol("data_json", "Factory 3",                "factory_3"),
+    # Production country per slot
+    jcol("data_json", "Factory Production Country for Main Factory", "prod_country_main"),
+    jcol("data_json", "Factory Production Country for Factory 1",    "prod_country_1"),
+    jcol("data_json", "Factory Production Country for Factory 2",    "prod_country_2"),
+    jcol("data_json", "Factory Production Country for Factory 3",    "prod_country_3"),
+    # HTS code per slot
+    jcol("data_json", "Main Factory HTS Code",   "hts_main"),
+    jcol("data_json", "Factory 1 - HTS code",    "hts_1"),
+    jcol("data_json", "Factory 2 - HTS code",    "hts_2"),
+    jcol("data_json", "Factory 3 - HTS code",    "hts_3"),
+    # Duty Rate (US) per slot
+    jcol("data_json", "Main Factory Duty Rate (US)",  "duty_us_main"),
+    jcol("data_json", "Factory 1 - Duty Rate (US)",   "duty_us_1"),
+    jcol("data_json", "Factory 2 - Duty Rate (US)",   "duty_us_2"),
+    jcol("data_json", "Factory 3 - Duty Rate (US)",   "duty_us_3"),
+    # Duty Rate (CA) per slot
+    jcol("data_json", "Main Factory Duty Rate (CA)",  "duty_ca_main"),
+    jcol("data_json", "Factory 1 - Duty Rate (CA)",   "duty_ca_1"),
+    jcol("data_json", "Factory 2 - Duty Rate (CA)",   "duty_ca_2"),
+    jcol("data_json", "Factory 3 - Duty Rate (CA)",   "duty_ca_3"),
+    # Duty Rate (MX) per slot
+    jcol("data_json", "Main Factory Duty Rate (MX)",  "duty_mx_main"),
+    jcol("data_json", "Factory 1 - Duty Rate (MX)",   "duty_mx_1"),
+    jcol("data_json", "Factory 2 - Duty Rate (MX)",   "duty_mx_2"),
+    jcol("data_json", "Factory 3 - Duty Rate (MX)",   "duty_mx_3"),
+    # Tariff Rate — NOT in WIP view; NULL placeholder for Phase 9b
+    # "Main Factory Tariff rate", "Factory 1 - Tariff rate" etc. do not exist yet
+)
+
+print(f"  WIP columns extracted: {len(wip.columns)}")
+
+# COMMAND ----------
+
+# ── Step 2: Extract LinePlan fields from data_json ────────────────────────────
+print("\nStep 2: Extracting LinePlan fields …")
+lp_raw = spark.table(lineplan_table)
+print(f"  LinePlan rows: {lp_raw.count()}")
+
+lp = (lp_raw
+    .select(
+        F.col("lineplan_ref"),                        # already a fixed column
+        F.col("projected_volume").alias("order_quantity"),
+        F.col("target_ldp"),
+        F.col("target_fob"),
+        F.col("internal_sourced").alias("supplier_type"),  # "INTERNAL/ SOURCED"
+    )
+    # LinePlan may have multiple rows per lineplan_ref (different colors/regions);
+    # for the join, use the first non-null aggregate per ref as the plan values.
+    .groupBy("lineplan_ref")
+    .agg(
+        F.first("order_quantity", ignorenulls=True).alias("order_quantity"),
+        F.first("target_ldp",     ignorenulls=True).alias("target_ldp"),
+        F.first("target_fob",     ignorenulls=True).alias("target_fob"),
+        F.first("supplier_type",  ignorenulls=True).alias("supplier_type"),
+    )
+)
+print(f"  LinePlan distinct refs: {lp.count()}")
+
+# COMMAND ----------
+
+# ── Step 3: Join WIP + LinePlan on Lineplan Ref # ─────────────────────────────
+print("\nStep 3: Joining WIP + LinePlan on 'Lineplan Ref #' …")
+joined = wip.join(lp, on="lineplan_ref", how="left")
+joined_count = joined.count()
+print(f"  Joined rows: {joined_count}")
+matched = joined.filter(F.col("order_quantity").isNotNull()).count()
+print(f"  Rows with LinePlan match: {matched}  ({joined_count - matched} unmatched)")
+
+# COMMAND ----------
+
+# ── Step 4: Transpose vendor/factory slots into one row each ──────────────────
+print("\nStep 4: Transposing 4 vendor/factory slots …")
+
+# Common output columns (same for all slots)
+COMMON_COLS = [
+    "customer", "season_code", "brand", "bp_style_no", "lf_style_no",
+    "legacy_code", "style_description", "color_name", "lineplan_ref",
+    "fabric_content", "gender", "class_", "sub_class",
+    "order_quantity", "target_ldp", "target_fob", "supplier_type",
+]
+
+def _slot_df(
+    df: DataFrame,
+    slot_name: str,
+    vendor_col: str, factory_col: str, country_col: str,
+    hts_col: str, du_col: str, dc_col: str, dm_col: str,
+) -> DataFrame:
+    """Build a single-slot DataFrame and rename to canonical column names."""
+    return (df
+        .withColumn("factory_slot",      F.lit(slot_name))
+        .withColumn("supplier",          F.col(vendor_col))
+        .withColumn("factory",           F.col(factory_col))
+        .withColumn("production_country", F.col(country_col))
+        .withColumn("hts_code",          F.col(hts_col))
+        .withColumn("duty_rate_us",      F.col(du_col))
+        .withColumn("duty_rate_ca",      F.col(dc_col))
+        .withColumn("duty_rate_mx",      F.col(dm_col))
+        .withColumn("tariff_rate",       F.lit(None).cast(StringType()))  # Phase 9b
+        .withColumn("updated_at",        F.lit(now.isoformat()).cast("timestamp"))
+        # Drop rows where vendor is blank — no vendor = no costing row
+        .filter(F.col("supplier").isNotNull() & (F.trim(F.col("supplier")) != ""))
+        .select(
+            *COMMON_COLS,
+            "factory_slot", "supplier", "factory", "production_country",
+            "hts_code", "duty_rate_us", "duty_rate_ca", "duty_rate_mx",
+            "tariff_rate", "updated_at",
+        )
+    )
+
+slot_dfs = [
+    _slot_df(joined, "Main",
+             "vendor_main",  "factory_main",  "prod_country_main",
+             "hts_main",     "duty_us_main",  "duty_ca_main",  "duty_mx_main"),
+    _slot_df(joined, "1",
+             "vendor_1",     "factory_1",     "prod_country_1",
+             "hts_1",        "duty_us_1",     "duty_ca_1",     "duty_mx_1"),
+    _slot_df(joined, "2",
+             "vendor_2",     "factory_2",     "prod_country_2",
+             "hts_2",        "duty_us_2",     "duty_ca_2",     "duty_mx_2"),
+    _slot_df(joined, "3",
+             "vendor_3",     "factory_3",     "prod_country_3",
+             "hts_3",        "duty_us_3",     "duty_ca_3",     "duty_mx_3"),
+]
+
+costing_chart = reduce(DataFrame.unionByName, slot_dfs)
+
+# Rename class_ back to class_name for output (avoid Python keyword confusion)
+costing_chart = costing_chart.withColumnRenamed("class_", "class_name")
+
+total_costing = costing_chart.count()
+print(f"  Costing chart rows after transpose: {total_costing}")
+print(f"  Breakdown by slot:")
+costing_chart.groupBy("factory_slot").count().orderBy("factory_slot").show()
+
+# COMMAND ----------
+
+# ── Step 5: Write costing_chart (full overwrite) ──────────────────────────────
+print("\nStep 5: Writing costing_chart …")
+(costing_chart.write
+    .format("delta")
+    .mode("overwrite")
+    .option("overwriteSchema", "true")
+    .saveAsTable(output_table))
+print(f"✅ Wrote {total_costing} rows → {output_table}  (full overwrite)")
+
+# COMMAND ----------
+
+# ── Step 6: Summary ───────────────────────────────────────────────────────────
+print(f"\n{'='*72}")
+print("SUMMARY")
+print(f"{'='*72}")
+print(f"  WIP input rows        : {wip_raw.count()}")
+print(f"  LinePlan input rows   : {lp_raw.count()}")
+print(f"  After join            : {joined_count}")
+print(f"  LinePlan matched      : {matched}")
+print(f"  Costing chart rows    : {total_costing}")
+print(f"  Output table          : {output_table}")
+print()
+print("  Sample output (first 5 rows):")
+spark.table(output_table).select(
+    "bp_style_no", "color_name", "factory_slot", "supplier", "factory",
+    "production_country", "hts_code", "duty_rate_us", "order_quantity", "target_ldp"
+).show(5, truncate=40)
+print()
+print("  Phase 9b TODO: call NT Orbit Duty Tools for rows where")
+print("    hts_code IS NULL OR duty_rate_us IS NULL OR tariff_rate IS NULL")
+print("    and fill in values + push changes back to WIP.")
+print()
+print("✅ Phase 9a Costing Chart build complete")

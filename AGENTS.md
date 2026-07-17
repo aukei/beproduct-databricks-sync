@@ -22,6 +22,13 @@ sheets), staged through **Databricks/Delta**.
   rows only) into `lft.beproduct.dtc_fabric_ktb` + `dtc_fabric_registry`. Runs as an
   independent parallel task in the DAG (`pull_fabric_dtc`, gated by `run_phase8a`).
 - **Phase 8b** (planned): upsert adopted fabric rows into BeProduct Material Master.
+- **Phase 9a — DTC LinePlan + Costing Chart**: pull `"KTB LinePlan"` document into
+  `dtc_lineplan_ktb`; join WIP × LinePlan on `"Lineplan Ref #"`; transpose 4
+  vendor/factory slots → `lft.beproduct.costing_chart`. Runs as two parallel tasks
+  (`pull_lineplan_dtc` → `build_costing_chart`, gated by `run_phase9a`). The
+  `build_costing_chart` task also depends on `pull_dtc` (WIP data).
+- **Phase 9b** (planned): NT Orbit Duty Tools API to fill null HTS/Duty/Tariff
+  Rate fields, then push changes back to WIP per-slot columns.
 
 Each field syncs **one way only** (no loops). Direction table below.
 Components, data flow, and the full ADB data model: `docs/ARCHITECTURE.md`.
@@ -283,6 +290,27 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
 - **SSOT field mapping**: `docs/beproduct_material_interested_fields.txt`
 - Do NOT use view ID `6a0ac943fedfa0ca7ff2bf48` for WIP document operations —
   that ID belongs to FABRIC only.
+
+**DTC LinePlan document (KTB, validated 2026-07-17):**
+- Document "KTB LinePlan", Workspace "KTB". **1 active request** in UAT:
+  `"FA HO 27 MENS WESTERN TOPS LINEPLAN - FA27"` (396 rows). No standard
+  `<customer> <season> <brand>` naming — LinePlan uses its own naming convention.
+- **No "LINEPLAN_ITS_USE" view** — only `"Full"` (id `69f0788555010bb745140ac4`,
+  30 dynamicFields). `pull_lineplan_to_delta` tries `"LINEPLAN_ITS_USE"` first then
+  falls back to `"Full"`.
+- **Key LinePlan fields** (exact DTC column names — all UPPERCASE):
+  `"Lineplan Ref #"` → `lineplan_ref` (join key to WIP `"Lineplan Ref #"`),
+  `"PROJECTED VOLUME (season)"` → `projected_volume` (Order Qty in costing),
+  `"TARGET SAP w/ Tariff impact"` → `target_ldp` (lowercase 'i'; Target LDP),
+  `"TARGET FOB"` → `target_fob`,
+  `"INTERNAL/ SOURCED"` → `internal_sourced` (→ Costing Supplier Type).
+- **WIP join field** is plain `"Lineplan Ref #"` (no `(GC)` suffix in actual
+  view — spec description used `(GC)` as annotation, not literal column name).
+- **WIP Tariff Rate fields do NOT exist**: `"Main Factory Tariff rate"`,
+  `"Factory 1 - Tariff rate"` etc. are all absent from WIP. Tariff Rate column
+  in costing_chart is NULL placeholder, to be filled by Phase 9b (NT Orbit).
+- **Phase 9a Delta tables**: `dtc_lineplan_ktb` + `dtc_lineplan_registry`.
+  `costing_chart` = fully overwritten join result (Style × Color × Vendor/Factory).
 
 ## Decisions on record
 
