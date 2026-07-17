@@ -138,7 +138,7 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
 - Request listing works via `GET /v1/requests` with `workspaceName`+`filters` in the
   **request body** (not query params; query param → 400 "Invalid workspaceName").
 - Registry refresh is the shared `sync.registry.refresh` (used by
-  `00_init_request_registry`, `pull_requests_to_delta`, `dtc_request_manager`):
+  `00_init_request_registry`, `pull_masters_to_delta`, `dtc_request_manager`):
   `search_requests(workspace, document_name=document, filters={"requestIsActive":"Y"})`
   lists **active** requests (server-side filter — DTC dev confirmed inactive requests
   400 on get-by-id; field is `requestIsActive`). A client-side `is_active_item` guard
@@ -318,7 +318,7 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
   <brand>`; brand-less names → `NOT_IN_SCOPE`, never created); gated by `dry_run`
   (default true = preview only). The registry scan is the shared
   `sync.registry.refresh` (discover → enrich → merge), invoked automatically by
-  `pull_requests_to_delta` and `dtc_request_manager` (default `refresh_registry=true`)
+  `pull_masters_to_delta` and `dtc_request_manager` (default `refresh_registry=true`)
   and standalone by `00_init_request_registry`. NOTE: `create_sheet` is a live,
   not-easily-reversible write; there is no delete-request in the connector.
   **`POST /v1/sheets` body shape VALIDATED LIVE 2026-06-18 (HTTP 201)** after the
@@ -404,7 +404,7 @@ pull), converging at Step 4. Steps 1-2 ≈ 110 s; Step 3 ≈ 84 s — they overl
 
 **What was actually slow and why (intra-step cell-level profiling, 2026-06-19):**
 The original hypothesis (serial `get_sheet` HTTP calls = 396 s) was wrong. The real
-costs in `pull_requests_to_delta` were 100% Spark overhead:
+costs in `pull_masters_to_delta` were 100% Spark overhead:
 - Cell 5: 66 per-request DataFrames → `reduce(unionByName)` → Delta overwrite +
   redundant `count()` = **277 s** for 422 rows. Fixed: one flat list → one DF → one
   write → `len()`. Now **8.8 s**.

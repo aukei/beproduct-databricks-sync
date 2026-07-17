@@ -85,7 +85,7 @@ print(f"  Mode: {mode}")
 # COMMAND ----------
 
 # Discover (or use explicit ids), enrich by-id, and upsert — all via the shared
-# registry helper so pull_requests_to_delta / dtc_request_manager reuse identical
+# registry helper so pull_masters_to_delta / dtc_request_manager reuse identical
 # logic. request_ids blank → auto-discover the whole workspace+document.
 secret_key = f"dtc_api_key_{environment}"
 api_key = dbutils.secrets.get(scope="beproduct", key=secret_key)

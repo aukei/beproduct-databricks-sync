@@ -186,7 +186,7 @@ def build_tasks():
     }, depends=[dep("bp_style_sync")]))
 
     # Step 3 — pull DTC + refresh registry (parallel with 1/2, both gated by wait_cluster)
-    tasks.append(nb_task("pull_dtc", f"{NB_DTC}/pull_requests_to_delta", {
+    tasks.append(nb_task("pull_dtc", f"{NB_DTC}/pull_masters_to_delta", {
         "dtc_environment": ENV, "customer": CUST, "dtc_workspace": WS, "dtc_document": DOC,
         "catalog": CAT, "schema": SCH, "write_mode": "overwrite",
         "refresh_registry": "true", "max_workers": "4",
@@ -220,7 +220,7 @@ def build_tasks():
     # Step 7 reads inserted_ids from Step 5's task value; if phase1_push was
     # skipped (run_phase1=false) the ref is empty → full re-pull. run_if=ALL_DONE
     # so a skipped/failed phase1_push doesn't block the re-pull.
-    tasks.append(nb_task("repull_dtc", f"{NB_DTC}/pull_requests_to_delta", {
+    tasks.append(nb_task("repull_dtc", f"{NB_DTC}/pull_masters_to_delta", {
         "dtc_environment": ENV, "customer": CUST, "dtc_workspace": WS, "dtc_document": DOC,
         "catalog": CAT, "schema": SCH, "write_mode": "overwrite", "refresh_registry": "false",
         "request_ids": "{{tasks.phase1_push.values.inserted_ids}}", "max_workers": "4",

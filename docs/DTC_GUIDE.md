@@ -72,7 +72,7 @@ Connector methods: `search_requests`, `get_request`, `get_views`,
 |----------|------|--------|
 | `dtc/notebooks/00_init_request_registry.py` | Standalone registry build/refresh (first build or targeted `request_ids`). | `dtc_request_registry` |
 | `dtc/notebooks/00_init_season_mapping.py` | Seed the season-code prefix table. | `dtc_seasoncode_mapping` |
-| `dtc/notebooks/pull_requests_to_delta.py` | Refresh registry, then pull each in-scope active request's `WIP_ITS_USE` view. | `dtc_wip_<customer>` |
+| `dtc/notebooks/pull_masters_to_delta.py` | Refresh registry, then pull each in-scope active request's `WIP_ITS_USE` view. | `dtc_wip_<customer>` |
 | `dtc/notebooks/05_push_dtc_to_beproduct.py` | Phase 2 pushback of DTC-owned fields. | BeProduct (+ `dtc_to_beproduct_sync_log`) |
 
 `beproduct/dtc_request_manager.py` (BeProduct-side, but DTC-writing) resolves /
@@ -82,7 +82,7 @@ Connector methods: `search_requests`, `get_request`, `get_views`,
 
 `sync.registry.refresh` = discover (`search_requests`) → enrich by-id → upsert
 (`mode=merge`, preserving `last_extracted`/`last_pushed`/`row_count`). It runs
-automatically inside `pull_requests_to_delta` and `dtc_request_manager` (both
+automatically inside `pull_masters_to_delta` and `dtc_request_manager` (both
 default `refresh_registry=true`), so the registry mirrors the workspace+document
 each run; `00_init_request_registry.py` is the same scan standalone. After a full
 auto-discover, in-scope rows absent from the scan are **marked** inactive
@@ -141,7 +141,7 @@ year). Forward-only (BeProduct → DTC), applied in `beproduct_to_dtc_transform.
 `beproduct_to_dtc_sync_log` (stages `resolve`/`create`/`share`/`push`/`images`) and
 `dtc_to_beproduct_sync_log` (Phase 2).
 
-`pull_requests_to_delta.py` parameters: `dtc_environment` (uat|prod), `customer`
+`pull_masters_to_delta.py` parameters: `dtc_environment` (uat|prod), `customer`
 (also the table suffix), `dtc_workspace`, `dtc_document`, `catalog`/`schema`,
 `write_mode` (overwrite|append), `refresh_registry`.
 

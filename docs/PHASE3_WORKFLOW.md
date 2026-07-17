@@ -31,7 +31,7 @@ untouched, so re-runs are idempotent.
 
 ```
 (after beproduct_to_dtc_push, Phase 1)
-1. Refresh dtc_wip_<customer>           dtc/notebooks/pull_requests_to_delta.py
+1. Refresh dtc_wip_<customer>           dtc/notebooks/pull_masters_to_delta.py
    (so it reflects rows Phase 1 inserted)
 2. Image upload                         beproduct/beproduct_to_dtc_images.py
    → DTC "Style Image" cell (blank cells only)

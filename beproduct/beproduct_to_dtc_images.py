@@ -14,7 +14,7 @@ EXISTING row:
 
 Because the endpoint targets an existing row by rowIndex, this MUST run AFTER
 beproduct_to_dtc_push (Phase 1), which creates/updates the rows. The orchestrator
-runs a fresh DTC pull (pull_requests_to_delta) just before this so dtc_wip_<cust>
+runs a fresh DTC pull (pull_masters_to_delta) just before this so dtc_wip_<cust>
 reflects the rows Phase 1 just inserted; this notebook itself ALSO re-reads each
 sheet live (connector.get_sheet) so it sees the freshest rowIndex + Style Image
 state and never acts on stale data.

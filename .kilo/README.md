@@ -144,7 +144,7 @@ access_token = api.oauth2_client.get_access_token()
 5. Apply business logic
 6. Write to Delta Lake (`lft.beproduct.dtc_wip_<customer>`)
 
-See: `dtc/notebooks/pull_requests_to_delta.py` (registry-driven; run
+See: `dtc/notebooks/pull_masters_to_delta.py` (registry-driven; run
 `00_init_request_registry.py` first)
 
 ### Full Sync: BeProduct → Delta Lake

@@ -103,11 +103,11 @@ Run these in order if you prefer step-by-step control (params shown are the key 
 |---|----------|---------|--------|
 | 1 | `beproduct/beproduct_style_sync` | Pull styles (`folder_name=KTB`, `refresh_mode=FULL`) | `ktb_styles` |
 | 2 | `beproduct/beproduct_to_dtc_transform` | Denormalize style × color | `beproduct_to_dtc_staging` |
-| 3 | `dtc/notebooks/pull_requests_to_delta` | Pull DTC `WIP_ITS_USE` rows (+ refresh registry) | `dtc_wip_<customer>` |
+| 3 | `dtc/notebooks/pull_masters_to_delta` | Pull DTC `WIP_ITS_USE` rows (+ refresh registry) | `dtc_wip_<customer>` |
 | 4 | `beproduct/dtc_request_manager` | Resolve / **create** / **share** requests (`dry_run=false` to create) | `dtc_request_mapping` |
 | 5 | `beproduct/beproduct_to_dtc_push` | **Phase 1** upsert (`dry_run`, `delta_only`) | DTC sheets |
 | 6 | `dtc/notebooks/05_push_dtc_to_beproduct` | **Phase 2** pushback (`push_blanks=false`) | BeProduct |
-| 7 | `dtc/notebooks/pull_requests_to_delta` | Refresh dtc_wip after Phase 1 inserts | `dtc_wip_<customer>` |
+| 7 | `dtc/notebooks/pull_masters_to_delta` | Refresh dtc_wip after Phase 1 inserts | `dtc_wip_<customer>` |
 | 8 | `beproduct/beproduct_to_dtc_images` | **Phase 3** image upload (`dry_run`, `max_uploads`) | DTC "Style Image" |
 
 Other notebooks:

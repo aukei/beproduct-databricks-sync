@@ -15,13 +15,13 @@ Runs the full bi-directional sync pipeline in the correct order:
 
   Step 1  beproduct_style_sync           BeProduct API -> lft.beproduct.ktb_styles
   Step 2  beproduct_to_dtc_transform     ktb_styles -> lft.beproduct.beproduct_to_dtc_staging
-  Step 3  pull_requests_to_delta         DTC API -> lft.beproduct.dtc_wip_<customer>
+  Step 3  pull_masters_to_delta         DTC API -> lft.beproduct.dtc_wip_<customer>
                                          (also refreshes dtc_request_registry)
   Step 4  dtc_request_manager            Resolve / create DTC requests
                                          -> lft.beproduct.dtc_request_mapping
   Step 5  beproduct_to_dtc_push          Phase 1: BeProduct -> DTC (upsert + orphan marks)
   Step 6  05_push_dtc_to_beproduct       Phase 2: DTC -> BeProduct (pushback)
-  Step 7  pull_requests_to_delta         Refresh dtc_wip_<customer> AFTER Phase 1
+  Step 7  pull_masters_to_delta         Refresh dtc_wip_<customer> AFTER Phase 1
                                          so it reflects rows Phase 1 just inserted
   Step 8  beproduct_to_dtc_images        Phase 3: BeProduct front image -> DTC
                                          "Style Image" cell (blank cells only)
@@ -125,7 +125,7 @@ def _parse_inserted_ids(exit_str: str) -> str:
 
     Format emitted by Step 5: "ok inserts=N inserted_ids=id1,id2,..."
     Returns the raw comma-separated id string (empty string if none / unparseable),
-    ready to pass straight to pull_requests_to_delta's request_ids widget.
+    ready to pass straight to pull_masters_to_delta's request_ids widget.
     """
     if not exit_str:
         return ""
@@ -258,7 +258,7 @@ _step2_ok = _steps[-1]["status"] == "ok"
 _r3 = _run_step(
     3,
     "Pull DTC Requests -> Delta  (DTC API -> dtc_wip + registry)",
-    f"{nb_dtc}/pull_requests_to_delta",
+    f"{nb_dtc}/pull_masters_to_delta",
     {
         "dtc_environment":  dtc_environment,
         "customer":         customer,
@@ -385,7 +385,7 @@ else:
 _r7 = _run_step(
     7,
     _step7_name,
-    f"{nb_dtc}/pull_requests_to_delta",
+    f"{nb_dtc}/pull_masters_to_delta",
     {
         "dtc_environment":  dtc_environment,
         "customer":         customer,

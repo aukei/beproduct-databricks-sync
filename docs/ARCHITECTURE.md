@@ -48,7 +48,7 @@ dtc/
 ├── notebooks/
 │   ├── 00_init_request_registry.py  # Standalone registry build/refresh
 │   ├── 00_init_season_mapping.py    # Seed dtc_seasoncode_mapping
-│   ├── pull_requests_to_delta.py    # DTC API → dtc_wip_<customer> (+ registry refresh)
+│   ├── pull_masters_to_delta.py    # DTC API → dtc_wip_<customer> (+ registry refresh)
 │   └── 05_push_dtc_to_beproduct.py  # Phase 2: DTC → BeProduct pushback
 ├── python/                          # Importable modules (deployed as Workspace files)
 │   ├── client/rest_client.py        # Generic REST client (retry, multipart)

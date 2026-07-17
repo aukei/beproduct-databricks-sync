@@ -57,7 +57,7 @@ Only BeProduct-owned columns are pushed (`Style Image` excluded). DTC-owned colu
 ```
 0. Build/refresh request registry        dtc/notebooks/00_init_request_registry.py
                                          → lft.beproduct.dtc_request_registry
-1. Pull in-scope DTC requests → Delta   dtc/notebooks/pull_requests_to_delta.py
+1. Pull in-scope DTC requests → Delta   dtc/notebooks/pull_masters_to_delta.py
                                          → lft.beproduct.dtc_wip_<customer>
 2. Ensure BeProduct style sync is fresh  beproduct/beproduct_style_sync.py
 3. Transform / denormalize               beproduct/beproduct_to_dtc_transform.py
@@ -68,7 +68,7 @@ Only BeProduct-owned columns are pushed (`Style Image` excluded). DTC-owned colu
 ```
 
 The registry scan (`sync.registry.refresh`) is **shared** and runs automatically
-inside `pull_requests_to_delta` and `dtc_request_manager` (both default
+inside `pull_masters_to_delta` and `dtc_request_manager` (both default
 `refresh_registry=true`), so the registry mirrors the workspace+document at sync
 time. `00_init_request_registry.py` is the same scan as a standalone notebook —
 useful for the first build or targeted `request_ids`, but no longer a mandatory
@@ -89,7 +89,7 @@ populated by `00_init_request_registry.py`.
   request in the workspace+document via `DTCConnector.search_requests` (`GET
   /v1/requests` with `workspaceName`+`filters` in the **body**), then enriches each
   by-id (`get_request` + `get_views`). Called automatically by
-  `pull_requests_to_delta` and `dtc_request_manager`, and standalone by
+  `pull_masters_to_delta` and `dtc_request_manager`, and standalone by
   `00_init_request_registry`.
 - **Manual override:** pass `request_ids` (comma-separated) to `00_init_request_registry`
   to register only those.

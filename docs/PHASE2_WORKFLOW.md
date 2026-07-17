@@ -45,7 +45,7 @@ The DTC-owned columns are deliberately absent from Phase 1 `FIELD_MAPPING`
 2. Transform / denormalize      beproduct_to_dtc_transform.py (1 row per style×color,
                                                                carries beproduct_style_id
                                                                + colorway_id)
-3. DTC → Databricks             dtc/notebooks/pull_requests_to_delta.py  (dtc_wip_<cust>)
+3. DTC → Databricks             dtc/notebooks/pull_masters_to_delta.py  (dtc_wip_<cust>)
 4. Resolve requests             beproduct/dtc_request_manager.py
 5. Push BeProduct → DTC         beproduct/beproduct_to_dtc_push.py   (Phase 1 + orphan marks)
 6. Push DTC → BeProduct         dtc/notebooks/05_push_dtc_to_beproduct.py  (Phase 2)

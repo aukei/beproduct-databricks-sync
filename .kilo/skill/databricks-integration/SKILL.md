@@ -474,7 +474,7 @@ job = w.jobs.create(
             task_key="pull_dtc",
             depends_on=[jobs.TaskDependency(task_key="init_mapping")],
             notebook_task=jobs.NotebookTask(
-                notebook_path="/Workspace/Repos/beproduct-sync/DTC/notebooks/pull_requests_to_delta",
+                notebook_path="/Workspace/Repos/beproduct-sync/DTC/notebooks/pull_masters_to_delta",
                 base_parameters={
                     "customer": "KTB",
                     "dtc_environment": "uat"

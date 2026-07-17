@@ -18,7 +18,7 @@ Phase 6 update (2026-06-26):
     customer_style_number. "Legacy Code" is now BeProduct->DTC (Phase 1).
 
 Inputs (already produced by the daily pipeline):
-  - DTC pulled table:  lft.beproduct.dtc_wip_<customer>   (pull_requests_to_delta)
+  - DTC pulled table:  lft.beproduct.dtc_wip_<customer>   (pull_masters_to_delta)
         -> request_reference, bp_style_number, color_wash, data_json, row_id
   - BeProduct staging: lft.beproduct.<staging_table>      (beproduct_to_dtc_transform)
         -> dtc_request_name, bp_style_number, color, colorway_id, beproduct_style_id
