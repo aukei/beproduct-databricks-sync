@@ -165,14 +165,14 @@ if refresh_registry:
     print(f"\n{'='*72}")
     print("Registry refresh: discovering active FABRIC requests …")
     reg_module.refresh(
-        connector    = connector,
-        spark        = spark,
-        registry_full= fabric_reg_full,
-        workspace    = workspace,
-        document     = document,
-        environment  = environment,
-        customer     = customer,
-        mode         = "merge",
+        spark,
+        connector,
+        registry_table = fabric_reg_full,
+        workspace      = workspace,
+        document       = document,
+        environment    = environment,
+        customer       = customer,
+        mode           = "merge",
     )
 
 # Load registry rows for this environment
