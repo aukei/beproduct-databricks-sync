@@ -32,23 +32,34 @@ agreeing with the request name (project guarantee).
 
 ## Fields pushed BeProduct → DTC
 
+Styles with `Product Status = "Finalized"` are **excluded** before sync.
 Only BeProduct-owned columns are pushed (`Style Image` excluded). DTC-owned columns
-(Legacy Code, Lot#, Main Vendor/Factory (Sampling), Main Factory Customer ID) are
-**not** pushed here — they flow the other way in Phase 2. Authoritative mapping:
+(Lot#, Main Vendor/Factory (Sampling), Main Factory Customer ID) are **not** pushed
+here — they flow the other way in Phase 2. Authoritative mapping:
 `docs/beproduct_style_interested_fields.txt`; code: `phase1.FIELD_MAPPING`.
 
-| DTC column        | BeProduct source (fieldId)            |
-|-------------------|---------------------------------------|
-| Product Status    | header `style_status`                 |
-| Style Description | header `header_name`                  |
-| Class / Sub Class | header `product_category` / `product_sub_category` |
-| Division          | header `division_hk`                  |
-| Brand (key-like)  | header `brands_multi`[0]              |
-| Garment Finish    | header `garment_finish`               |
-| Tech Pack Stage   | header `techpack_stage`               |
-| Fabric Group / Placement | header `core_main_material`    |
-| LF Style# (key)   | header `header_number`                |
-| Color / Wash (key)| colorway `colorName`                  |
+| DTC column        | BeProduct source (fieldId)         | Notes |
+|-------------------|------------------------------------|-------|
+| BP Style# **(key)** | header `header_number`           | Phase 6 match key; was "LF Style#" |
+| Color / Wash **(key)** | colorway `colorName`          | In-request match key |
+| Brand **(routing)** | header `brand_hk`               | Phase 6; constant per request |
+| Product Status    | header `style_status`              | |
+| Style Description | header `header_name`               | |
+| Class / Sub Class | header `product_category` / `product_sub_category` | |
+| Division          | header `division_hk`               | |
+| Garment Finish    | header `garment_finish`            | |
+| Tech Pack Stage   | header `techpack_stage`            | |
+| Fabric Group / Placement | header `core_main_material` | |
+| Gender            | header `gender`                    | Phase 6; DTC col confirmed in view |
+| LF Style#         | header `lf_style_number`           | Phase 6 optional (new separate field) |
+| Legacy Code       | header `customer_style_number`     | Phase 6 optional; was DTC→BP before |
+| Supplier          | *(constant "Supplier")*            | Phase 6 default-fill; only written when DTC cell blank |
+| Proto Sample - Sample Status  | sample app `proto_sample`   | Phase 7; JSON list |
+| Pre-line Sample - Status      | sample app `preline_sample` | Phase 7; JSON list |
+| SMS - Sample Status           | sample app `sms_sample`     | Phase 7; JSON list |
+| 1st Fit Sample Approval Status | sample app `fit_sample`    | Phase 7; JSON list |
+| 2nd Fit Sample Approval Status | sample app `pp_sample`     | Phase 7; JSON list |
+| TOP Sample Approval Status    | sample app `top_sample`     | Phase 7; JSON list |
 
 ---
 

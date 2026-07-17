@@ -43,7 +43,7 @@ untouched, so re-runs are idempotent.
    and current Style Image state (it therefore also sees rows Phase 1 just
    inserted, independent of step 1's table refresh).
 2. Matches each DTC row to its BeProduct staging row on the in-request key
-   `(LF Style#, Color / Wash)`.
+   `(BP Style#, Color / Wash)` (Phase 6; was `LF Style#`).
 3. For every row that is **blank-image AND** whose BeProduct staging row has a
    **valid `front_image_url`**: downloads the image from the BeProduct CDN,
    classifies it, transcodes if needed, then POSTs it to the DTC image endpoint.

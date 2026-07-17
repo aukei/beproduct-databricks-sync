@@ -14,25 +14,30 @@ giving a clean **one-way-per-field** bidirectional sync with no loops.
 
 Each field syncs in exactly ONE direction. A field is never pushed both ways.
 
-| Field (DTC column)        | Direction          | BeProduct location (fieldId)                  |
-|---------------------------|--------------------|-----------------------------------------------|
-| Product Status            | BeProduct → DTC    | header `style_status`                         |
-| Style Description         | BeProduct → DTC    | header `header_name`                          |
-| Class / Sub Class         | BeProduct → DTC    | header `product_category` / `product_sub_category` |
-| Division                  | BeProduct → DTC    | header `division_hk`                          |
-| Brand                     | BeProduct → DTC    | header `brands_multi` `[0]`                   |
-| Garment Finish            | BeProduct → DTC    | header `garment_finish`                       |
-| Tech Pack Stage           | BeProduct → DTC    | header `techpack_stage`                       |
-| Fabric Group / Placement  | BeProduct → DTC    | header `core_main_material`                   |
-| Color / Wash              | key                | colorway `colorName`                          |
-| LF Style#                 | key                | header `header_number`                        |
-| **Legacy Code**           | **DTC → BeProduct**| header `customer_style_number`                |
-| **Main Vendor (Sampling)**| **DTC → BeProduct**| header `parent_vendor`                        |
-| **Main Factory (Sampling)**|**DTC → BeProduct**| header `factory`                              |
-| **Lot#**                  | **DTC → BeProduct**| **colorway `drawing_number_walmart`**         |
-| **Main Factory Customer ID**| DTC → BeProduct  | *no BeProduct field yet → skipped + logged*   |
-| Style Image               | BeProduct → DTC (image only) | `front_image_url` → DTC "Style Image" (Phase 3, binary upload — see `PHASE3_WORKFLOW.md`) |
+| Field (DTC column)        | Direction          | BeProduct location (fieldId)                  | Notes |
+|---------------------------|--------------------|-----------------------------------------------|-------|
+| Product Status            | BeProduct → DTC    | header `style_status`                         | |
+| Style Description         | BeProduct → DTC    | header `header_name`                          | |
+| Class / Sub Class         | BeProduct → DTC    | header `product_category` / `product_sub_category` | |
+| Division                  | BeProduct → DTC    | header `division_hk`                          | |
+| Brand                     | BeProduct → DTC    | header `brand_hk`                             | Phase 6: single-value field |
+| Garment Finish            | BeProduct → DTC    | header `garment_finish`                       | |
+| Tech Pack Stage           | BeProduct → DTC    | header `techpack_stage`                       | |
+| Fabric Group / Placement  | BeProduct → DTC    | header `core_main_material`                   | |
+| Gender                    | BeProduct → DTC    | header `gender`                               | Phase 6 |
+| Legacy Code               | BeProduct → DTC    | header `customer_style_number`                | Phase 6: direction changed from DTC→BP |
+| LF Style#                 | BeProduct → DTC    | header `lf_style_number`                      | Phase 6 optional |
+| Supplier                  | BeProduct → DTC    | *(constant "Supplier")*                       | Phase 6 default-fill only |
+| BP Style# **(key)**       | BeProduct → DTC    | header `header_number`                        | Phase 6 match key |
+| Color / Wash **(key)**    | key (not pushed)   | colorway `colorName`                          | |
+| **Main Vendor (Sampling)**| **DTC → BeProduct**| header `parent_vendor`                        | |
+| **Main Factory (Sampling)**|**DTC → BeProduct**| header `factory`                              | |
+| **Lot#**                  | **DTC → BeProduct**| **colorway `drawing_number_walmart`**         | |
+| **Main Factory Customer ID**| DTC → BeProduct  | *no BeProduct field yet → skipped + logged*   | |
+| Style Image               | BeProduct → DTC (image only) | `front_image_url` (Phase 3, binary) | See `PHASE3_WORKFLOW.md` |
+| *Sample status columns (×6)* | BeProduct → DTC | sample apps `proto`/`preline`/`sms`/`fit`/`pp`/`top` | Phase 7; JSON list per app |
 
+**Removed (Phase 6):** "Legacy Code" was DTC→BP; now BP→DTC. "Customer Style#" DTC column not created.
 The DTC-owned columns are deliberately absent from Phase 1 `FIELD_MAPPING`
 (`dtc/python/sync/phase1.py`) and handled by Phase 2 (`dtc/python/sync/phase2.py`).
 

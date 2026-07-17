@@ -48,7 +48,7 @@ connector = DTCConnector(api_key=api_key, environment=environment, workspace_nam
 | List requests | `GET /v1/requests` | `workspaceName` + `filters` in the **JSON body** (not query params). Server-side `requestIsActive:"Y"` filter. |
 | Get request | `GET /v1/requests/{id}` | by-id; inactive requests 400 on get-by-id. |
 | Get views | `GET /v1/requests/{id}/views` | resolve the `WIP_ITS_USE` `viewId`. |
-| View definition | `GET /v1/views/{viewId}` | `dynamicFields[].fieldName` = the **authoritative** allowed-column list (empty columns don't appear in sheet data). |
+| View definition | `GET /v1/views/{viewId}` | `dynamicFields[].fieldName` = authoritative column list. **NOTE:** returns 403 for some view IDs with the sync API key (e.g. the wrong view id `6a3907f6df772fd797ee5b7c` is "XTS Master"). Correct KTB WIP view id: `69f04983501f3d9cf4fc379c` (198 fields). `allowed_cols` in push notebook UNIONs data-scan with FALLBACK_COLS. |
 | Get sheet rows | `GET /v1/sheets/{sheetId}/views/{viewId}` | returns `sheetData[]` with `rowId`/`rowIndex` + columns. |
 | **Upsert rows** | `PATCH /v1/sheets/{sheetId}/views/{viewId}` | body `{"sheetData":[{…,"rowId"\|"rowIndex":…}]}` → **204**. A single PATCH **cannot mix** `rowId` (update) and `rowIndex` (insert) — separate batches. |
 | Delete rows | `DELETE /v1/sheets/{sheetId}/views/{viewId}/rows` | body `{"rowIndexes":[…]}` → 204 (keys off `rowIndex`). |
@@ -70,13 +70,16 @@ Connector methods: `search_requests`, `get_request`, `get_views`,
 
 | Notebook | Does | Writes |
 |----------|------|--------|
-| `dtc/notebooks/00_init_request_registry.py` | Standalone registry build/refresh (first build or targeted `request_ids`). | `dtc_request_registry` |
+| `dtc/notebooks/00_init_request_registry.py` | Standalone WIP registry build/refresh (first build or targeted `request_ids`). | `dtc_request_registry` |
 | `dtc/notebooks/00_init_season_mapping.py` | Seed the season-code prefix table. | `dtc_seasoncode_mapping` |
-| `dtc/notebooks/pull_masters_to_delta.py` | Refresh registry, then pull each in-scope active request's `WIP_ITS_USE` view. | `dtc_wip_<customer>` |
-| `dtc/notebooks/05_push_dtc_to_beproduct.py` | Phase 2 pushback of DTC-owned fields. | BeProduct (+ `dtc_to_beproduct_sync_log`) |
+| `dtc/notebooks/pull_masters_to_delta.py` | Refresh WIP registry; pull each in-scope active request's `WIP_ITS_USE` view (Steps 3 + 7). | `dtc_wip_<customer>` |
+| `dtc/notebooks/pull_fabric_to_delta.py` | Phase 8a: pull KTB FABRIC sheets (`include_test_sheets` switch, Adoption=Y filter). | `dtc_fabric_<customer>`, `dtc_fabric_registry` |
+| `dtc/notebooks/pull_lineplan_to_delta.py` | Phase 9a: pull KTB LinePlan (LINEPLAN_ITS_USE → Full fallback). | `dtc_lineplan_<customer>`, `dtc_lineplan_registry` |
+| `dtc/notebooks/build_costing_chart.py` | Phase 9a: join WIP × LinePlan on "Lineplan Ref #"; transpose 4 vendor/factory slots. | `costing_chart` (full overwrite) |
+| `dtc/notebooks/05_push_dtc_to_beproduct.py` | Phase 2 pushback of DTC-owned fields (Vendor, Factory, Lot#). | BeProduct (+ `dtc_to_beproduct_sync_log`) |
 
 `beproduct/dtc_request_manager.py` (BeProduct-side, but DTC-writing) resolves /
-**creates** / **shares** requests and writes `dtc_request_mapping`.
+**creates** / **shares** WIP requests and writes `dtc_request_mapping`.
 
 ### Registry scan (shared)
 
@@ -117,14 +120,32 @@ Built from an **explicit schema** (so all-NULL columns don't trip
 
 **Fixed columns:** `customer`, `workspace_name`, `document_name`, `request_id`,
 `request_reference`, `season_code`, `brands`, `row_id` (STRING), `row_index`
-(LONG), `lf_style_number`, `color_wash`, `extracted_at` (TIMESTAMP), `data_json`.
-**Dynamic columns:** every view column flattened to `col_<normalized_name>`
-(STRING; may be absent when empty for a request). Full fidelity always in
-`data_json`.
+(LONG), `bp_style_number` (Phase 6 match key), `lf_style_number`, `color_wash`,
+`extracted_at` (TIMESTAMP), `data_json` (full row JSON).
 
 - **Operation keys:** `row_id` → UPDATE (PATCH); `row_index` → INSERT/DELETE.
-- **In-request match key:** `(lf_style_number, color_wash)`.
-- **Cross-request identity:** `(customer, season_code, brands, lf_style_number, color_wash)`.
+- **In-request match key:** `(BP Style#, Color / Wash)` (Phase 6; was `LF Style#`).
+- **Cross-request identity:** `(customer, season_code, brand, bp_style_number, color_wash)`.
+
+### `dtc_fabric_<customer>` — Phase 8a fabric rows (Adoption=Y)
+
+`lf_material_id`, `its_key`, `mill_fabric_code`, `mill_name`, `material_class`,
+`fabric_type`, `fabric_content` (→ BP Material Description), `kb_fabric_code`,
+`adoption`, `season_code`, `brand`, `sheet_type` (PROD/DEV/MILL), `mill_code`,
+`data_json`. View: FABRIC `WIP_ITS_USE` (id `6a0ac943fedfa0ca7ff2bf48`, 120 fields).
+
+### `dtc_lineplan_<customer>` — Phase 9a LinePlan rows
+
+`lineplan_ref`, `projected_volume`, `target_ldp`, `target_fob`, `internal_sourced`,
+`gender`, `category`, `product_line`, `region`, `season_launched`, `data_json`.
+View: "Full" (id `69f0788555010bb745140ac4`, 30 fields). Exact DTC field names
+(all UPPERCASE): `"PROJECTED VOLUME (season)"`, `"TARGET SAP w/ Tariff impact"`.
+
+### `costing_chart` — Phase 9a Style × Color × Vendor/Factory
+
+Key: `[customer, bp_style_no, color_name, lineplan_ref, factory_slot, supplier, factory]`.
+Slots: Main / 1 / 2 / 3. HTS/Duty columns per slot; `tariff_rate = NULL` (Phase 9b).
+Full overwrite each run.
 
 ### `dtc_request_mapping` — resolved requests (overwritten each run)
 

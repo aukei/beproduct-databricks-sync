@@ -1,133 +1,159 @@
 # BeProduct ⇄ DTC Sync — Pipeline Data-Flow Diagram
 
-> Databricks-centred view of the implemented sync pipelines.
-> `BeProduct_DTC_sync_dag` — multi-task job, job id 294837488757511. Updated 2026-07-03.
+> Databricks-centred view of all implemented sync pipelines.
+> `BeProduct_DTC_sync_dag` — job 294837488757511. Updated 2026-07-18.
 
 ```mermaid
-flowchart LR
+flowchart TB
 
-%% ═══════════════════════════════════════════════════════════════════════════
-%%  LEFT: BeProduct        CENTER: Databricks (hub)        RIGHT: DTC
-%% ═══════════════════════════════════════════════════════════════════════════
+%% ─── External systems ────────────────────────────────────────────────────────
 
-    subgraph BP ["☁ BeProduct — Style PLM"]
+    subgraph BP ["☁  BeProduct  (Style PLM)"]
         direction TB
-        BPAPI(["BeProduct SDK\nOAuth 2.0\n~2–7 calls/s"])
+        BP_API(["BeProduct SDK\nOAuth 2.0"])
     end
 
-    subgraph DTCS ["☁ DTC — Data Collab (UAT/PROD)"]
+    subgraph DTC ["☁  DTC  (Data Collab  UAT/PROD)"]
         direction TB
-        DTCAPI(["DTC REST API\nx-api-key\nWIP_ITS_USE view\n194 columns"])
+        DTC_WIP(["KTB WIP\nWIP_ITS_USE  198 cols\nview 69f04983…"])
+        DTC_FAB(["KTB FABRIC\nWIP_ITS_USE  120 cols\nview 6a0ac943…"])
+        DTC_LP(["KTB LinePlan\nFull  30 cols\nview 69f07885…"])
     end
 
-    subgraph ADB ["⚡ AZURE DATABRICKS — lft.beproduct (Unity Catalog)  ·  data-exchange hub"]
+%% ─── Azure Databricks ────────────────────────────────────────────────────────
+
+    subgraph ADB ["⚡  Azure Databricks  ·  lft.beproduct  (Unity Catalog)"]
         direction TB
 
-        %% ---- Delta tables ----
-        subgraph TBL ["Delta Lake"]
+        subgraph DELTA ["Delta Lake"]
             direction LR
-            KS[("ktb_styles\nraw BP styles\n+ sample apps")]
-            ST[("beproduct_to_dtc_staging\ndenormalized\nstyle × colour")]
-            WIP[("dtc_wip_ktb\npulled DTC rows")]
-            REG[("dtc_request_registry\n+ dtc_request_mapping")]
+            T_STYLES[("ktb_styles\nbp_style_number  lf_style_number\nbrand  gender  customer_style_number\n6 × sample_json  colorways_json\nFINALIZED excluded")]
+            T_STAGING[("beproduct_to_dtc_staging\nbp_style_number ← key\nbrand  season_code  color\n6 × sample status cols\nsupplier='Supplier'\ncolorway_id  beproduct_style_id")]
+            T_WIP[("dtc_wip_ktb\nbp_style_number  lf_style_number\ncolor_wash  row_id  data_json")]
+            T_REG[("dtc_request_registry\n+ dtc_request_mapping")]
+            T_FAB[("dtc_fabric_ktb\nlf_material_id  its_key\nmaterial_class  fabric_type\nfabric_content  mill_name\nAdoption=Y only")]
+            T_LP[("dtc_lineplan_ktb\nlineplan_ref  projected_volume\ntarget_ldp  target_fob\ninternal_sourced")]
+            T_CC[("costing_chart\nStyle × Color × Slot\nhts_code  duty_rate_*\ntariff_rate=NULL → Phase 9b")]
         end
 
-        %% ---- Job tasks (execution order) ----
-        subgraph JOB ["BeProduct_DTC_sync_dag  (daily, 8 tasks)"]
+        subgraph DAG ["BeProduct_DTC_sync_dag  (daily, multi-task)"]
             direction TB
-            T1["① bp_style_sync\nexclude Finalized\n+ sample enrichment"]
-            T2["② transform\ndenormalize\nbrand=brand_hk"]
-            T3["③ pull_dtc\n+ registry refresh"]
-            T4["④ request_manager\ncreate + share"]
-            T5["⑤ phase1_push\nBP→DTC upsert"]
-            T6["⑥ phase2_push\nDTC→BP"]
-            T7["⑦ repull_dtc\ntargeted"]
-            T8["⑧ phase3_images\nfront image"]
+            S1["① bp_style_sync\nexcl. Finalized\n+ sample enrichment"]
+            S2["② transform\nbrand=brand_hk\nsample UDFs (Phase 7)"]
+            S3["③ pull_master_dtc\n+ registry refresh"]
+            S4["④ request_manager\ncreate + share"]
+            S5["⑤ phase1_push\nBP→DTC Phases 1+7"]
+            S6["⑥ phase2_push\nDTC→BP vendor/factory/lot"]
+            S7["⑦ repull_dtc\ntargeted re-pull"]
+            S8["⑧ phase3_images\nfront image binary"]
+            S8A["⑧a pull_fabric_dtc\nPhase 8a  FABRIC\nAdoption=Y"]
+            S9A1["⑨a₁ pull_lineplan_dtc\nPhase 9a  LinePlan"]
+            S9A2["⑨a₂ build_costing_chart\nWIP × LinePlan join\n4-slot transpose"]
         end
     end
 
-%% ═══════════════════════════════════════════════════════════════════════════
-%%  FORWARD  BeProduct → DTC  (Phase 1 fields + Phase 3 image)
-%% ═══════════════════════════════════════════════════════════════════════════
-    BPAPI  ==>|"① pull styles\nattributes_list + app_get"| T1
-    T1     ==> KS
-    KS     ==> T2
-    T2     ==> ST
-    ST     ==> T5
-    REG    --> T5
-    T5     ==>|"⑤ PATCH sheet\nUPDATE rowId / INSERT rowIndex\nBP Style#, Gender, Supplier,\nLegacy Code, LF Style#, +10"| DTCAPI
-    ST     --> T8
-    T8     ==>|"⑧ POST images (multipart)\nStyle Image, blank cells only"| DTCAPI
+%% ─── WIP chain (Phases 1 / 2 / 3 / 7) ───────────────────────────────────────
+    BP_API  ==>|"① pull styles\nattributes_list + app_get×6"| S1
+    S1      ==> T_STYLES
+    T_STYLES ==> S2
+    S2      ==> T_STAGING
+    DTC_WIP ==>|"③ get_sheet×75\nsearch_requests"| S3
+    S3      ==> T_WIP
+    S3      ==> T_REG
+    T_STAGING --> S4
+    T_REG   --> S4
+    S4      -->|"POST /sheets\nPOST /shares"| DTC_WIP
+    T_STAGING --> S5
+    T_REG   --> S5
+    S5      ==>|"⑤ PATCH  BP Style#/Color key\nPhase 1+7 fields\nSupplier default-fill"| DTC_WIP
+    T_WIP   --> S6
+    T_STAGING --> S6
+    S6      ==>|"⑥ attributes_update\nVendor/Factory/Lot#"| BP_API
+    DTC_WIP -->|"⑦ targeted re-pull"| S7
+    S7      --> T_WIP
+    T_WIP   --> S8
+    T_STAGING --> S8
+    S8      ==>|"⑧ POST images\nmultipart  blank cells only"| DTC_WIP
 
-%% ═══════════════════════════════════════════════════════════════════════════
-%%  PULL  DTC → Databricks  (Phase 1 read + registry)
-%% ═══════════════════════════════════════════════════════════════════════════
-    DTCAPI ==>|"③ get_sheet × 75\nsearch_requests"| T3
-    T3     ==> WIP
-    T3     ==> REG
-    T4     -->|"④ POST /sheets + /shares"| DTCAPI
-    REG    --> T4
-    DTCAPI -->|"⑦ re-pull inserted"| T7
-    T7     --> WIP
+%% ─── Phase 8a  (parallel, independent) ──────────────────────────────────────
+    DTC_FAB ==>|"search+get_sheet\nAdoption=Y filter\ninclude_test_sheets"| S8A
+    S8A     ==> T_FAB
 
-%% ═══════════════════════════════════════════════════════════════════════════
-%%  REVERSE  DTC → BeProduct  (Phase 2)
-%% ═══════════════════════════════════════════════════════════════════════════
-    WIP    ==> T6
-    ST     --> T6
-    T6     ==>|"⑥ attributes_update\nMain Vendor / Factory (header)\nLot# (colorway)"| BPAPI
+%% ─── Phase 9a  (parallel, independent) ──────────────────────────────────────
+    DTC_LP  ==>|"search+get_sheet\nFull view fallback"| S9A1
+    S9A1    ==> T_LP
+    T_LP    --> S9A2
+    T_WIP   --> S9A2
+    S9A2    ==> T_CC
 
-%% ---- parallel hint ----
-    T1 -.->|parallel| T3
+%% ─── Parallel hints ──────────────────────────────────────────────────────────
+    S1 -.->|"parallel"| S3
+    S2 -->|"converge"| S4
+    S3 -->|"converge"| S4
 
-%% ═══════════════════════════════════════════════════════════════════════════
-    classDef ext  fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
-    classDef tbl  fill:#f0fdf4,stroke:#16a34a,color:#14532d
-    classDef task fill:#fefce8,stroke:#ca8a04,color:#713f12
-    classDef api  fill:#eff6ff,stroke:#3b82f6,color:#1e3a8a
+%% ─── Styles ──────────────────────────────────────────────────────────────────
+    classDef ext   fill:#dbeafe,stroke:#2563eb,color:#1e3a8a
+    classDef table fill:#f0fdf4,stroke:#16a34a,color:#14532d
+    classDef step  fill:#fefce8,stroke:#ca8a04,color:#713f12
 
-    class BP,DTCS ext
-    class BPAPI,DTCAPI api
-    class KS,ST,WIP,REG tbl
-    class T1,T2,T3,T4,T5,T6,T7,T8 task
+    class BP,DTC ext
+    class T_STYLES,T_STAGING,T_WIP,T_REG,T_FAB,T_LP,T_CC table
+    class S1,S2,S3,S4,S5,S6,S7,S8,S8A,S9A1,S9A2 step
 ```
 
 ---
 
-## Flow legend
+## Field direction summary
 
-| # | Task | Direction | Databricks table touched | External call |
-|---|------|-----------|--------------------------|---------------|
-| ① | `bp_style_sync` | BeProduct → ADB | write `ktb_styles` | `attributes_list`, `app_get`×6 |
-| ② | `transform` | ADB → ADB | `ktb_styles` → `beproduct_to_dtc_staging` | — |
-| ③ | `pull_dtc` | DTC → ADB | write `dtc_wip_ktb` + `registry` | `search_requests`, `get_sheet`×75 |
-| ④ | `request_manager` | ADB → DTC | write `dtc_request_mapping` | `POST /sheets`, `POST /shares` |
-| ⑤ | `phase1_push` | **BeProduct → DTC** | read `staging` + `mapping` | `PATCH /sheets/{id}/views/{id}` |
-| ⑥ | `phase2_push` | **DTC → BeProduct** | read `dtc_wip_ktb` + `staging` | `attributes_update` |
-| ⑦ | `repull_dtc` | DTC → ADB | refresh `dtc_wip_ktb` | `get_sheet` (inserted only) |
-| ⑧ | `phase3_images` | **BeProduct → DTC** | read `dtc_wip_ktb` + `staging` | `POST .../images` (multipart) |
+### BeProduct → DTC (Phase 1 + 7)
 
-**Parallelism:** ①→② (BeProduct chain) runs in parallel with ③ (DTC pull); both converge at ④.
+| Staging column | DTC column | Phase |
+|---|---|---|
+| `bp_style_number` | `BP Style#` — match key | 6 |
+| `color` | `Color / Wash` — match key | |
+| `brand` (brand_hk) | `Brand` — routing key | 6 |
+| `product_status` | `Product Status` | 1 |
+| `description` | `Style Description` | 1 |
+| `product_category` | `Class` | 1 |
+| `product_sub_category` | `Sub Class` | 1 |
+| `division` | `Division` | 1 |
+| `garment_finish` | `Garment Finish` | 1 |
+| `techpack_stage` | `Tech Pack Stage` | 1 |
+| `fabric_group` | `Fabric Group` | 1 |
+| `placement` | `Placement` | 1 |
+| `gender` | `Gender` | 6 |
+| `lf_style_number` | `LF Style#` (optional) | 6 |
+| `customer_style_number` | `Legacy Code` (optional) | 6 |
+| `supplier` = `"Supplier"` | `Supplier` (default-fill) | 6 |
+| `proto_sample_status` | `Proto Sample - Sample Status` | 7 |
+| `preline_sample_status` | `Pre-line Sample - Status` | 7 |
+| `sms_sample_status` | `SMS - Sample Status` | 7 |
+| `fit_sample_status` | `1st Fit Sample Approval Status` | 7 |
+| `pp_sample_status` | `2nd Fit Sample Approval Status` | 7 |
+| `top_sample_status` | `TOP Sample Approval Status` | 7 |
+| `front_image_url` | `Style Image` (Phase 3, binary) | 3 |
+
+### DTC → BeProduct (Phase 2)
+
+| DTC column | BP fieldId | Level |
+|---|---|---|
+| `Main Vendor (Sampling)` | `parent_vendor` | header |
+| `Main Factory (Sampling)` | `factory` | header |
+| `Lot#` | `drawing_number_walmart` | colorway |
+| `Main Factory Customer ID` | — (skipped) | — |
+
+### DTC FABRIC → Delta (Phase 8a, Adoption=Y)
+
+`LF Material ID` → `lf_material_id` (BP Material Master key); `Fabric Content` → `fabric_content` (BP Material Description); `Material Class`, `Fabric Type`, `Mill Fabric Article #`, `Mill Name`, `KB Fabric Code (SAP Code)`.
+
+### DTC LinePlan + WIP × LinePlan → Costing Chart (Phase 9a)
+
+Join key: WIP `"Lineplan Ref #"` = LinePlan `"Lineplan Ref #"`.
+Transpose: Main / Vendor 1 / Vendor 2 / Vendor 3 slots → one row each per vendor.
+`tariff_rate = NULL` placeholder (Phase 9b NT Orbit Duty Tools).
 
 ---
 
-## Direction summary (one-way per field, no loops)
-
-```
-                       ┌─────────────────────────────┐
-   BeProduct  ═══════▶ │        DATABRICKS           │ ═══════▶  DTC
-   (Phase 1,3)         │  ktb_styles → staging       │  (⑤ PATCH, ⑧ images)
-                       │                             │
-   BeProduct  ◀═══════ │  dtc_wip_ktb ← DTC pull     │ ◀═══════  DTC
-   (Phase 2)           │                             │  (③ get_sheet)
-                       └─────────────────────────────┘
-```
-
-- **BeProduct → DTC** (Phase 1): Product Status, Style Description, Class, Sub Class,
-  Division, Brand, Garment Finish, Tech Pack Stage, Fabric Group, Placement, Gender,
-  BP Style# (match key), LF Style#, Legacy Code, Supplier (default-fill).
-- **BeProduct → DTC** (Phase 3): Style Image (binary, blank cells only).
-- **DTC → BeProduct** (Phase 2): Main Vendor (Sampling), Main Factory (Sampling), Lot#.
-- **Match key:** `(BP Style#, Color / Wash)` in-request; `[Customer, BP Style#, SeasonCode, Brand]` composite.
-- **Filter:** styles with Product Status = "Finalized" are excluded at ①.
-```
+> ❶ Pending DTC admin action: `BP Style#`, `Gender`, `Supplier` columns confirmed
+> present in WIP_ITS_USE view (198 fields) but all cells blank — need data migration
+> from `LF Style#` for `BP Style#` before match-key switch can activate.

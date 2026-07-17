@@ -12,7 +12,9 @@ This document is the single reference for **components**, **data flow**, and the
 - Reverse field sync (DTC → BeProduct): `PHASE2_WORKFLOW.md`
 - Image sync (BeProduct → DTC): `PHASE3_WORKFLOW.md`
 - Component API/SDK + per-side tables: `DTC_GUIDE.md`, `BEPRODUCT_GUIDE.md`
-- Field mapping SSOT: `beproduct_style_interested_fields.txt`
+- Style field-mapping SSOT: `beproduct_style_interested_fields.txt`
+- Material field-mapping SSOT: `beproduct_material_interested_fields.txt`
+- Pipeline diagram (Databricks-centred): `DIAGRAM.md` / `DIAGRAM.png`
 - Verified API behaviour & invariants: `../AGENTS.md`
 
 ---
@@ -46,21 +48,23 @@ beproduct/                         # BeProduct-side notebooks (also host the cro
 
 dtc/
 ├── notebooks/
-│   ├── 00_init_request_registry.py  # Standalone registry build/refresh
+│   ├── 00_init_request_registry.py  # Standalone WIP registry build/refresh
 │   ├── 00_init_season_mapping.py    # Seed dtc_seasoncode_mapping
-│   ├── pull_masters_to_delta.py    # DTC API → dtc_wip_<customer> (+ registry refresh)
+│   ├── pull_masters_to_delta.py     # Pull KTB WIP sheets → dtc_wip_ktb + registry (Steps 3 + 7)
+│   ├── pull_fabric_to_delta.py      # Phase 8a: pull KTB FABRIC → dtc_fabric_ktb (Adoption=Y)
+│   ├── pull_lineplan_to_delta.py    # Phase 9a: pull KTB LinePlan → dtc_lineplan_ktb
+│   ├── build_costing_chart.py       # Phase 9a: WIP × LinePlan → costing_chart (transpose 4 slots)
 │   └── 05_push_dtc_to_beproduct.py  # Phase 2: DTC → BeProduct pushback
 ├── python/                          # Importable modules (deployed as Workspace files)
 │   ├── client/rest_client.py        # Generic REST client (retry, multipart)
 │   ├── connectors/dtc.py            # DTC API connector
 │   └── sync/
-│       ├── phase1.py                # BeProduct → DTC upsert core (pure)
+│       ├── phase1.py                # BeProduct → DTC upsert core (pure; DEFAULT_FILL_COLS)
 │       ├── phase2.py                # DTC → BeProduct pushback core (pure)
 │       ├── phase3.py                # Image upload planning + type classification (pure)
-│       └── registry.py             # Shared registry refresh (discover→enrich→merge)
-├── tests/                           # Unit + live tests for the pure cores
-├── DTC-api-2026-05-08.json          # DTC API Postman collection
-└── DTC-api-2026-05.pdf              # DTC API description/examples
+│       ├── samples.py               # Phase 7: sample-app submit formatter (pure)
+│       └── registry.py              # Shared registry refresh (discover→enrich→merge)
+└── tests/                           # Unit + live tests for the pure cores
 
 standalone/beproduct_style_push.py   # Standalone Delta → BeProduct push-back (not in daily pipeline)
 scripts/
@@ -84,49 +88,68 @@ in **parallel** (they are independent); the rest follow in dependency order. Eac
 step is a first-class task with its own logs and per-task timing in the Jobs UI.
 
 ```
-Step 1  bp_style_sync    BeProduct API ─▶ ktb_styles (+ 6 sample-app stat) ┐ parallel
-Step 3  pull_dtc         DTC API       ─▶ dtc_wip_<customer> + registry   ┘
-Step 2  transform        ktb_styles    ─▶ beproduct_to_dtc_staging  (after Step 1)
-Step 4  request_manager  staging+registry ─▶ dtc_request_mapping    (after 2+3)
-                          (creates + shares missing in-scope requests)
-Step 5  phase1_push      Phase 1: staging ─▶ DTC sheets (upsert + orphan marks)
-Step 6  phase2_push      Phase 2: dtc_wip ─▶ BeProduct (pushback)   (after 2+3)
-Step 7  repull_dtc       refresh dtc_wip after Phase 1 inserts       (after 5)
-Step 8  phase3_images    Phase 3: front image ─▶ DTC "Style Image"
+Task               notebook                      inputs → outputs              parallel group
+─────────────────  ────────────────────────────  ────────────────────────────  ──────────────
+wait_cluster       wait_cluster                  (root / cold-start sentinel)  root
+bp_style_sync      beproduct_style_sync          BP API → ktb_styles           after wait ┐
+transform          beproduct_to_dtc_transform    ktb_styles → staging          after 1    │ WIP chain
+pull_master_dtc    pull_masters_to_delta         DTC API → dtc_wip + registry  after wait ┘ parallel
+request_manager    dtc_request_manager           staging+registry → mapping    after 2+3
+gate_phase1        (condition: run_phase1)        after request_manager
+phase1_push        beproduct_to_dtc_push         staging → DTC upsert+orphans  after gate1
+gate_phase2        (condition: run_phase2)        after transform+pull_master
+phase2_push        05_push_dtc_to_beproduct      dtc_wip → BP pushback         after gate2
+gate_phase3        (condition: run_phase3)        after request_manager
+repull_dtc         pull_masters_to_delta         targeted re-pull (inserts)    after gate3+phase1 ALL_DONE
+phase3_images      beproduct_to_dtc_images       staging+wip → DTC image       after repull
+
+gate_phase8a       (condition: run_phase8a)       after wait_cluster            ┐ parallel,
+pull_fabric_dtc    pull_fabric_to_delta           DTC FABRIC → dtc_fabric_ktb  ┘ independent
+
+gate_phase9a       (condition: run_phase9a)       after wait_cluster            ┐ parallel,
+pull_lineplan_dtc  pull_lineplan_to_delta         DTC LinePlan → lineplan_ktb  │ independent
+build_costing_chart build_costing_chart           wip+lineplan → costing_chart ┘ after pull_lineplan+pull_master
 ```
 
-Dependencies: 1→2 (chain); 3 independent of 1/2; 4 needs 2+3; 5 needs 4; 6 needs
-2+3 (disjoint fields from 5); 7 after 5 (`run_if=ALL_DONE` so a skipped Phase 1
-still lets Phase 3 proceed); 8 after 7. Condition tasks `gate_phase1/2/3` evaluate
-`run_phase1/2/3` job parameters and gate the respective push tasks. `dry_run`
-(applied to steps 4/5/6/8) computes + logs without writing.
+Condition tasks (`gate_phase*`) evaluate `run_phase*` job parameters; their `true`
+edge gates the respective push/pull tasks. `dry_run` (steps 4/5/6/8) computes +
+logs without writing. Phase 8a and 9a run fully in parallel with the WIP chain.
 
 ```
-   BeProduct (PLM)                  Databricks  (lft.beproduct)                 DTC (sheets)
-   ┌────────────┐   style sync   ┌───────────────┐  transform  ┌──────────────────────┐
-   │ STYLE +    │ ─────────────▶ │ ktb_styles     │ ──────────▶ │ beproduct_to_dtc_     │
-   │ Colorways  │                │ (1 row/style)  │             │ staging (1 row/style× │
-   └────────────┘                └───────────────┘             │ color)                │
-        ▲                                                       └─────────┬────────────┘
-        │ Phase 2 pushback                                                 │ Phase 1 upsert
-        │ (Legacy Code, Lot#, vendors)                                     ▼  Phase 3 image
-   ┌────┴───────┐   pull         ┌───────────────┐  resolve    ┌──────────────────────┐
-   │ attributes │ ◀───────────── │ dtc_wip_<cust> │ ◀────────── │ DTC WIP_ITS_USE rows  │
-   │ _update    │                │ + registry     │   mapping   │ (per in-scope request)│
-   └────────────┘                └───────────────┘             └──────────────────────┘
+   BeProduct (PLM)               Databricks (lft.beproduct)              DTC (sheets)
+   ┌────────────┐  style sync  ┌──────────────┐ transform ┌────────────────────────┐
+   │ STYLE +    │ ────────────▶│ ktb_styles   │ ─────────▶│ beproduct_to_dtc_      │
+   │ Colorways  │  (excl.      │ (1/style)    │           │ staging (1/style×color)│
+   │ + 6 apps   │  Finalized)  └──────────────┘           └──────────┬─────────────┘
+   └────────────┘                                                      │ Phase 1 + 7
+        ▲                                                              │ Phase 3 image
+        │ Phase 2                                                       ▼
+        │ (Vendor, Factory, Lot#)   ┌──────────────┐ resolve ┌────────────────────────┐
+   ┌────┴───────┐  pull (WIP)        │ dtc_wip_ktb  │◀────────│ DTC WIP_ITS_USE rows   │
+   │ attributes │◀───────────────── │ + registry   │ mapping │ (KTB WIP document)    │
+   │ _update    │                   └──────────────┘         └────────────────────────┘
+
+   DTC FABRIC  ──────────────────▶  dtc_fabric_ktb   (Phase 8a, Adoption=Y)
+   DTC LinePlan ─────────────────▶  dtc_lineplan_ktb  (Phase 9a)
+                                    dtc_wip_ktb       (Phase 9a join)
+                                          │ join + transpose
+                                          ▼
+                                    costing_chart      (Style × Color × Vendor/Factory)
 ```
 
 ### Field-ownership partition (one field, one direction)
 
 | Direction | Fields |
 |-----------|--------|
-| **BeProduct → DTC** (Phase 1) | Product Status, Style Description, Class, Sub Class, Division, Brand, Garment Finish, Tech Pack Stage, Fabric Group, Placement |
-| **BeProduct → DTC, image only** (Phase 3) | Style Image (`front_image_url`) |
-| **DTC → BeProduct** (Phase 2) | Legacy Code, Main Vendor (Sampling), Main Factory (Sampling) [header]; Lot# [colorway]; Main Factory Customer ID → no target, skipped |
-| **Keys** (match, not overwritten) | LF Style#, Color / Wash |
+| **BeProduct → DTC** (Phase 1) | Product Status, Style Description, Class, Sub Class, Division, Brand, Garment Finish, Tech Pack Stage, Fabric Group, Placement, Gender; BP Style# (new match key), LF Style# (optional), Legacy Code (optional); Supplier (default-fill "Supplier" when blank) |
+| **BeProduct → DTC** (Phase 7) | Proto/PreLine/SMS/Fit/PP/TOP sample submit history (JSON list per app) |
+| **BeProduct → DTC, image only** (Phase 3) | Style Image (`front_image_url`); binary multipart upload, blank cells only |
+| **DTC → BeProduct** (Phase 2) | Main Vendor (Sampling), Main Factory (Sampling) [header]; Lot# [colorway]; Main Factory Customer ID → no target, skipped |
+| **Keys** (match, not overwritten) | `(BP Style#, Color / Wash)` in-request; `[Customer, BP Style#, SeasonCode, Brand]` composite/routing |
+| **Filter** | Styles with Product Status = "Finalized" are excluded from all DTC sync |
 
-A field is never synced in both directions (no loops). SSOT for the exact
-column ⇄ fieldId ⇄ direction mapping: `beproduct_style_interested_fields.txt`.
+Removed directions (Phase 6): "Legacy Code" was DTC→BP (now BP→DTC only). "Customer Style#" DTC column not created.
+A field is never synced in both directions (no loops). SSOT: `beproduct_style_interested_fields.txt`.
 
 ### Denormalization (transform)
 
@@ -147,7 +170,7 @@ never reverse-maps it (season is a fixed per-request key).
 
 ### Moved-key orphans
 
-If a BeProduct key field (LF Style#, brand, season) changes, the style's request
+If a BeProduct key field (`BP Style#`, brand, season) changes, the style's request
 changes: the new request gets an INSERT, and the stale row left in the old request
 is flagged `Product Status = "(removed)"` (an invalid value signalling the DTC
 user). Not deleted. Core: `phase1.compute_orphan_marks`.
@@ -183,7 +206,7 @@ Workspace ("KTB")
 
 | Table | Grain | Key columns / notes |
 |-------|-------|---------------------|
-| `ktb_styles` | 1 row / style | `id`, `lf_style_number`, `brands`, `season`, `year`, `product_status`, `description`, `product_category`, `product_sub_category`, `division`, `garment_finish`, `techpack_stage`, `customer_style_number`, `lot_code`, `parent_vendor`, `factory`; arrays `colorways_array`/`colorways_count`; `colorways_json` (`[{colorway_id,color_name,color_number}]`); `front_image_url`; **sample-app submits** `{proto,preline,sms,fit,pp,top}_sample_json` (6 JSON arrays of submit×size records, `'[]'` when no data; transform flattens); `data_json` (full record); change tracking `modified_at`/`last_modified`, `synced_at`/`extracted`, `created_at` |
+| `ktb_styles` | 1 row / style | `id`, `bp_style_number` (header_number; was `lf_style_number`), `lf_style_number` (new separate field), `brand` (brand_hk), `brands` (brands_multi), `gender`, `season`, `year`, `product_status` (excl. Finalized at sync time), `description`, `product_category`, `product_sub_category`, `division`, `garment_finish`, `techpack_stage`, `customer_style_number`, `lot_code`, `parent_vendor`, `factory`; `colorways_json`; `front_image_url`; **6 sample-app columns** `{proto,preline,sms,fit,pp,top}_sample_json` (JSON arrays of submit×size records; transform formats into DTC status strings via `sync.samples`); `data_json`; timestamps |
 | `beproduct_style_app_registry` | 1 row / (folder × app) | Cache of folder-constant application IDs (`00_init_style_app_registry`). `folder_name`, `app_id`, `app_title`, `app_type`, `is_sample`, `column_prefix`, `registered_at`. Sync reads `is_sample=true` to know which apps to `app_get`. |
 | `beproduct_master_*` | 1 row / valid choice | 11 tables (brands, teams, seasons, years, product_status, product_category, product_sub_category, division, techpack_stage, parent_vendor, factory); columns `field_id`, `value`, `code`, `active`, `data_json`, `synced_at`. `garment_finish` omitted — free-text field, no choices. Used to validate dropdown/multiselect values before push-back. Written (and optionally pushed back to BeProduct) by `beproduct_master_data_sync`. |
 | `beproduct_directory` | 1 row / company | Directory of vendors, factories, and partners. Columns: `id` (BeProduct UUID, null for new records), `directory_id` (human-readable code), `name`, `partner_type`, `address`, `country`, `state`, `zip`, `city`, `phone`, `fax`, `website`, `notes`, `active`, `data_json`, `synced_at`. `id = NULL` rows are Added; `id = <uuid>` rows are Updated on next push. |
@@ -195,7 +218,7 @@ Details + BeProduct API/SDK usage: `BEPRODUCT_GUIDE.md`.
 
 | Table | Grain | Purpose / key columns |
 |-------|-------|-----------------------|
-| `beproduct_to_dtc_staging` | 1 row / (style × color) | Denormalized push source. `dtc_request_name`, `lf_style_number`, `color`, `colorway_id`, `brands`, `season_code`, mapped fields, `front_image_url`, `beproduct_style_id`, `beproduct_modified_at`, `sync_status` (`pending`/`pushed`/`error`), `pushed_at` |
+| `beproduct_to_dtc_staging` | 1 row / (style × color) | Denormalized push source. `dtc_request_name`, `bp_style_number` (match key), `lf_style_number`, `color`, `colorway_id`, `brand` (brand_hk), `season_code`, all Phase 1 fields, Phase 7 sample status columns (`{proto,preline,sms,fit,pp,top}_sample_status`), `supplier` (constant "Supplier"), `front_image_url`, `beproduct_style_id`, `colorway_id`, `sync_status` |
 | `dtc_request_mapping` | 1 row / resolved request | `environment`, `dtc_request_name`, `request_id`, `sheet_id`, `view_id`, `season_code`, `brands`, `resolved_at`. Overwritten each run; consumed by the push. |
 | `dtc_seasoncode_mapping` | 1 row / (customer, season) | `CUSTOMER`, `BPSEASON`, `DTCCODE` (prefix only). Forward-only. |
 | `beproduct_to_dtc_sync_log` | 1 row / operation | BeProduct→DTC audit. `stage` ∈ {`resolve`,`create`,`share`,`push`,`images`}, `operation`, `status`, `reason`, `detail`, `payload`, match key, `run_id`, `log_time`. |
@@ -205,20 +228,17 @@ Details + BeProduct API/SDK usage: `BEPRODUCT_GUIDE.md`.
 
 | Table | Grain | Purpose / key columns |
 |-------|-------|-----------------------|
-| `dtc_request_registry` | 1 row / request | Control table driving discovery. `environment`, `request_id`, `view_id`, `customer`, `season_code`, `brands`, `sheet_id`, `request_reference`, `document_name`, `in_scope`, `request_is_active`, `row_count`, `last_extracted`, `last_pushed`, `msgs`. Upserted (`mode=merge`) so sync state survives; absent-from-scan in-scope rows are **marked** inactive, not deleted. |
-| `dtc_wip_<customer>` | 1 row / DTC sheet row | Pulled `WIP_ITS_USE` data (e.g. `dtc_wip_ktb`). Built from an **explicit schema** so all-NULL columns don't trip `CANNOT_DETERMINE_TYPE`. |
-
-**`dtc_wip_<customer>` fixed columns:** `customer`, `workspace_name`,
-`document_name`, `request_id`, `request_reference`, `season_code`, `brands`,
-`row_id` (STRING), `row_index` (LONG), `lf_style_number`, `color_wash`,
-`extracted_at` (TIMESTAMP), `data_json` (full row JSON). **Dynamic columns:** every
-DTC view column is also flattened to `col_<normalized_name>` (STRING); empty view
-columns may be absent for a given request — the union is aligned by name. Full
-fidelity always remains in `data_json`.
+| `dtc_request_registry` | 1 row / request | WIP request control table. `environment`, `request_id`, `view_id`, `customer`, `season_code`, `brands`, `sheet_id`, `request_reference`, `document_name`, `in_scope`, `request_is_active`, `row_count`, `last_extracted`, `last_pushed`, `msgs`. Upserted (`mode=merge`); absent-from-scan in-scope rows are **marked** inactive, not deleted. |
+| `dtc_wip_<customer>` | 1 row / DTC sheet row | Pulled `WIP_ITS_USE` data (e.g. `dtc_wip_ktb`). Fixed columns: `bp_style_number` (Phase 6 match key), `lf_style_number`, `color_wash`, `row_id`, `row_index`, `extracted_at`, `data_json` (full row JSON). |
+| `dtc_fabric_<customer>` | 1 row / Adoption=Y fabric row | Phase 8a. `lf_material_id`, `its_key`, `mill_fabric_code`, `mill_name`, `material_class`, `fabric_type`, `fabric_content`, `kb_fabric_code`, `adoption`, `season_code`, `brand`, `sheet_type` (PROD/DEV/MILL), `mill_code`, `data_json`. Filter: Adoption=Y only. |
+| `dtc_fabric_registry` | 1 row / FABRIC request | Phase 8a registry, same shape as `dtc_request_registry`. |
+| `dtc_lineplan_<customer>` | 1 row / LinePlan row | Phase 9a. `lineplan_ref`, `projected_volume`, `target_ldp`, `target_fob`, `internal_sourced` (Supplier Type), `gender`, `category`, `product_line`, `region`, `season_launched`, `data_json`. |
+| `dtc_lineplan_registry` | 1 row / LinePlan request | Phase 9a registry. |
+| `costing_chart` | 1 row / (style × color × vendor slot) | Phase 9a output. Key: `[customer, bp_style_no, color_name, lineplan_ref, factory_slot, supplier, factory]`. Includes HTS/Duty fields per slot (null = Phase 9b NT Orbit pending). Full overwrite each run. |
 
 - **DTC operation keys:** `row_id` → UPDATE; `row_index` → INSERT/DELETE.
-- **In-request match key:** `(lf_style_number, color_wash)`.
-- **Cross-request identity:** `(customer, season_code, brands, lf_style_number, color_wash)`.
+- **In-request match key (WIP):** `(BP Style#, Color / Wash)` (Phase 6; was `(LF Style#, Color / Wash)`).
+- **Cross-request identity:** `(customer, season_code, brand, bp_style_number, color_wash)`.
 - Per-request metadata lives in the row columns + the registry (no `TBLPROPERTIES`).
 
 ---

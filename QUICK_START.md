@@ -99,31 +99,40 @@ SELECT * FROM lft.beproduct.dtc_to_beproduct_sync_log ORDER BY log_time DESC LIM
 
 Run these in order if you prefer step-by-step control (params shown are the key ones).
 
-| # | Notebook | Purpose | Output |
-|---|----------|---------|--------|
-| 1 | `beproduct/beproduct_style_sync` | Pull styles (`folder_name=KTB`, `refresh_mode=FULL`) | `ktb_styles` |
-| 2 | `beproduct/beproduct_to_dtc_transform` | Denormalize style × color | `beproduct_to_dtc_staging` |
-| 3 | `dtc/notebooks/pull_masters_to_delta` | Pull DTC `WIP_ITS_USE` rows (+ refresh registry) | `dtc_wip_<customer>` |
-| 4 | `beproduct/dtc_request_manager` | Resolve / **create** / **share** requests (`dry_run=false` to create) | `dtc_request_mapping` |
-| 5 | `beproduct/beproduct_to_dtc_push` | **Phase 1** upsert (`dry_run`, `delta_only`) | DTC sheets |
-| 6 | `dtc/notebooks/05_push_dtc_to_beproduct` | **Phase 2** pushback (`push_blanks=false`) | BeProduct |
-| 7 | `dtc/notebooks/pull_masters_to_delta` | Refresh dtc_wip after Phase 1 inserts | `dtc_wip_<customer>` |
-| 8 | `beproduct/beproduct_to_dtc_images` | **Phase 3** image upload (`dry_run`, `max_uploads`) | DTC "Style Image" |
+**WIP sync chain (Phases 1 / 2 / 3 / 7):**
 
-Other notebooks:
-- `dtc/notebooks/00_init_request_registry` — standalone registry build/refresh
-  (first build or targeted `request_ids`).
-- `beproduct/beproduct_master_data_sync` — **admin-only, not in DAG.** Pull and/or
-  push-back BeProduct MasterData (dropdown choices) and Directory (vendors/factories/
-  contacts). Modes: `PULL_ONLY` (default), `PUSH_MASTER_DATA`, `PUSH_DIRECTORY`,
-  `PUSH_ALL`. Use `dry_run=true` to preview push changes before committing.
-  Writes `beproduct_master_*` (11 tables), `beproduct_directory`,
-  `beproduct_directory_contacts`. Typical workflow: run PULL_ONLY, edit rows in
-  Databricks SQL, run PUSH_* with `dry_run=true`, then `dry_run=false`.
-- `beproduct/dtc_share_requests` — idempotently (re-)share existing requests
-  (all views → `aiagentwip@lifung.com`; Full Version → `Fabric Group`).
-- `standalone/beproduct_style_push` — standalone Delta → BeProduct push-back
-  (see `standalone/README.md`; not auto-deployed by `upload_notebooks.py`).
+| # | DAG task | Notebook | Purpose | Output |
+|---|----------|----------|---------|--------|
+| 1 | `bp_style_sync` | `beproduct/beproduct_style_sync` | Pull styles, excl. Finalized, enrich 6 sample apps | `ktb_styles` |
+| 2 | `transform` | `beproduct/beproduct_to_dtc_transform` | Denormalize style × color; format Phase 7 sample statuses | `beproduct_to_dtc_staging` |
+| 3 | `pull_master_dtc` | `dtc/notebooks/pull_masters_to_delta` | Pull KTB WIP `WIP_ITS_USE` rows + refresh registry | `dtc_wip_ktb` |
+| 4 | `request_manager` | `beproduct/dtc_request_manager` | Resolve / create / share requests | `dtc_request_mapping` |
+| 5 | `phase1_push` | `beproduct/beproduct_to_dtc_push` | **Phase 1+7** upsert (`dry_run`, `delta_only`) | DTC WIP sheets |
+| 6 | `phase2_push` | `dtc/notebooks/05_push_dtc_to_beproduct` | **Phase 2** pushback (`push_blanks=false`) | BeProduct |
+| 7 | `repull_dtc` | `dtc/notebooks/pull_masters_to_delta` | Targeted re-pull after Phase 1 inserts | `dtc_wip_ktb` |
+| 8 | `phase3_images` | `beproduct/beproduct_to_dtc_images` | **Phase 3** image upload (`dry_run`, `max_uploads`) | DTC "Style Image" |
+
+**FABRIC chain (Phase 8a — parallel, independent):**
+
+| DAG task | Notebook | Purpose | Output |
+|----------|----------|---------|--------|
+| `pull_fabric_dtc` | `dtc/notebooks/pull_fabric_to_delta` | Pull KTB FABRIC sheets, Adoption=Y, `include_test_sheets=false` | `dtc_fabric_ktb` |
+
+**LinePlan + Costing chain (Phase 9a — parallel, independent):**
+
+| DAG task | Notebook | Purpose | Output |
+|----------|----------|---------|--------|
+| `pull_lineplan_dtc` | `dtc/notebooks/pull_lineplan_to_delta` | Pull KTB LinePlan (Full view) | `dtc_lineplan_ktb` |
+| `build_costing_chart` | `dtc/notebooks/build_costing_chart` | Join WIP × LinePlan; transpose 4 vendor/factory slots | `costing_chart` |
+
+**Other notebooks (on-demand, not in DAG):**
+
+- `dtc/notebooks/00_init_request_registry` — standalone WIP registry build/refresh (first run or targeted `request_ids`).
+- `beproduct/beproduct_master_data_sync` — **admin-only.** Pull and/or push-back BeProduct MasterData + Directory.
+  Modes: `PULL_ONLY`, `PUSH_MASTER_DATA`, `PUSH_DIRECTORY`, `PUSH_ONLY`. Use `dry_run=true` first.
+  Writes `beproduct_master_*`, `beproduct_directory`, `beproduct_directory_contacts`.
+- `beproduct/dtc_share_requests` — idempotently (re-)share existing requests.
+- `scripts/check_dtc_view.py` — DTC WIP_ITS_USE column readiness check (Phase 6 pending columns).
 
 ---
 
@@ -136,11 +145,18 @@ SELECT MAX(last_modified) latest, MAX(extracted) last_sync, COUNT(*) FROM lft.be
 -- Staging push status
 SELECT sync_status, COUNT(*) FROM lft.beproduct.beproduct_to_dtc_staging GROUP BY sync_status;
 
--- Resolved DTC requests this run
-SELECT dtc_request_name, request_id, sheet_id FROM lft.beproduct.dtc_request_mapping WHERE environment='uat';
-
--- Pulled DTC rows
+-- Pulled DTC WIP rows
 SELECT request_reference, COUNT(*) FROM lft.beproduct.dtc_wip_ktb GROUP BY request_reference;
+
+-- Costing chart summary
+SELECT factory_slot, COUNT(*) rows, COUNT(hts_code) with_hts FROM lft.beproduct.costing_chart GROUP BY factory_slot;
+
+-- Fabric adoption rows
+SELECT season_code, brand, sheet_type, COUNT(*) FROM lft.beproduct.dtc_fabric_ktb GROUP BY 1,2,3;
+
+-- Sync log (WIP push)
+SELECT stage, operation, status, COUNT(*) FROM lft.beproduct.beproduct_to_dtc_sync_log
+WHERE log_time > current_timestamp() - INTERVAL 1 HOUR GROUP BY 1,2,3;
 ```
 
 ---

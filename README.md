@@ -4,16 +4,19 @@ Bi-directional synchronization between **BeProduct** (style PLM) and **DTC**
 ("Data Collab" sheets), staged through **Databricks / Delta** under Unity Catalog
 schema `lft.beproduct`. Each field syncs **one way only** (no loops).
 
-- **Phase 1 — BeProduct → DTC:** push BeProduct-owned style fields into the
-  matching DTC request (upsert), creating + sharing missing in-scope requests.
-- **Phase 2 — DTC → BeProduct:** push DTC-owned fields back into the BeProduct style.
-- **Phase 3 — BeProduct → DTC (image):** upload the front image into the DTC
-  "Style Image" cell (binary, separate endpoint).
+| Phase | Direction | Description |
+|-------|-----------|-------------|
+| **1** | BeProduct → DTC | Push style fields into the matching WIP request (upsert); create + share missing in-scope requests |
+| **2** | DTC → BeProduct | Push DTC-owned fields back into the BeProduct style |
+| **3** | BeProduct → DTC | Upload front image into the DTC "Style Image" cell (binary, separate endpoint) |
+| **7** | BeProduct → DTC | Push sample-app submit history (all 6 apps: Proto/PreLine/SMS/Fit/PP/TOP) into DTC status columns |
+| **8a** | DTC → Delta | Pull KTB FABRIC sheets (Adoption=Y rows) into `dtc_fabric_ktb` for Phase 8b |
+| **8b** | Delta → BeProduct | *(planned)* Upsert adopted fabric rows into BeProduct Material Master |
+| **9a** | DTC → Delta → Delta | Pull KTB LinePlan; join with WIP; build `costing_chart` (Style × Color × Vendor/Factory) |
+| **9b** | API → Delta → DTC | *(planned)* NT Orbit Duty Tools API fill for HTS/Duty/Tariff fields; push changes back to WIP |
 
 The whole pipeline runs as a **multi-task Databricks job** (`BeProduct_DTC_sync_dag`,
-job 294837488757511), defined in `scripts/deploy_job.py`. Steps 1–2 (BeProduct chain)
-run in parallel with Step 3 (DTC pull) for shorter wall time; each step has its own
-logs and per-task timing directly in the Jobs UI.
+job 294837488757511), defined in `scripts/deploy_job.py`.
 
 ---
 
@@ -22,130 +25,87 @@ logs and per-task timing directly in the Jobs UI.
 | Document | Description |
 |----------|-------------|
 | [QUICK_START.md](QUICK_START.md) | Setup, how to use, which notebook to run |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Components, data flow, and the full ADB data model |
-| [docs/PHASE1_WORKFLOW.md](docs/PHASE1_WORKFLOW.md) | BeProduct → DTC field upsert |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Components, full pipeline DAG, and ADB data model |
+| [docs/PHASE1_WORKFLOW.md](docs/PHASE1_WORKFLOW.md) | BeProduct → DTC style field upsert |
 | [docs/PHASE2_WORKFLOW.md](docs/PHASE2_WORKFLOW.md) | DTC → BeProduct pushback |
 | [docs/PHASE3_WORKFLOW.md](docs/PHASE3_WORKFLOW.md) | BeProduct image → DTC "Style Image" |
-| [docs/BEPRODUCT_GUIDE.md](docs/BEPRODUCT_GUIDE.md) | BeProduct SDK/API used + BeProduct tables on ADB |
-| [docs/DTC_GUIDE.md](docs/DTC_GUIDE.md) | DTC API used + DTC tables on ADB |
-| [docs/beproduct_style_interested_fields.txt](docs/beproduct_style_interested_fields.txt) | **Field-mapping SSOT** (DTC column ⇄ BeProduct fieldId ⇄ direction) |
-| [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | Pipeline performance history, root-cause analysis, and optimisations applied |
-| [AGENTS.md](AGENTS.md) | Durable log of verified API behaviour & project invariants |
-| [implement_prompts.txt](implement_prompts.txt) | Original requirements / spec braindump |
+| [docs/BEPRODUCT_GUIDE.md](docs/BEPRODUCT_GUIDE.md) | BeProduct SDK/API + BeProduct tables on ADB |
+| [docs/DTC_GUIDE.md](docs/DTC_GUIDE.md) | DTC API + DTC tables on ADB |
+| [docs/DIAGRAM.md](docs/DIAGRAM.md) | Pipeline data-flow block diagram (Databricks-centred) |
+| [docs/beproduct_style_interested_fields.txt](docs/beproduct_style_interested_fields.txt) | **Style field-mapping SSOT** (DTC column ⇄ BeProduct fieldId ⇄ direction) |
+| [docs/beproduct_material_interested_fields.txt](docs/beproduct_material_interested_fields.txt) | **Material field-mapping SSOT** (DTC FABRIC ⇄ BeProduct Material Master) |
+| [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | Pipeline performance history and optimisations |
+| [AGENTS.md](AGENTS.md) | Durable log of verified API behaviour, field directions & project invariants |
 
 ---
 
 ## Repository structure
 
 ```
-beproduct/                         # BeProduct-side notebooks (+ cross-platform push)
-├── 00_init_style_app_registry.py  # Cache folder app IDs → beproduct_style_app_registry (on-demand)
-├── beproduct_style_sync.py        # BeProduct API → ktb_styles (+ 6 sample-app submit arrays)
-├── beproduct_master_data_sync.py  # Admin: pull/push-back MasterData (dropdowns) + Directory → beproduct_master_*, beproduct_directory*
-├── beproduct_to_dtc_transform.py  # ktb_styles → beproduct_to_dtc_staging (denormalize)
-├── dtc_request_manager.py         # Resolve / CREATE / SHARE DTC requests → dtc_request_mapping
-├── beproduct_to_dtc_push.py       # Phase 1: BeProduct → DTC upsert + orphan marks
-├── beproduct_to_dtc_images.py     # Phase 3: front image → DTC "Style Image"
-├── dtc_share_requests.py          # Idempotent request-sharing backfill
-└── orchestrate_sync.py            # ⚠️ RETIRED — single-notebook fallback only
+beproduct/                              # BeProduct-side notebooks + cross-platform push
+├── 00_init_style_app_registry.py       # Cache folder app IDs → beproduct_style_app_registry (on-demand)
+├── beproduct_style_sync.py             # BeProduct API → ktb_styles (+ 6 sample-app arrays; Finalized filtered)
+├── beproduct_master_data_sync.py       # Admin: pull/push MasterData (dropdowns) + Directory
+├── beproduct_to_dtc_transform.py       # ktb_styles → beproduct_to_dtc_staging (denormalize; sample status UDFs)
+├── dtc_request_manager.py              # Resolve / CREATE / SHARE DTC requests → dtc_request_mapping
+├── beproduct_to_dtc_push.py            # Phase 1: BeProduct → DTC upsert + orphan marks
+├── beproduct_to_dtc_images.py          # Phase 3: front image → DTC "Style Image"
+├── dtc_share_requests.py               # Idempotent request-sharing backfill
+└── orchestrate_sync.py                 # ⚠️ RETIRED — single-notebook fallback only
 
 dtc/
 ├── notebooks/
-│   ├── 00_init_request_registry.py  # Standalone registry build/refresh
-│   ├── 00_init_season_mapping.py    # Seed dtc_seasoncode_mapping
-│   ├── pull_masters_to_delta.py    # DTC API → dtc_wip_<customer> (+ registry refresh)
-│   └── 05_push_dtc_to_beproduct.py  # Phase 2: DTC → BeProduct pushback
-├── python/                          # Importable modules (deployed as Workspace files)
-│   ├── client/rest_client.py        # Generic REST client (retry, multipart)
-│   ├── connectors/dtc.py            # DTC API connector
-│   └── sync/{phase1,phase2,phase3,registry}.py   # Pure, unit-tested cores
-├── tests/                           # Unit + live tests
-└── DTC-api-2026-05-08.json / .pdf   # DTC API spec (Postman + description)
+│   ├── 00_init_request_registry.py     # Standalone WIP registry build/refresh
+│   ├── 00_init_season_mapping.py       # Seed dtc_seasoncode_mapping
+│   ├── pull_masters_to_delta.py        # Pull KTB WIP sheets → dtc_wip_ktb + registry (Step 3 / Step 7)
+│   ├── pull_fabric_to_delta.py         # Phase 8a: pull KTB FABRIC sheets → dtc_fabric_ktb
+│   ├── pull_lineplan_to_delta.py       # Phase 9a: pull KTB LinePlan → dtc_lineplan_ktb
+│   ├── build_costing_chart.py          # Phase 9a: WIP × LinePlan join → costing_chart
+│   └── 05_push_dtc_to_beproduct.py     # Phase 2: DTC → BeProduct pushback
+├── python/                             # Importable modules (deployed as Workspace files)
+│   ├── client/rest_client.py           # Generic REST client (retry, multipart)
+│   ├── connectors/dtc.py               # DTC API connector
+│   └── sync/
+│       ├── phase1.py                   # BeProduct → DTC upsert core (pure-Python, unit-tested)
+│       ├── phase2.py                   # DTC → BeProduct pushback core (pure-Python)
+│       ├── phase3.py                   # Image upload planning + type classification (pure-Python)
+│       ├── samples.py                  # Phase 7: sample-app submit formatter (pure-Python)
+│       └── registry.py                 # Shared registry refresh (discover→enrich→merge)
+└── tests/
+    ├── test_phase1.py                  # Phase 1 core unit tests
+    ├── test_phase2.py                  # Phase 2 core unit tests
+    ├── test_phase3.py                  # Phase 3 image-upload unit tests
+    └── test_samples.py                 # Phase 7 sample formatter unit tests
 
-standalone/                          # Standalone utilities (not in the daily pipeline)
-└── beproduct_style_push.py          # Generic Delta → BeProduct push-back
 scripts/
-├── upload_notebooks.py              # Deploy notebooks + modules to the workspace
-└── deploy_job.py                    # Create / reset the multi-task job on Databricks
-docs/                                # Documentation (see table above)
+├── upload_notebooks.py                 # Deploy notebooks + modules to the Databricks workspace
+├── deploy_job.py                       # Create / reset BeProduct_DTC_sync_dag (21 job parameters)
+└── check_dtc_view.py                   # DTC WIP_ITS_USE column readiness check (Phase 6 pending cols)
+
+docs/                                   # This documentation set
+standalone/beproduct_style_push.py      # Standalone Delta → BeProduct push-back (not in daily pipeline)
 ```
 
-**Notebook vs module split:** notebooks can't run locally (Spark/`dbutils`).
-Deterministic logic lives in `dtc/python/sync/*.py` (pure Python, unit-tested);
-notebooks are thin Spark/IO wrappers. All HTTP lives in `connectors/dtc.py`.
+**Notebook vs module split (invariant):** notebooks can't run locally (Spark / `dbutils`).
+Deterministic logic lives in `dtc/python/sync/*.py` (pure Python, unit-tested); notebooks are thin Spark/IO wrappers.
 
 ---
 
-## Quick start
+## Quick commands
 
 ```bash
-# 1. Configure Databricks secrets (scope: beproduct)
-databricks secrets create-scope beproduct
-#   BeProduct OAuth: client_id, client_secret, refresh_token, company_domain
-#   DTC keys:        dtc_api_key_uat, dtc_api_key_prod
-
-# 2. Deploy notebooks + modules
-pip install databricks-sdk
-cp .env.example .env          # set DATABRICKS_HOST + DATABRICKS_PAT
-python scripts/upload_notebooks.py
-
-# 3. Create (or reset) the multi-task job
-python scripts/deploy_job.py --dry-run   # preview the task graph
-python scripts/deploy_job.py             # create BeProduct_DTC_sync_dag
-# To overwrite an existing job in place:
-# python scripts/deploy_job.py --reset-existing <JOB_ID>
-
-# 4. Run the full sync via the Jobs UI (or CLI):
-#    Job: BeProduct_DTC_sync_dag (job 294837488757511)
-#    Key parameters: dtc_environment=uat, dry_run=true (preview) → dry_run=false (apply)
-#    run_phase1/2/3=true|false to toggle individual phases
-```
-
-See **[QUICK_START.md](QUICK_START.md)** for step-by-step instructions, individual
-notebooks, and parameters.
-
----
-
-## Data model (overview)
-
-All tables live in `lft.beproduct`. Full schema in
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
-
-```
-BeProduct source             Integration                     DTC
-ktb_styles                   beproduct_to_dtc_staging         dtc_request_registry   (control table)
-beproduct_master_*           dtc_request_mapping              dtc_wip_<customer>     (pulled sheet rows)
-beproduct_directory          dtc_seasoncode_mapping
-beproduct_directory_contacts beproduct_to_dtc_sync_log
-beproduct_style_app_registry dtc_to_beproduct_sync_log
-```
-
----
-
-## Development
-
-```bash
-# Deploy notebooks + modules
-python scripts/upload_notebooks.py --dry-run        # preview
-python scripts/upload_notebooks.py                  # notebooks + modules
-python scripts/upload_notebooks.py --modules-only   # just dtc/python modules
-
-# Job definition
-python scripts/deploy_job.py --dry-run              # preview task graph + settings
-python scripts/deploy_job.py                        # create new job
-python scripts/deploy_job.py --reset-existing <ID>  # update existing job in place
-
-# Tests (pure cores; no Spark/network)
+# Unit tests
 python3 dtc/tests/test_phase1.py
 python3 dtc/tests/test_phase2.py
 python3 dtc/tests/test_phase3.py
-python3 dtc/tests/test_phase1_live.py   # live reversible DTC write (needs UAT)
+python3 dtc/tests/test_samples.py
+
+# DTC view readiness check
+python scripts/check_dtc_view.py
+
+# Deploy
+python scripts/upload_notebooks.py --dry-run
+python scripts/upload_notebooks.py
+python scripts/deploy_job.py --dry-run
+python scripts/deploy_job.py --reset-existing 294837488757511
 ```
-
----
-
-## Security
-
-All credentials live in the Databricks secret scope `beproduct` (BeProduct OAuth +
-DTC `dtc_api_key_<env>`). No credentials in code/config. Local deploy uses `.env`
-(`DATABRICKS_HOST`, `DATABRICKS_PAT`).
