@@ -290,18 +290,24 @@ print(f"\n✅ Fetch complete: {total_rows} rows  ({len(fetch_errors)} errors)")
 # COMMAND ----------
 
 # ── Write to Delta ────────────────────────────────────────────────────────────
-if total_rows == 0:
-    print(f"\n⚠️  No rows fetched — {lineplan_table_full} not modified.")
+# Always write the table (even when empty) so that build_costing_chart can
+# reliably spark.table(lineplan_table_full) without TABLE_OR_VIEW_NOT_FOUND.
+df_lp = (spark.createDataFrame(all_records, schema=LINEPLAN_SCHEMA)
+         if all_records
+         else spark.createDataFrame([], schema=LINEPLAN_SCHEMA))
+
+if write_mode == "overwrite" or not spark.catalog.tableExists(lineplan_table_full):
+    (df_lp.write.format("delta").mode("overwrite")
+           .option("overwriteSchema", "true")
+           .saveAsTable(lineplan_table_full))
+    print(f"✅ Wrote {total_rows} rows → {lineplan_table_full}  (overwrite)")
 else:
-    df_lp = spark.createDataFrame(all_records, schema=LINEPLAN_SCHEMA)
-    if write_mode == "overwrite":
-        (df_lp.write.format("delta").mode("overwrite")
-               .option("overwriteSchema", "true")
-               .saveAsTable(lineplan_table_full))
-        print(f"✅ Wrote {total_rows} rows → {lineplan_table_full}  (overwrite)")
-    else:
-        df_lp.write.format("delta").mode("append").saveAsTable(lineplan_table_full)
-        print(f"✅ Appended {total_rows} rows → {lineplan_table_full}")
+    df_lp.write.format("delta").mode("append").saveAsTable(lineplan_table_full)
+    print(f"✅ Appended {total_rows} rows → {lineplan_table_full}")
+
+if total_rows == 0:
+    print("   ⚠️  0 rows — table created with empty schema (LinePlan sheets may have "
+          "no data yet or no 'Lineplan Ref #' values).")
 
 # COMMAND ----------
 

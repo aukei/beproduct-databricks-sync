@@ -356,24 +356,28 @@ print(f"\n✅ Fetch complete: {total_adopted} Adoption=Y rows across "
 # COMMAND ----------
 
 # ── Write to Delta ────────────────────────────────────────────────────────────
-if total_rows == 0:
-    print(f"\n⚠️  No Adoption=Y rows found — {fabric_table_full} not modified.")
-    print("   (This is expected while DTC users have not yet set Adoption (Y/N) = Y.)")
-    print("   The registry has been refreshed and is ready for when adoption data arrives.")
-else:
-    df_fabric = spark.createDataFrame(all_records, schema=FABRIC_SCHEMA)
+# Always write the table (even when empty) so downstream notebooks never hit
+# TABLE_OR_VIEW_NOT_FOUND. Empty = no Adoption=Y rows yet, which is expected
+# while DTC users have not set Adoption (Y/N) = Y.
+df_fabric = (spark.createDataFrame(all_records, schema=FABRIC_SCHEMA)
+             if all_records
+             else spark.createDataFrame([], schema=FABRIC_SCHEMA))
 
-    if write_mode == "overwrite":
-        (df_fabric.write.format("delta")
-         .mode("overwrite")
-         .option("overwriteSchema", "true")
-         .saveAsTable(fabric_table_full))
-        print(f"✅ Wrote {total_rows} rows → {fabric_table_full}  (overwrite)")
-    else:
-        (df_fabric.write.format("delta")
-         .mode("append")
-         .saveAsTable(fabric_table_full))
-        print(f"✅ Appended {total_rows} rows → {fabric_table_full}")
+if write_mode == "overwrite" or not spark.catalog.tableExists(fabric_table_full):
+    (df_fabric.write.format("delta")
+     .mode("overwrite")
+     .option("overwriteSchema", "true")
+     .saveAsTable(fabric_table_full))
+    print(f"✅ Wrote {total_rows} rows → {fabric_table_full}  (overwrite)")
+else:
+    (df_fabric.write.format("delta")
+     .mode("append")
+     .saveAsTable(fabric_table_full))
+    print(f"✅ Appended {total_rows} rows → {fabric_table_full}")
+
+if total_rows == 0:
+    print("   ⚠️  0 Adoption=Y rows — table created with empty schema.")
+    print("   The registry has been refreshed and is ready for when adoption data arrives.")
 
 # COMMAND ----------
 
