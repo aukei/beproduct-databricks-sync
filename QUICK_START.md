@@ -103,35 +103,35 @@ Run these in order if you prefer step-by-step control (params shown are the key 
 
 | # | DAG task | Notebook | Purpose | Output |
 |---|----------|----------|---------|--------|
-| 1 | `bp_style_sync` | `beproduct/beproduct_style_sync` | Pull styles, excl. Finalized, enrich 6 sample apps | `ktb_styles` |
-| 2 | `transform` | `beproduct/beproduct_to_dtc_transform` | Denormalize style × color; format Phase 7 sample statuses | `beproduct_to_dtc_staging` |
-| 3 | `pull_master_dtc` | `dtc/notebooks/pull_masters_to_delta` | Pull KTB WIP `WIP_ITS_USE` rows + refresh registry | `dtc_wip_ktb` |
-| 4 | `request_manager` | `beproduct/dtc_request_manager` | Resolve / create / share requests | `dtc_request_mapping` |
-| 5 | `phase1_push` | `beproduct/beproduct_to_dtc_push` | **Phase 1+7** upsert (`dry_run`, `delta_only`) | DTC WIP sheets |
-| 6 | `phase2_push` | `dtc/notebooks/05_push_dtc_to_beproduct` | **Phase 2** pushback (`push_blanks=false`) | BeProduct |
-| 7 | `repull_dtc` | `dtc/notebooks/pull_masters_to_delta` | Targeted re-pull after Phase 1 inserts | `dtc_wip_ktb` |
-| 8 | `phase3_images` | `beproduct/beproduct_to_dtc_images` | **Phase 3** image upload (`dry_run`, `max_uploads`) | DTC "Style Image" |
+| 1 | `bp_style_sync` | `beproduct/p1p7_beproduct_style_sync` | Pull styles, excl. Finalized, enrich 6 sample apps | `ktb_styles` |
+| 2 | `transform` | `beproduct/p1p7_beproduct_to_dtc_transform` | Denormalize style × color; format Phase 7 sample statuses | `beproduct_to_dtc_staging` |
+| 3 | `pull_master_dtc` | `dtc/notebooks/p1_pull_masters_to_delta` | Pull KTB WIP `WIP_ITS_USE` rows + refresh registry | `dtc_wip_ktb` |
+| 4 | `request_manager` | `beproduct/p1_dtc_request_manager` | Resolve / create / share requests | `dtc_request_mapping` |
+| 5 | `phase1_push` | `beproduct/p1p7_beproduct_to_dtc_push` | **Phase 1+7** upsert (`dry_run`, `delta_only`) | DTC WIP sheets |
+| 6 | `phase2_push` | `dtc/notebooks/p2_push_dtc_to_beproduct` | **Phase 2** pushback (`push_blanks=false`) | BeProduct |
+| 7 | `repull_dtc` | `dtc/notebooks/p1_pull_masters_to_delta` | Targeted re-pull after Phase 1 inserts | `dtc_wip_ktb` |
+| 8 | `phase3_images` | `beproduct/p3_beproduct_to_dtc_images` | **Phase 3** image upload (`dry_run`, `max_uploads`) | DTC "Style Image" |
 
 **FABRIC chain (Phase 8a — parallel, independent):**
 
 | DAG task | Notebook | Purpose | Output |
 |----------|----------|---------|--------|
-| `pull_fabric_dtc` | `dtc/notebooks/pull_fabric_to_delta` | Pull KTB FABRIC sheets, Adoption=Y, `include_test_sheets=false` | `dtc_fabric_ktb` |
+| `pull_fabric_dtc` | `dtc/notebooks/p8a_pull_fabric_to_delta` | Pull KTB FABRIC sheets, Adoption=Y, `include_test_sheets=false` | `dtc_fabric_ktb` |
 
 **LinePlan + Costing chain (Phase 9a — parallel, independent):**
 
 | DAG task | Notebook | Purpose | Output |
 |----------|----------|---------|--------|
-| `pull_lineplan_dtc` | `dtc/notebooks/pull_lineplan_to_delta` | Pull KTB LinePlan (Full view) | `dtc_lineplan_ktb` |
-| `build_costing_chart` | `dtc/notebooks/build_costing_chart` | Join WIP × LinePlan; transpose 4 vendor/factory slots | `costing_chart` |
+| `pull_lineplan_dtc` | `dtc/notebooks/p9a_pull_lineplan_to_delta` | Pull KTB LinePlan (Full view) | `dtc_lineplan_ktb` |
+| `p9a_build_costing_chart` | `dtc/notebooks/p9a_build_costing_chart` | Join WIP × LinePlan; transpose 4 vendor/factory slots | `costing_chart` |
 
 **Other notebooks (on-demand, not in DAG):**
 
 - `dtc/notebooks/00_init_request_registry` — standalone WIP registry build/refresh (first run or targeted `request_ids`).
-- `beproduct/beproduct_master_data_sync` — **admin-only.** Pull and/or push-back BeProduct MasterData + Directory.
+- `beproduct/p5utl_beproduct_master_data_sync` — **admin-only.** Pull and/or push-back BeProduct MasterData + Directory.
   Modes: `PULL_ONLY`, `PUSH_MASTER_DATA`, `PUSH_DIRECTORY`, `PUSH_ONLY`. Use `dry_run=true` first.
   Writes `beproduct_master_*`, `beproduct_directory`, `beproduct_directory_contacts`.
-- `beproduct/dtc_share_requests` — idempotently (re-)share existing requests.
+- `beproduct/p1utl_dtc_share_requests` — idempotently (re-)share existing requests.
 - `scripts/check_dtc_view.py` — DTC WIP_ITS_USE column readiness check (Phase 6 pending columns).
 
 ---

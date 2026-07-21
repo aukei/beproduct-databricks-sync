@@ -49,13 +49,13 @@ Empty history (no submits yet) → `""` (value skipped by `phase1.norm`, not pus
 
 ```
 BeProduct API (app_get × 6 per style)
-       ↓  beproduct_style_sync.py  (Step 1 in DAG)
+       ↓  p1p7_beproduct_style_sync.py  (Step 1 in DAG)
   ktb_styles.{proto,preline,sms,fit,pp,top}_sample_json
        ↓  (raw JSON arrays of submit×size records, '[]' when empty)
-  beproduct_to_dtc_transform.py  (Step 2, format_sample_udf)
+  p1p7_beproduct_to_dtc_transform.py  (Step 2, format_sample_udf)
        ↓  sync.samples.format_sample_field()  — pure Python, unit-tested
   beproduct_to_dtc_staging.{proto,preline,sms,fit,pp,top}_sample_status
-       ↓  beproduct_to_dtc_push.py  (Step 5 — same push as Phase 1)
+       ↓  p1p7_beproduct_to_dtc_push.py  (Step 5 — same push as Phase 1)
   DTC WIP_ITS_USE  sample status columns
 ```
 
@@ -134,7 +134,7 @@ The staging column names flow directly into `phase1.FIELD_MAPPING`; updating
 
 ## Transform wiring (Spark UDF)
 
-In `beproduct_to_dtc_transform.py`:
+In `p1p7_beproduct_to_dtc_transform.py`:
 
 ```python
 from sync.samples import format_sample_field, SAMPLE_SUBMIT_FIELDS

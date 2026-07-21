@@ -5,7 +5,7 @@
 Phase 1 pushes **BeProduct-owned** style fields into the matching DTC request
 ("upsert"). It never writes back to BeProduct (that is `PHASE2_WORKFLOW.md`) and
 never uploads the Style Image (that is `PHASE3_WORKFLOW.md`). Missing **in-scope**
-requests are **created** (and shared) by `dtc_request_manager` — see
+requests are **created** (and shared) by `p1_dtc_request_manager` — see
 "Missing-request creation" below.
 
 > The original braindump spec for this phase is preserved in
@@ -68,18 +68,18 @@ here — they flow the other way in Phase 2. Authoritative mapping:
 ```
 0. Build/refresh request registry        dtc/notebooks/00_init_request_registry.py
                                          → lft.beproduct.dtc_request_registry
-1. Pull in-scope DTC requests → Delta   dtc/notebooks/pull_masters_to_delta.py
+1. Pull in-scope DTC requests → Delta   dtc/notebooks/p1_pull_masters_to_delta.py
                                          → lft.beproduct.dtc_wip_<customer>
-2. Ensure BeProduct style sync is fresh  beproduct/beproduct_style_sync.py
-3. Transform / denormalize               beproduct/beproduct_to_dtc_transform.py
+2. Ensure BeProduct style sync is fresh  beproduct/p1p7_beproduct_style_sync.py
+3. Transform / denormalize               beproduct/p1p7_beproduct_to_dtc_transform.py
                                          → lft.beproduct.beproduct_to_dtc_staging
-4. Resolve / create requests             beproduct/dtc_request_manager.py
+4. Resolve / create requests             beproduct/p1_dtc_request_manager.py
                                          → lft.beproduct.dtc_request_mapping
-5. Upsert + push BeProduct → DTC         beproduct/beproduct_to_dtc_push.py
+5. Upsert + push BeProduct → DTC         beproduct/p1p7_beproduct_to_dtc_push.py
 ```
 
 The registry scan (`sync.registry.refresh`) is **shared** and runs automatically
-inside `pull_masters_to_delta` and `dtc_request_manager` (both default
+inside `p1_pull_masters_to_delta` and `p1_dtc_request_manager` (both default
 `refresh_registry=true`), so the registry mirrors the workspace+document at sync
 time. `00_init_request_registry.py` is the same scan as a standalone notebook —
 useful for the first build or targeted `request_ids`, but no longer a mandatory
@@ -100,7 +100,7 @@ populated by `00_init_request_registry.py`.
   request in the workspace+document via `DTCConnector.search_requests` (`GET
   /v1/requests` with `workspaceName`+`filters` in the **body**), then enriches each
   by-id (`get_request` + `get_views`). Called automatically by
-  `pull_masters_to_delta` and `dtc_request_manager`, and standalone by
+  `p1_pull_masters_to_delta` and `p1_dtc_request_manager`, and standalone by
   `00_init_request_registry`.
 - **Manual override:** pass `request_ids` (comma-separated) to `00_init_request_registry`
   to register only those.
@@ -112,7 +112,7 @@ requests** — out-of-scope/foreign requests are skipped entirely (no by-id
 `get_request`, so no HTTP 400 and no registry rows). A request/view may be empty
 (0 rows). (Explicit `request_ids` are read by-id without the reference pre-filter.)
 
-### Missing-request creation (`dtc_request_manager`)
+### Missing-request creation (`p1_dtc_request_manager`)
 
 When a pending staging request name has no in-scope registry entry, the resolver
 will **create** the DTC request/sheet (`POST /v1/sheets` via
@@ -127,11 +127,11 @@ will **create** the DTC request/sheet (`POST /v1/sheets` via
   first, so they resolve instead of being re-created.
 - **Sharing (gated by `share_on_create`, default true):** a freshly created request
   is visible only to its creator (the API identity). Immediately after a successful
-  create, `dtc_request_manager` shares it: **all views → `aiagentwip@lifung.com`**
+  create, `p1_dtc_request_manager` shares it: **all views → `aiagentwip@lifung.com`**
   (AI Agent WIP) and the **Full Version** view → the **Fabric Group** user group.
   Share events are logged to `beproduct_to_dtc_sync_log` (stage `share`).
   Already-created requests can be (re-)shared idempotently with the standalone
-  `beproduct/dtc_share_requests.py` notebook.
+  `beproduct/p1utl_dtc_share_requests.py` notebook.
 
 Validated `POST /v1/sheets` body (HTTP 201): `requestReference` (NOT `requestName`),
 non-empty `requestDescription`, `viewName`, and `requestAssigneeSharingViewNames`/
@@ -182,18 +182,18 @@ changes. The new request gets an INSERT; the stale row left in the OLD request i
 flagged with DTC `Product Status = "(removed)"` (an invalid BeProduct value that
 signals the DTC user). Not deleted; only rows whose key now lives under a different
 request are marked. Core: `phase1.compute_orphan_marks`, wired in
-`beproduct_to_dtc_push.py`.
+`p1p7_beproduct_to_dtc_push.py`.
 
 ---
 
 ## Missing requests, exceptions & logging
 
-- Missing **in-scope** requests are **created** by `dtc_request_manager.py`
+- Missing **in-scope** requests are **created** by `p1_dtc_request_manager.py`
   (`dry_run=false`) and then resolve normally. Requests that are **out-of-scope /
   inactive / lack WIP_ITS_USE** are logged as errors and excluded from the push.
 - Per-row results/exceptions (scope mismatch, dup keys, missing rowId, PATCH
   failures, orphan marks) are written to `lft.beproduct.beproduct_to_dtc_sync_log`.
-- `beproduct_to_dtc_push.py` supports `dry_run=true` (compute + log, no PATCH) and
+- `p1p7_beproduct_to_dtc_push.py` supports `dry_run=true` (compute + log, no PATCH) and
   updates `registry.last_pushed` + staging `sync_status` on real runs.
 
 ---

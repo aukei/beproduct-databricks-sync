@@ -1093,6 +1093,6 @@ class OAuth2Client:
 
 ### Project Files
 
-- SDK notebooks: `beproduct/beproduct_style_sync.py`, `standalone/beproduct_style_push.py`
-- Master data: `beproduct/beproduct_master_data_sync.py`
+- SDK notebooks: `beproduct/p1p7_beproduct_style_sync.py`, `standalone/beproduct_style_push.py`
+- Master data: `beproduct/p5utl_beproduct_master_data_sync.py`
 - Documentation: `docs/BEPRODUCT_GUIDE.md`, `docs/ARCHITECTURE.md`, `AGENTS.md`

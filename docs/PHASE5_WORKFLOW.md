@@ -2,7 +2,7 @@
 
 **Status:** Implemented ✅ — admin-only, manually triggered, **not in the daily DAG**.
 
-Notebook: `beproduct/beproduct_master_data_sync.py`
+Notebook: `beproduct/p5utl_beproduct_master_data_sync.py`
 
 Phase 5 is a utility for synchronising BeProduct's dropdown-choice lists (Master
 Data) and partner registry (Directory) with the `lft.beproduct` Delta tables, and

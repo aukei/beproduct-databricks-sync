@@ -54,7 +54,7 @@ flowchart TB
             S8["⑧ phase3_images\nfront image binary"]
             S8A["⑧a pull_fabric_dtc\nPhase 8a  FABRIC\nAdoption=Y"]
             S9A1["⑨a₁ pull_lineplan_dtc\nPhase 9a  LinePlan"]
-            S9A2["⑨a₂ build_costing_chart\nWIP × LinePlan join\n4-slot transpose"]
+            S9A2["⑨a₂ p9a_build_costing_chart\nWIP × LinePlan join\n4-slot transpose"]
         end
     end
 

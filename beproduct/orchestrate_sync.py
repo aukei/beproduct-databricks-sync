@@ -13,17 +13,17 @@ Daily Sync Orchestrator: BeProduct <-> DTC (Phase 1 + Phase 2)
 
 Runs the full bi-directional sync pipeline in the correct order:
 
-  Step 1  beproduct_style_sync           BeProduct API -> lft.beproduct.ktb_styles
-  Step 2  beproduct_to_dtc_transform     ktb_styles -> lft.beproduct.beproduct_to_dtc_staging
-  Step 3  pull_masters_to_delta         DTC API -> lft.beproduct.dtc_wip_<customer>
+  Step 1  p1p7_beproduct_style_sync           BeProduct API -> lft.beproduct.ktb_styles
+  Step 2  p1p7_beproduct_to_dtc_transform     ktb_styles -> lft.beproduct.beproduct_to_dtc_staging
+  Step 3  p1_pull_masters_to_delta         DTC API -> lft.beproduct.dtc_wip_<customer>
                                          (also refreshes dtc_request_registry)
-  Step 4  dtc_request_manager            Resolve / create DTC requests
+  Step 4  p1_dtc_request_manager            Resolve / create DTC requests
                                          -> lft.beproduct.dtc_request_mapping
-  Step 5  beproduct_to_dtc_push          Phase 1: BeProduct -> DTC (upsert + orphan marks)
-  Step 6  05_push_dtc_to_beproduct       Phase 2: DTC -> BeProduct (pushback)
-  Step 7  pull_masters_to_delta         Refresh dtc_wip_<customer> AFTER Phase 1
+  Step 5  p1p7_beproduct_to_dtc_push          Phase 1: BeProduct -> DTC (upsert + orphan marks)
+  Step 6  p2_push_dtc_to_beproduct       Phase 2: DTC -> BeProduct (pushback)
+  Step 7  p1_pull_masters_to_delta         Refresh dtc_wip_<customer> AFTER Phase 1
                                          so it reflects rows Phase 1 just inserted
-  Step 8  beproduct_to_dtc_images        Phase 3: BeProduct front image -> DTC
+  Step 8  p3_beproduct_to_dtc_images        Phase 3: BeProduct front image -> DTC
                                          "Style Image" cell (blank cells only)
 
 Steps 5 and 6 write to disjoint field sets and are individually guarded by
@@ -121,11 +121,11 @@ started_at = datetime.now(timezone.utc)
 
 def _parse_inserted_ids(exit_str: str) -> str:
     """
-    Extract inserted_ids from the beproduct_to_dtc_push exit string.
+    Extract inserted_ids from the p1p7_beproduct_to_dtc_push exit string.
 
     Format emitted by Step 5: "ok inserts=N inserted_ids=id1,id2,..."
     Returns the raw comma-separated id string (empty string if none / unparseable),
-    ready to pass straight to pull_masters_to_delta's request_ids widget.
+    ready to pass straight to p1_pull_masters_to_delta's request_ids widget.
     """
     if not exit_str:
         return ""
@@ -215,7 +215,7 @@ def _run_step(
 _r1 = _run_step(
     1,
     "BeProduct Style Sync  (BP API -> ktb_styles)",
-    f"{nb_bp}/beproduct_style_sync",
+    f"{nb_bp}/p1p7_beproduct_style_sync",
     {
         "folder_name":  folder_name,
         "refresh_mode": refresh_mode,
@@ -234,7 +234,7 @@ _step1_ok = _steps[-1]["status"] == "ok"
 _r2 = _run_step(
     2,
     "Transform / Denormalize  (ktb_styles -> staging)",
-    f"{nb_bp}/beproduct_to_dtc_transform",
+    f"{nb_bp}/p1p7_beproduct_to_dtc_transform",
     {
         "catalog":       catalog,
         "schema":        schema,
@@ -245,7 +245,7 @@ _r2 = _run_step(
     },
     timeout_seconds=1800,
     skip=(not _step1_ok),
-    skip_reason="step 1 (beproduct_style_sync) failed",
+    skip_reason="step 1 (p1p7_beproduct_style_sync) failed",
 )
 _step2_ok = _steps[-1]["status"] == "ok"
 
@@ -258,7 +258,7 @@ _step2_ok = _steps[-1]["status"] == "ok"
 _r3 = _run_step(
     3,
     "Pull DTC Requests -> Delta  (DTC API -> dtc_wip + registry)",
-    f"{nb_dtc}/pull_masters_to_delta",
+    f"{nb_dtc}/p1_pull_masters_to_delta",
     {
         "dtc_environment":  dtc_environment,
         "customer":         customer,
@@ -285,7 +285,7 @@ _step3_data = _step3_ok and (_steps[-1]["result"] != "NO_IN_SCOPE_REQUESTS")
 _r4 = _run_step(
     4,
     "DTC Request Manager  (resolve / create requests)",
-    f"{nb_bp}/dtc_request_manager",
+    f"{nb_bp}/p1_dtc_request_manager",
     {
         "catalog":          catalog,
         "schema":           schema,
@@ -315,7 +315,7 @@ _step4_ok = _steps[-1]["status"] == "ok"
 _r5 = _run_step(
     5,
     "Phase 1: BeProduct -> DTC Push  (upsert + orphan marks)",
-    f"{nb_bp}/beproduct_to_dtc_push",
+    f"{nb_bp}/p1p7_beproduct_to_dtc_push",
     {
         "catalog":         catalog,
         "schema":          schema,
@@ -331,7 +331,7 @@ _r5 = _run_step(
     skip_reason=(
         "run_phase1=false"
         if not run_phase1
-        else "step 4 (dtc_request_manager) failed or no resolved requests"
+        else "step 4 (p1_dtc_request_manager) failed or no resolved requests"
     ),
 )
 
@@ -345,7 +345,7 @@ _r5 = _run_step(
 _r6 = _run_step(
     6,
     "Phase 2: DTC -> BeProduct Pushback",
-    f"{nb_dtc}/05_push_dtc_to_beproduct",
+    f"{nb_dtc}/p2_push_dtc_to_beproduct",
     {
         "catalog":         catalog,
         "schema":          schema,
@@ -385,7 +385,7 @@ else:
 _r7 = _run_step(
     7,
     _step7_name,
-    f"{nb_dtc}/pull_masters_to_delta",
+    f"{nb_dtc}/p1_pull_masters_to_delta",
     {
         "dtc_environment":  dtc_environment,
         "customer":         customer,
@@ -403,7 +403,7 @@ _r7 = _run_step(
     skip_reason=(
         "run_phase3=false"
         if not run_phase3
-        else "step 4 (dtc_request_manager) failed or no resolved requests"
+        else "step 4 (p1_dtc_request_manager) failed or no resolved requests"
     ),
 )
 
@@ -417,7 +417,7 @@ _r7 = _run_step(
 _r8 = _run_step(
     8,
     "Phase 3: BeProduct Image -> DTC Style Image",
-    f"{nb_bp}/beproduct_to_dtc_images",
+    f"{nb_bp}/p3_beproduct_to_dtc_images",
     {
         "catalog":         catalog,
         "schema":          schema,
@@ -435,7 +435,7 @@ _r8 = _run_step(
         if not run_phase3
         else "step 2 (transform) failed"
         if not _step2_ok
-        else "step 4 (dtc_request_manager) failed or no resolved requests"
+        else "step 4 (p1_dtc_request_manager) failed or no resolved requests"
     ),
 )
 

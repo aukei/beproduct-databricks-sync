@@ -30,7 +30,7 @@ Steps 3 + 7 combined = **868 s (74%)** of execution time in Run 1.
 
 ## Initial (incorrect) root-cause hypothesis
 
-The original hypothesis was that `pull_masters_to_delta.py` was slow because it
+The original hypothesis was that `p1_pull_masters_to_delta.py` was slow because it
 looped **sequentially** over 66 active in-scope registry entries calling
 `connector.get_sheet()` — one HTTP GET per request, ≈6 s avg × 66 = ≈396 s per
 step. This was **wrong** (see "Measured intra-step breakdown" below).
@@ -51,7 +51,7 @@ and was never the bottleneck.
 
 ## Optimizations applied (2026-06-18)
 
-### Opt A — Parallel `get_sheet()` calls (`pull_masters_to_delta.py`) ⚠️ no material gain
+### Opt A — Parallel `get_sheet()` calls (`p1_pull_masters_to_delta.py`) ⚠️ no material gain
 
 `ThreadPoolExecutor(max_workers=4)` replaces the serial loop for `get_sheet()`
 calls.  `max_workers` is hard-capped at 4 to protect the 2-node K8S cluster backing
@@ -63,16 +63,16 @@ bottleneck was Spark overhead in cells 5+6, not HTTP latency. Opt A remains in t
 code as a minor safety measure (helps if individual sheets ever get larger), but
 agents should not treat it as a meaningful optimisation.
 
-Files changed: `dtc/notebooks/pull_masters_to_delta.py`
+Files changed: `dtc/notebooks/p1_pull_masters_to_delta.py`
 
 ### Opt B — Targeted Step 7 re-pull (orchestrator + push notebook)
 
-`beproduct_to_dtc_push.py` now tracks which `request_id`s received at least one
+`p1p7_beproduct_to_dtc_push.py` now tracks which `request_id`s received at least one
 successful INSERT and emits them in a structured exit string:
 `"ok inserts=N inserted_ids=id1,id2,..."`.
 
 `orchestrate_sync.py` parses this string and passes the IDs to Step 7 via the
-new `request_ids` widget of `pull_masters_to_delta`.  When `request_ids` is
+new `request_ids` widget of `p1_pull_masters_to_delta`.  When `request_ids` is
 non-empty, the notebook fetches only the listed requests (DELETE stale rows +
 append fresh data) instead of overwriting the whole `dtc_wip_ktb` table.
 
@@ -84,15 +84,15 @@ For a run with many INSERTs (e.g. first-time population) it degrades gracefully
 to Opt-A speed (proportional to the number of INSERT'd requests).
 
 Files changed:
-- `beproduct/beproduct_to_dtc_push.py` — track + emit `inserted_request_ids`
+- `beproduct/p1p7_beproduct_to_dtc_push.py` — track + emit `inserted_request_ids`
 - `beproduct/orchestrate_sync.py` — parse, wire to Step 7 params
-- `dtc/notebooks/pull_masters_to_delta.py` — `request_ids` + `max_workers` widgets,
+- `dtc/notebooks/p1_pull_masters_to_delta.py` — `request_ids` + `max_workers` widgets,
   targeted DELETE+append write path
 
 ### Opt D — INCREMENTAL BeProduct refresh default (`orchestrate_sync.py`)
 
 Changed the `refresh_mode` widget default from `"FULL"` to `"INCREMENTAL"`.
-`beproduct_style_sync.py` already implements INCREMENTAL using the
+`p1p7_beproduct_style_sync.py` already implements INCREMENTAL using the
 `ktb_styles_sync_meta.last_sync_at` timestamp as a `FolderModifiedAt` filter;
 it falls back to FULL automatically on first run (no prior timestamp).
 
@@ -155,7 +155,7 @@ The child notebooks launched by `dbutils.notebook.run` ARE recoverable: they are
 CLI recipe). Exporting the Step 1 and Step 3 child runs and reading each cell's
 `startTime`/`finishTime` gives the true split:
 
-**Step 3 — `pull_masters_to_delta` (child run 476284671935125, 491 s):**
+**Step 3 — `p1_pull_masters_to_delta` (child run 476284671935125, 491 s):**
 
 | Cell | Work | Time | Notes |
 |------|------|------|-------|
@@ -171,7 +171,7 @@ and the 66-iteration control-table `UPDATE` loop (cell 6, 179 s). The DTC API
 (registry refresh + all `get_sheet`s) is only ~24 s.
 
 - **Confirms hypothesis 1** (control-table logging as separate Spark jobs):
-  cell 6 = **179 s** for 66 serial `UPDATE`s (`pull_masters_to_delta.py:306-316`),
+  cell 6 = **179 s** for 66 serial `UPDATE`s (`p1_pull_masters_to_delta.py:306-316`),
   ~2.7 s per UPDATE.
 - **Explains why Opt A gave nothing**: parallelizing `get_sheet` shaved a few
   seconds off a 3.9 s cell. `get_sheet` was never slow because the requests are
@@ -182,7 +182,7 @@ and the 66-iteration control-table `UPDATE` loop (cell 6, 179 s). The DTC API
   `overwrite` + `mergeSchema` + `delta.columnMapping.mode=name` write, and a
   redundant `out.count()` re-execution.
 
-**Step 1 — `beproduct_style_sync` (child run 849467851218721, 132 s):**
+**Step 1 — `p1p7_beproduct_style_sync` (child run 849467851218721, 132 s):**
 
 | Cell | Work | Time |
 |------|------|------|
@@ -198,7 +198,7 @@ INCREMENTAL Step 1 = 110 s (cell 2) / 132 s (wrapper) vs the FULL baseline of
 matches the AGENTS.md note that `FolderModifiedAt` is **folder-scoped** (any change
 in the KTB folder re-qualifies every style in that folder), so INCREMENTAL still
 enumerates ~the whole folder. The fixed `pip install beproduct` on every run
-(`beproduct_style_sync.py:34`) is a smaller, easily-removed cost (bake into the
+(`p1p7_beproduct_style_sync.py:34`) is a smaller, easily-removed cost (bake into the
 cluster / use `%pip` cache).
 
 ### Suggested next optimizations (re-prioritised by the measured data)
@@ -249,7 +249,7 @@ non-Photon validated as the right cluster shape for this tiny-data workload.
 
 ### Cell-5 single-DataFrame write — validated 2026-06-19 (run 345301990331528)
 
-`pull_masters_to_delta.py` now accumulates ALL requests' records into one flat
+`p1_pull_masters_to_delta.py` now accumulates ALL requests' records into one flat
 list, builds a SINGLE DataFrame (union of every request's `col_*`, `rec.get()`
 fills missing cols with None), writes once, and uses `len(all_records)` instead of
 a Spark `count()`. Result — `pull_dtc` cell-by-cell:
@@ -272,7 +272,7 @@ multi-task job (294837488757511) and pause the old one.
 
 ### Step 1 sample-app enrichment cost (added 2026-06-19)
 
-`beproduct_style_sync` now also reads each style's 6 sample apps (Proto / PreLine /
+`p1p7_beproduct_style_sync` now also reads each style's 6 sample apps (Proto / PreLine /
 SMS / Fit / PP / TOP) — **one `app_get` per (style × app)**, because app changes are
 invisible to `style.modifiedAt` (no incremental shortcut exists; see AGENTS.md).
 For KTB that is 146 × 6 = **876 calls ≈ ~120 s** at `app_max_workers=10` (~1.5 s
@@ -285,7 +285,7 @@ App IDs are folder-constant and cached by `00_init_style_app_registry`
 
 ### Opt E — batched control-table MERGE (validated 2026-06-19)
 
-`pull_masters_to_delta.py` replaces the ~66-iteration per-request `UPDATE` loop
+`p1_pull_masters_to_delta.py` replaces the ~66-iteration per-request `UPDATE` loop
 (cell 6, was ~179 s) with a single `MERGE INTO {registry} USING control_updates_src`
 (one Spark job). Because Step 7 runs the same notebook, it benefits automatically;
 in targeted mode the MERGE only touches the filtered requests.
@@ -293,7 +293,7 @@ in targeted mode the MERGE only touches the filtered requests.
 
 ### SDK-install isolated into its own cell (instrumentation)
 
-`beproduct_style_sync.py` splits `pip install beproduct` into its own command cell
+`p1p7_beproduct_style_sync.py` splits `pip install beproduct` into its own command cell
 with a `time.perf_counter()` print (~10 s measured). Per-cell timing in the exported
 run now shows the install cost separately. To eliminate, bake `beproduct` into the
 cluster init script.
@@ -312,7 +312,7 @@ Step 3 cell 5's 66-way `reduce(unionByName)` + `overwrite` write + `out.count()`
 - **Pre-warmed cluster**: pin job to an all-purpose cluster or enable keep-alive.
   Eliminates 350–410 s cold start with zero code change.
 - **Skip known-empty requests in full pull**: 40 of 66 in-scope requests have
-  `row_count = 0`.  A `skip_empty_since` threshold in `pull_masters_to_delta`
+  `row_count = 0`.  A `skip_empty_since` threshold in `p1_pull_masters_to_delta`
   could skip re-fetching requests that were last confirmed empty recently.
 - **Parallelize `registry.refresh()` inner loop**: `registry.py:308` loops
   sequentially over `get_request_scope()` calls (only runs in Step 3).  Same

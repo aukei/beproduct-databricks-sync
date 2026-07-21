@@ -36,7 +36,7 @@ def check(cond, msg):
         _failures.append(msg)
 
 
-# Raw record shape as stored by beproduct_style_sync.extract_sample_submits
+# Raw record shape as stored by p1p7_beproduct_style_sync.extract_sample_submits
 def rec(submit_id, name, size, status, date):
     return {
         "submit_id": submit_id, "submit_name": name,

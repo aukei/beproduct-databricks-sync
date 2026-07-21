@@ -5,11 +5,11 @@ Style Image is a binary cell that cannot ride the JSON sheetData PATCH used by
 Phase 1; it has its own multipart endpoint
 (POST /v1/sheets/{sheetId}/views/{viewId}/images?rowindex=..&columnname=..),
 which operates on an EXISTING row. So image sync is a separate step that runs
-AFTER Phase 1 (beproduct_to_dtc_push), once rows exist and have a rowIndex.
+AFTER Phase 1 (p1p7_beproduct_to_dtc_push), once rows exist and have a rowIndex.
 
 This module decides WHICH rows need an image uploaded; all HTTP (download from
 the BeProduct CDN, upload to DTC) and Spark IO live in the notebook
-(beproduct/beproduct_to_dtc_images.py) and connectors.dtc.DTCConnector.
+(beproduct/p3_beproduct_to_dtc_images.py) and connectors.dtc.DTCConnector.
 
 Decision rule (per requirement):
   For each live DTC sheet row, upload an image when BOTH hold:

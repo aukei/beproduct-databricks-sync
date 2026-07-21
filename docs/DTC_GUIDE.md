@@ -72,20 +72,20 @@ Connector methods: `search_requests`, `get_request`, `get_views`,
 |----------|------|--------|
 | `dtc/notebooks/00_init_request_registry.py` | Standalone WIP registry build/refresh (first build or targeted `request_ids`). | `dtc_request_registry` |
 | `dtc/notebooks/00_init_season_mapping.py` | Seed the season-code prefix table. | `dtc_seasoncode_mapping` |
-| `dtc/notebooks/pull_masters_to_delta.py` | Refresh WIP registry; pull each in-scope active request's `WIP_ITS_USE` view (Steps 3 + 7). | `dtc_wip_<customer>` |
-| `dtc/notebooks/pull_fabric_to_delta.py` | Phase 8a: pull KTB FABRIC sheets (`include_test_sheets` switch, Adoption=Y filter). | `dtc_fabric_<customer>`, `dtc_fabric_registry` |
-| `dtc/notebooks/pull_lineplan_to_delta.py` | Phase 9a: pull KTB LinePlan (LINEPLAN_ITS_USE → Full fallback). | `dtc_lineplan_<customer>`, `dtc_lineplan_registry` |
-| `dtc/notebooks/build_costing_chart.py` | Phase 9a: join WIP × LinePlan on "Lineplan Ref #"; transpose 4 vendor/factory slots. | `costing_chart` (full overwrite) |
-| `dtc/notebooks/05_push_dtc_to_beproduct.py` | Phase 2 pushback of DTC-owned fields (Vendor, Factory, Lot#). | BeProduct (+ `dtc_to_beproduct_sync_log`) |
+| `dtc/notebooks/p1_pull_masters_to_delta.py` | Refresh WIP registry; pull each in-scope active request's `WIP_ITS_USE` view (Steps 3 + 7). | `dtc_wip_<customer>` |
+| `dtc/notebooks/p8a_pull_fabric_to_delta.py` | Phase 8a: pull KTB FABRIC sheets (`include_test_sheets` switch, Adoption=Y filter). | `dtc_fabric_<customer>`, `dtc_fabric_registry` |
+| `dtc/notebooks/p9a_pull_lineplan_to_delta.py` | Phase 9a: pull KTB LinePlan (LINEPLAN_ITS_USE → Full fallback). | `dtc_lineplan_<customer>`, `dtc_lineplan_registry` |
+| `dtc/notebooks/p9a_build_costing_chart.py` | Phase 9a: join WIP × LinePlan on "Lineplan Ref #"; transpose 4 vendor/factory slots. | `costing_chart` (full overwrite) |
+| `dtc/notebooks/p2_push_dtc_to_beproduct.py` | Phase 2 pushback of DTC-owned fields (Vendor, Factory, Lot#). | BeProduct (+ `dtc_to_beproduct_sync_log`) |
 
-`beproduct/dtc_request_manager.py` (BeProduct-side, but DTC-writing) resolves /
+`beproduct/p1_dtc_request_manager.py` (BeProduct-side, but DTC-writing) resolves /
 **creates** / **shares** WIP requests and writes `dtc_request_mapping`.
 
 ### Registry scan (shared)
 
 `sync.registry.refresh` = discover (`search_requests`) → enrich by-id → upsert
 (`mode=merge`, preserving `last_extracted`/`last_pushed`/`row_count`). It runs
-automatically inside `pull_masters_to_delta` and `dtc_request_manager` (both
+automatically inside `p1_pull_masters_to_delta` and `p1_dtc_request_manager` (both
 default `refresh_registry=true`), so the registry mirrors the workspace+document
 each run; `00_init_request_registry.py` is the same scan standalone. After a full
 auto-discover, in-scope rows absent from the scan are **marked** inactive
@@ -93,12 +93,12 @@ auto-discover, in-scope rows absent from the scan are **marked** inactive
 
 ### Missing-request creation & sharing
 
-`dtc_request_manager.py` **creates** missing **in-scope** requests
+`p1_dtc_request_manager.py` **creates** missing **in-scope** requests
 (`POST /v1/sheets`) in `dtc_document`, then re-scans + resolves. Gated by `dry_run`
 (default `true` = preview). Newly created requests are **shared** (gated by
 `share_on_create`): all views → `aiagentwip@lifung.com`, Full Version → the
 `Fabric Group` user group. Backfill existing requests with
-`beproduct/dtc_share_requests.py`. Names that don't parse are logged `NOT_IN_SCOPE`.
+`beproduct/p1utl_dtc_share_requests.py`. Names that don't parse are logged `NOT_IN_SCOPE`.
 
 ---
 
@@ -155,14 +155,14 @@ Full overwrite each run.
 ### `dtc_seasoncode_mapping` — `(CUSTOMER, BPSEASON, DTCCODE)`
 
 Season-code **prefix** only; the year is algorithmic (last 2 digits of BeProduct
-year). Forward-only (BeProduct → DTC), applied in `beproduct_to_dtc_transform.py`.
+year). Forward-only (BeProduct → DTC), applied in `p1p7_beproduct_to_dtc_transform.py`.
 
 ### Sync logs
 
 `beproduct_to_dtc_sync_log` (stages `resolve`/`create`/`share`/`push`/`images`) and
 `dtc_to_beproduct_sync_log` (Phase 2).
 
-`pull_masters_to_delta.py` parameters: `dtc_environment` (uat|prod), `customer`
+`p1_pull_masters_to_delta.py` parameters: `dtc_environment` (uat|prod), `customer`
 (also the table suffix), `dtc_workspace`, `dtc_document`, `catalog`/`schema`,
 `write_mode` (overwrite|append), `refresh_registry`.
 

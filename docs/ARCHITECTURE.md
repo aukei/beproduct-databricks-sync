@@ -40,24 +40,24 @@ the user-profile timezone (treated as **+08:00 HKT** here).
 ```
 beproduct/                         # BeProduct-side notebooks (also host the cross-platform push)
 ├── 00_init_style_app_registry.py  # Cache folder application IDs → beproduct_style_app_registry
-├── beproduct_style_sync.py        # BeProduct API → lft.beproduct.ktb_styles (+ sample-app status)
-├── beproduct_master_data_sync.py  # Admin: pull/push-back MasterData (dropdowns) + Directory
-├── beproduct_to_dtc_transform.py  # ktb_styles → beproduct_to_dtc_staging (denormalize)
-├── dtc_request_manager.py         # Resolve / CREATE / SHARE DTC requests → dtc_request_mapping
-├── beproduct_to_dtc_push.py       # Phase 1: BeProduct → DTC upsert + orphan marks
-├── beproduct_to_dtc_images.py     # Phase 3: front image → DTC "Style Image"
-├── dtc_share_requests.py          # Idempotent request-sharing backfill
+├── p1p7_beproduct_style_sync.py        # BeProduct API → lft.beproduct.ktb_styles (+ sample-app status)
+├── p5utl_beproduct_master_data_sync.py  # Admin: pull/push-back MasterData (dropdowns) + Directory
+├── p1p7_beproduct_to_dtc_transform.py  # ktb_styles → beproduct_to_dtc_staging (denormalize)
+├── p1_dtc_request_manager.py         # Resolve / CREATE / SHARE DTC requests → dtc_request_mapping
+├── p1p7_beproduct_to_dtc_push.py       # Phase 1: BeProduct → DTC upsert + orphan marks
+├── p3_beproduct_to_dtc_images.py     # Phase 3: front image → DTC "Style Image"
+├── p1utl_dtc_share_requests.py          # Idempotent request-sharing backfill
 └── orchestrate_sync.py            # ⚠️ RETIRED — single-notebook fallback only
 
 dtc/
 ├── notebooks/
 │   ├── 00_init_request_registry.py  # Standalone WIP registry build/refresh
 │   ├── 00_init_season_mapping.py    # Seed dtc_seasoncode_mapping
-│   ├── pull_masters_to_delta.py     # Pull KTB WIP sheets → dtc_wip_ktb + registry (Steps 3 + 7)
-│   ├── pull_fabric_to_delta.py      # Phase 8a: pull KTB FABRIC → dtc_fabric_ktb (Adoption=Y)
-│   ├── pull_lineplan_to_delta.py    # Phase 9a: pull KTB LinePlan → dtc_lineplan_ktb
-│   ├── build_costing_chart.py       # Phase 9a: WIP × LinePlan → costing_chart (transpose 4 slots)
-│   └── 05_push_dtc_to_beproduct.py  # Phase 2: DTC → BeProduct pushback
+│   ├── p1_pull_masters_to_delta.py     # Pull KTB WIP sheets → dtc_wip_ktb + registry (Steps 3 + 7)
+│   ├── p8a_pull_fabric_to_delta.py      # Phase 8a: pull KTB FABRIC → dtc_fabric_ktb (Adoption=Y)
+│   ├── p9a_pull_lineplan_to_delta.py    # Phase 9a: pull KTB LinePlan → dtc_lineplan_ktb
+│   ├── p9a_build_costing_chart.py       # Phase 9a: WIP × LinePlan → costing_chart (transpose 4 slots)
+│   └── p2_push_dtc_to_beproduct.py  # Phase 2: DTC → BeProduct pushback
 ├── python/                          # Importable modules (deployed as Workspace files)
 │   ├── client/rest_client.py        # Generic REST client (retry, multipart)
 │   ├── connectors/dtc.py            # DTC API connector
@@ -94,24 +94,24 @@ step is a first-class task with its own logs and per-task timing in the Jobs UI.
 Task               notebook                      inputs → outputs              parallel group
 ─────────────────  ────────────────────────────  ────────────────────────────  ──────────────
 wait_cluster       wait_cluster                  (root / cold-start sentinel)  root
-bp_style_sync      beproduct_style_sync          BP API → ktb_styles           after wait ┐
-transform          beproduct_to_dtc_transform    ktb_styles → staging          after 1    │ WIP chain
-pull_master_dtc    pull_masters_to_delta         DTC API → dtc_wip + registry  after wait ┘ parallel
-request_manager    dtc_request_manager           staging+registry → mapping    after 2+3
+bp_style_sync      p1p7_beproduct_style_sync          BP API → ktb_styles           after wait ┐
+transform          p1p7_beproduct_to_dtc_transform    ktb_styles → staging          after 1    │ WIP chain
+pull_master_dtc    p1_pull_masters_to_delta         DTC API → dtc_wip + registry  after wait ┘ parallel
+request_manager    p1_dtc_request_manager           staging+registry → mapping    after 2+3
 gate_phase1        (condition: run_phase1)        after request_manager
-phase1_push        beproduct_to_dtc_push         staging → DTC upsert+orphans  after gate1
+phase1_push        p1p7_beproduct_to_dtc_push         staging → DTC upsert+orphans  after gate1
 gate_phase2        (condition: run_phase2)        after transform+pull_master
-phase2_push        05_push_dtc_to_beproduct      dtc_wip → BP pushback         after gate2
+phase2_push        p2_push_dtc_to_beproduct      dtc_wip → BP pushback         after gate2
 gate_phase3        (condition: run_phase3)        after request_manager
-repull_dtc         pull_masters_to_delta         targeted re-pull (inserts)    after gate3+phase1 ALL_DONE
-phase3_images      beproduct_to_dtc_images       staging+wip → DTC image       after repull
+repull_dtc         p1_pull_masters_to_delta         targeted re-pull (inserts)    after gate3+phase1 ALL_DONE
+phase3_images      p3_beproduct_to_dtc_images       staging+wip → DTC image       after repull
 
 gate_phase8a       (condition: run_phase8a)       after wait_cluster            ┐ parallel,
-pull_fabric_dtc    pull_fabric_to_delta           DTC FABRIC → dtc_fabric_ktb  ┘ independent
+pull_fabric_dtc    p8a_pull_fabric_to_delta           DTC FABRIC → dtc_fabric_ktb  ┘ independent
 
 gate_phase9a       (condition: run_phase9a)       after wait_cluster            ┐ parallel,
-pull_lineplan_dtc  pull_lineplan_to_delta         DTC LinePlan → lineplan_ktb  │ independent
-build_costing_chart build_costing_chart           wip+lineplan → costing_chart ┘ after pull_lineplan+pull_master
+pull_lineplan_dtc  p9a_pull_lineplan_to_delta         DTC LinePlan → lineplan_ktb  │ independent
+p9a_build_costing_chart p9a_build_costing_chart           wip+lineplan → costing_chart ┘ after pull_lineplan+pull_master
 ```
 
 Condition tasks (`gate_phase*`) evaluate `run_phase*` job parameters; their `true`
@@ -211,7 +211,7 @@ Workspace ("KTB")
 |-------|-------|---------------------|
 | `ktb_styles` | 1 row / style | `id`, `bp_style_number` (header_number; was `lf_style_number`), `lf_style_number` (new separate field), `brand` (brand_hk), `brands` (brands_multi), `gender`, `season`, `year`, `product_status` (excl. Finalized at sync time), `description`, `product_category`, `product_sub_category`, `division`, `garment_finish`, `techpack_stage`, `customer_style_number`, `lot_code`, `parent_vendor`, `factory`; `colorways_json`; `front_image_url`; **6 sample-app columns** `{proto,preline,sms,fit,pp,top}_sample_json` (JSON arrays of submit×size records; transform formats into DTC status strings via `sync.samples`); `data_json`; timestamps |
 | `beproduct_style_app_registry` | 1 row / (folder × app) | Cache of folder-constant application IDs (`00_init_style_app_registry`). `folder_name`, `app_id`, `app_title`, `app_type`, `is_sample`, `column_prefix`, `registered_at`. Sync reads `is_sample=true` to know which apps to `app_get`. |
-| `beproduct_master_*` | 1 row / valid choice | 11 tables (brands, teams, seasons, years, product_status, product_category, product_sub_category, division, techpack_stage, parent_vendor, factory); columns `field_id`, `value`, `code`, `active`, `data_json`, `synced_at`. `garment_finish` omitted — free-text field, no choices. Used to validate dropdown/multiselect values before push-back. Written (and optionally pushed back to BeProduct) by `beproduct_master_data_sync`. |
+| `beproduct_master_*` | 1 row / valid choice | 11 tables (brands, teams, seasons, years, product_status, product_category, product_sub_category, division, techpack_stage, parent_vendor, factory); columns `field_id`, `value`, `code`, `active`, `data_json`, `synced_at`. `garment_finish` omitted — free-text field, no choices. Used to validate dropdown/multiselect values before push-back. Written (and optionally pushed back to BeProduct) by `p5utl_beproduct_master_data_sync`. |
 | `beproduct_directory` | 1 row / company | Directory of vendors, factories, and partners. Columns: `id` (BeProduct UUID, null for new records), `directory_id` (human-readable code), `name`, `partner_type`, `address`, `country`, `state`, `zip`, `city`, `phone`, `fax`, `website`, `notes`, `active`, `data_json`, `synced_at`. `id = NULL` rows are Added; `id = <uuid>` rows are Updated on next push. |
 | `beproduct_directory_contacts` | 1 row / contact | Contacts within a directory company. Columns: `directory_id` (parent company UUID), `contact_id` (null = new), `email`, `first_name`, `last_name`, `title`, `mobile_phone`, `work_phone`, `role`, `active`, `data_json`, `synced_at`. |
 

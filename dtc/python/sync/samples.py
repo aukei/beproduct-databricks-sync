@@ -3,7 +3,7 @@ Phase 7 — BeProduct sample-app submit history → DTC status columns
 ==================================================================
 
 BeProduct stores, per style, up to 6 SAMPLE applications (Proto / PreLine / SMS /
-Fit / PP / TOP), each of type ``SampleRequestMulti``. ``beproduct_style_sync``
+Fit / PP / TOP), each of type ``SampleRequestMulti``. ``p1p7_beproduct_style_sync``
 already extracts each app's **submit × size** records into a raw JSON-array column
 on ``ktb_styles`` (``{prefix}_sample_json``), e.g. ``preline_sample_json``.
 
@@ -49,7 +49,7 @@ __all__ = [
 
 # Phase 7 mappings — all 6 sample apps.
 # Keys are the ktb_styles RAW column names (``{prefix}_json`` from
-# beproduct_style_sync.SAMPLE_APPS); each entry gives the derived staging column
+# p1p7_beproduct_style_sync.SAMPLE_APPS); each entry gives the derived staging column
 # and the DTC column it is pushed to (via phase1.FIELD_MAPPING).
 #
 # DTC column presence (198-field WIP_ITS_USE view, confirmed 2026-07-07):
@@ -117,7 +117,7 @@ def format_sample_field(raw: Any) -> str:
     Phase 7 DTC field string: the complete list of submits, one triple each from
     the submit's FIRST size.
 
-    Input records (from beproduct_style_sync.extract_sample_submits) carry:
+    Input records (from p1p7_beproduct_style_sync.extract_sample_submits) carry:
       submit_id, submit_name, size, submit_status, submit_status_date, ...
     They are ordered submit-by-submit, size-by-size, so the first record seen for
     a given submit_id corresponds to that submit's first size.

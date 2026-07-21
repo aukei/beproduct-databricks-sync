@@ -428,7 +428,7 @@ job = w.jobs.create(
         jobs.Task(
             task_key="sync_styles",
             notebook_task=jobs.NotebookTask(
-                notebook_path="/Workspace/Repos/beproduct-sync/beproduct/beproduct_style_sync",
+                notebook_path="/Workspace/Repos/beproduct-sync/beproduct/p1p7_beproduct_style_sync",
                 base_parameters={
                     "folder_name": "KTB",
                     "refresh_mode": "INCREMENTAL"
@@ -474,7 +474,7 @@ job = w.jobs.create(
             task_key="pull_dtc",
             depends_on=[jobs.TaskDependency(task_key="init_mapping")],
             notebook_task=jobs.NotebookTask(
-                notebook_path="/Workspace/Repos/beproduct-sync/DTC/notebooks/pull_masters_to_delta",
+                notebook_path="/Workspace/Repos/beproduct-sync/DTC/notebooks/p1_pull_masters_to_delta",
                 base_parameters={
                     "customer": "KTB",
                     "dtc_environment": "uat"

@@ -4,7 +4,7 @@ Initialise the BeProduct Style Application registry
 ===================================================
 
 Caches the BeProduct application (page) IDs for a style FOLDER so the daily Step 1
-sync (`beproduct_style_sync`) can enrich styles with sample-app submit status
+sync (`p1p7_beproduct_style_sync`) can enrich styles with sample-app submit status
 WITHOUT re-discovering IDs on every run.
 
 Why a registry: application IDs are constant per FOLDER (not per style) — every
@@ -46,7 +46,7 @@ from pyspark.sql.types import (
 )
 
 # SSOT for the sample-app title -> Delta column-prefix mapping. MUST match
-# `SAMPLE_APPS` in beproduct/beproduct_style_sync.py.
+# `SAMPLE_APPS` in beproduct/p1p7_beproduct_style_sync.py.
 SAMPLE_APPS = {
     "Proto Sample":   "proto_sample",
     "PreLine Sample": "preline_sample",

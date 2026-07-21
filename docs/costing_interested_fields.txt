@@ -84,7 +84,7 @@ LinePlan field names (exact DTC column names — all UPPERCASE, confirmed 2026-0
   "INTERNAL/ SOURCED"             → supplier_type   (slash-space in name)
 
   View: "Full" (id 69f0788555010bb745140ac4, 30 fields).
-  No "LINEPLAN_ITS_USE" view exists in UAT; pull_lineplan_to_delta tries it first
+  No "LINEPLAN_ITS_USE" view exists in UAT; p9a_pull_lineplan_to_delta tries it first
   and falls back to "Full".
 
 LinePlan grouping note

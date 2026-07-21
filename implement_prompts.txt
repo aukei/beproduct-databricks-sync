@@ -196,7 +196,7 @@ mark stale DTC row "Product Status" to "(removed)" - this is not a valid BeProdu
 
 # Phase 3 Image $44
 Tackle image. Since image API is an operation on existing row, it cannot be handled at record insert time. Therefore tentatively:
-1. as an independent step after beproduct_to_dtc_push, reload all in-scope request/sheet rows from dtc ie. refresh dtc_wip_ktb, noting "Style Image" of each row is populated or not.
+1. as an independent step after p1p7_beproduct_to_dtc_push, reload all in-scope request/sheet rows from dtc ie. refresh dtc_wip_ktb, noting "Style Image" of each row is populated or not.
 2. if  the row "Style image" attribute is not populated, and corresponding BeProduct row has valid "front_image_url", then use p.16 "POST /v1/sheets/{sheetId}/views/{viewId}/images?rowindex={number}&columnname={text}" API to add image to the row.
 2.1 {columnname} should be "Style Image"
 2.2 Body is retrieved from front_image_url (e.g. curl), then put into request body in binary format as multipart/form-data
@@ -245,7 +245,7 @@ databricks-integration SKILL has some instruction on how to get job log from dat
 - save the whole sample submit list to style.
 
 # Phase 5 Master Data utility
-verify @beproduct/beproduct_master_data_sync.py  does it still work against current beproduct data structure?  include "directory" as part of master data, ref  SDK at https://python.beproduct.com/080-directory/
+verify @beproduct/p5utl_beproduct_master_data_sync.py  does it still work against current beproduct data structure?  include "directory" as part of master data, ref  SDK at https://python.beproduct.com/080-directory/
 - note SDK does not support update / insert to Directory, however RESTful api at https://developers.beproduct.com/swagger/v1/swagger.json expose /api/{company}/Directory/Add and /api/{company}/Directory/Update.
 - derive push back logic of Directory as well as other dropdown values.
 - this is  manually triggered by admin to check and bulk update beproduct master data & directory, thus not part of DAG schedule job.
@@ -297,7 +297,7 @@ In DTC workspace <customer> i.e. KTB, there are sheets of document "<customer> F
 
 # Phase 9a Preparation of Costing sheet
 - In addition to WIP / Fabric document requests, Retrieve also Requests of DTC document "<Customer> LinePlan" e.g. "KTB LinePlan", using view "LINEPLAN_ITS_USE" (preferred) or "Full" if former not exists.
-- Once WIP and LinePlan are in Databricks, they are joined with WIP "Lineplan Ref #(GC)" to LinePlan "Lineplan Ref #" to from a "Costing_Chart":
+- Once WIP and LinePlan are in Databricks, they are joined with WIP "Lineplan Ref #" to LinePlan "Lineplan Ref #" to from a "Costing_Chart":
     - transpose [(Main Vendor, Main Factory), (Vendor 1, Factory 1), (Vendor 2, Factory 2), (Vendor 3, Factory 3)] into 4 rows [Vendor, Factory]
     - Style - Color level
     - key = [Customer, BP_Style_no, LF_style_no, Legacy Code, SeasonCode, Brand, Color_name, Lineplan Ref#, Vendor, Factory]
@@ -315,7 +315,7 @@ Supplier Type          - Generated from Master Chart data
 Supplier               - Main Vendor (Sampling) / Vendor 1 / Vendor 2 / Vendor 3
 Factory                - Main Factory (Sampling) / Factory 1 / Factory 2 / Factory 3
 Production Country     - Master Chart
-Order Quantity         - Line Plan "Projected Volume (Season)" column
+Order Quantity         - Line Plan "PROJECTED VOLUME (season)" column
 Target LDP             - Line Plan "Target SAP w/ Tariff Impact" column
 HTS Code               - Master Chart "[Main Factory|Factory 1-3 -] HTS code" or if blank, Retrieve from NT Orbit Duty Tools
 Duty Rate (US)         - Master Chart "[Main Factory|Factory 1-3 -] - Duty Rate (US)" or if blank, Retrieve from NT Orbit Duty Tools
@@ -327,3 +327,17 @@ Target FOB             - Line Plan
     - at each refresh, fully overwrite this costing_chart using eligible fresh data
     - "NT Orbit Duty Tools" is calling a 3rd party API with some optimization in caching results. Intended in phase 9b.
     - Once (9b) finished, if there are changes in Costing chart HTS code or any of the 3 Duty rates or Tariff rates, i.e. any row called the 3rd party API, push the value back to Master chart  corresponding field. 
+
+
+
+# checkpoint: update doc and housekeep orphan tables
+1. let's drop the diagram.png and svg. And worth create a databricks_costing_interested_fields.txt similar to the 2 beproduct txts. PHASE5 worthy a dedicated WORKFLOW md? 
+PHASE7 is enriching phase 1 like phase 3 really. May follow suite to create a dedicated doc too.
+leaving out PHASE8_WORKFLOW and PHASE9_WORKFLOW for now until all planned subphases are completed.
+2. reference live databricks lft.beproduct schema. there are dtc_fabric_ktb (the FABRIC sheets data), dtc_fabric_registry (the FABRIC sheet index), dtc_lineplan_registry, dtc_master_chart_uat, dtc_master_chart_uat_change_log, dtc_request_mapping, dtc_request_registry
+- is there suppose to be a dtc_lineplan_ktb?
+- what are the dtc_master_chart_uat* for? 
+- should there be dtc_master_chart* in addition to above then?
+- what is dtc_request_mapping?
+
+# Phase 9B the NT Orbit Duty Tools for filling in missing HTS Code / Duty Rates / Tariff rates.

@@ -144,7 +144,7 @@ access_token = api.oauth2_client.get_access_token()
 5. Apply business logic
 6. Write to Delta Lake (`lft.beproduct.dtc_wip_<customer>`)
 
-See: `dtc/notebooks/pull_masters_to_delta.py` (registry-driven; run
+See: `dtc/notebooks/p1_pull_masters_to_delta.py` (registry-driven; run
 `00_init_request_registry.py` first)
 
 ### Full Sync: BeProduct → Delta Lake
@@ -155,7 +155,7 @@ See: `dtc/notebooks/pull_masters_to_delta.py` (registry-driven; run
 5. Convert to Spark DataFrame
 6. Write to Delta Lake
 
-See: `beproduct/beproduct_style_sync.py`
+See: `beproduct/p1p7_beproduct_style_sync.py`
 
 ### Push Changes: Delta Lake → BeProduct
 1. Load `beproduct-integration` skill

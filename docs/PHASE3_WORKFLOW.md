@@ -30,14 +30,14 @@ untouched, so re-runs are idempotent.
 ## Flow
 
 ```
-(after beproduct_to_dtc_push, Phase 1)
-1. Refresh dtc_wip_<customer>           dtc/notebooks/pull_masters_to_delta.py
+(after p1p7_beproduct_to_dtc_push, Phase 1)
+1. Refresh dtc_wip_<customer>           dtc/notebooks/p1_pull_masters_to_delta.py
    (so it reflects rows Phase 1 inserted)
-2. Image upload                         beproduct/beproduct_to_dtc_images.py
+2. Image upload                         beproduct/p3_beproduct_to_dtc_images.py
    → DTC "Style Image" cell (blank cells only)
 ```
 
-`beproduct_to_dtc_images.py`, per in-scope resolved request:
+`p3_beproduct_to_dtc_images.py`, per in-scope resolved request:
 
 1. **Reloads the sheet live** (`connector.get_sheet`) for the freshest `rowIndex`
    and current Style Image state (it therefore also sees rows Phase 1 just
@@ -102,7 +102,7 @@ not a Phase 3 code defect, and is logged as `download_failed`.
 
 ---
 
-## Parameters (`beproduct_to_dtc_images.py`)
+## Parameters (`p3_beproduct_to_dtc_images.py`)
 
 | Parameter | Default | Purpose |
 |-----------|---------|---------|

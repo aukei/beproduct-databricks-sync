@@ -28,7 +28,7 @@ The actual write uses the BeProduct SDK in one call per style:
     )
 
 This module only computes WHAT to write (deterministic, unit-testable). All SDK
-I/O lives in the Phase 2 notebook (dtc/notebooks/05_push_dtc_to_beproduct.py).
+I/O lives in the Phase 2 notebook (dtc/notebooks/p2_push_dtc_to_beproduct.py).
 
 Input contract (one dict per DTC row, already joined to BeProduct identity):
     {

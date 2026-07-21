@@ -176,44 +176,44 @@ def build_tasks():
     tasks.append(nb_task("wait_cluster", f"{NB_BP}/wait_cluster", {},
                          timeout=600))  # 10-min cap; warm-up never takes this long
 
-    # Step 1 — BeProduct -> ktb_styles
-    tasks.append(nb_task("bp_style_sync", f"{NB_BP}/beproduct_style_sync", {
+    # Step 1 — BeProduct -> ktb_styles  (Phase 1+7: style sync + sample-app enrichment)
+    tasks.append(nb_task("bp_style_sync", f"{NB_BP}/p1p7_beproduct_style_sync", {
         "folder_name": P("folder_name"), "refresh_mode": P("refresh_mode"),
         "catalog": CAT, "schema": SCH, "table_name": "ktb_styles",
     }, depends=[dep("wait_cluster")]))
 
-    # Step 2 — transform (depends on Step 1)
-    tasks.append(nb_task("transform", f"{NB_BP}/beproduct_to_dtc_transform", {
+    # Step 2 — transform (Phase 1+7: denormalize + sample-status UDFs)
+    tasks.append(nb_task("transform", f"{NB_BP}/p1p7_beproduct_to_dtc_transform", {
         "catalog": CAT, "schema": SCH, "source_table": "ktb_styles",
         "staging_table": "beproduct_to_dtc_staging",
         "folder_name": P("folder_name"), "customer_code": CUST,
     }, depends=[dep("bp_style_sync")]))
 
-    # Step 3 — pull DTC + refresh registry (parallel with 1/2, both gated by wait_cluster)
-    tasks.append(nb_task("pull_master_dtc", f"{NB_DTC}/pull_masters_to_delta", {
+    # Step 3 — pull DTC WIP + refresh registry (Phase 1; parallel with 1/2)
+    tasks.append(nb_task("pull_master_dtc", f"{NB_DTC}/p1_pull_masters_to_delta", {
         "dtc_environment": ENV, "customer": CUST, "dtc_workspace": WS, "dtc_document": DOC,
         "catalog": CAT, "schema": SCH, "write_mode": "overwrite",
         "refresh_registry": "true", "max_workers": "4",
     }, depends=[dep("wait_cluster")]))
 
-    # Step 4 — request manager (needs Step 2 staging AND Step 3 registry)
-    tasks.append(nb_task("request_manager", f"{NB_BP}/dtc_request_manager", {
+    # Step 4 — request manager (Phase 1: create + share missing requests)
+    tasks.append(nb_task("request_manager", f"{NB_BP}/p1_dtc_request_manager", {
         "catalog": CAT, "schema": SCH, "staging_table": "beproduct_to_dtc_staging",
         "dtc_environment": ENV, "customer": CUST, "dtc_workspace": WS, "dtc_document": DOC,
         "dry_run": DRY, "refresh_registry": "false",
     }, depends=[dep("transform"), dep("pull_master_dtc")]))
 
-    # Phase 1 gate + push (Step 5)
+    # Phase 1+7 gate + push (Step 5)
     tasks.append(gate_task("gate_phase1", "run_phase1", depends=[dep("request_manager")]))
-    tasks.append(nb_task("phase1_push", f"{NB_BP}/beproduct_to_dtc_push", {
+    tasks.append(nb_task("phase1_push", f"{NB_BP}/p1p7_beproduct_to_dtc_push", {
         "catalog": CAT, "schema": SCH, "staging_table": "beproduct_to_dtc_staging",
         "dtc_environment": ENV, "dtc_workspace": WS, "dry_run": DRY,
         "delta_only": P("delta_only"), "batch_size": "100",
     }, depends=[dep("gate_phase1", outcome="true")]))
 
-    # Phase 2 gate + push (Step 6) — needs Step 2 + Step 3 only (disjoint fields)
+    # Phase 2 gate + push (Step 6) — DTC-owned fields back to BeProduct
     tasks.append(gate_task("gate_phase2", "run_phase2", depends=[dep("transform"), dep("pull_master_dtc")]))
-    tasks.append(nb_task("phase2_push", f"{NB_DTC}/05_push_dtc_to_beproduct", {
+    tasks.append(nb_task("phase2_push", f"{NB_DTC}/p2_push_dtc_to_beproduct", {
         "catalog": CAT, "schema": SCH, "customer": CUST,
         "staging_table": "beproduct_to_dtc_staging",
         "dtc_environment": ENV, "dry_run": DRY, "push_blanks": P("push_blanks"),
@@ -221,28 +221,24 @@ def build_tasks():
 
     # Phase 3 gate (after Step 4) + targeted re-pull (Step 7) + images (Step 8)
     tasks.append(gate_task("gate_phase3", "run_phase3", depends=[dep("request_manager")]))
-    # Step 7 reads inserted_ids from Step 5's task value; if phase1_push was
-    # skipped (run_phase1=false) the ref is empty → full re-pull. run_if=ALL_DONE
-    # so a skipped/failed phase1_push doesn't block the re-pull.
-    tasks.append(nb_task("repull_dtc", f"{NB_DTC}/pull_masters_to_delta", {
+    # Step 7: run_if=ALL_DONE so a skipped/failed phase1_push doesn't block Phase 3.
+    tasks.append(nb_task("repull_dtc", f"{NB_DTC}/p1_pull_masters_to_delta", {
         "dtc_environment": ENV, "customer": CUST, "dtc_workspace": WS, "dtc_document": DOC,
         "catalog": CAT, "schema": SCH, "write_mode": "overwrite", "refresh_registry": "false",
         "request_ids": "{{tasks.phase1_push.values.inserted_ids}}", "max_workers": "4",
     }, depends=[dep("gate_phase3", outcome="true"), dep("phase1_push")],
        run_if=jobs.RunIf.ALL_DONE))
 
-    tasks.append(nb_task("phase3_images", f"{NB_BP}/beproduct_to_dtc_images", {
+    tasks.append(nb_task("phase3_images", f"{NB_BP}/p3_beproduct_to_dtc_images", {
         "catalog": CAT, "schema": SCH, "staging_table": "beproduct_to_dtc_staging",
         "dtc_environment": ENV, "dtc_workspace": WS, "dry_run": DRY,
         "http_timeout": P("img_http_timeout"), "max_uploads": P("img_max_uploads"),
     }, depends=[dep("repull_dtc")]))
 
     # ── Phase 8a — Pull DTC FABRIC sheets → dtc_fabric_<customer> ──────────────
-    # Runs in parallel with the WIP sync chain (independent of Steps 1-8).
-    # Gated by run_phase8a=true so it can be disabled without changing the job.
     tasks.append(gate_task("gate_phase8a", "run_phase8a",
                            depends=[dep("wait_cluster")]))
-    tasks.append(nb_task("pull_fabric_dtc", f"{NB_DTC}/pull_fabric_to_delta", {
+    tasks.append(nb_task("pull_fabric_dtc", f"{NB_DTC}/p8a_pull_fabric_to_delta", {
         "dtc_environment":     ENV,
         "customer":            CUST,
         "dtc_workspace":       WS,
@@ -256,11 +252,9 @@ def build_tasks():
     }, depends=[dep("gate_phase8a", outcome="true")]))
 
     # ── Phase 9a — Pull LinePlan + Build Costing Chart ─────────────────────────
-    # Runs in parallel with the WIP chain (independent after wait_cluster).
-    # pull_lineplan_dtc feeds build_costing_chart which also needs pull_master_dtc (WIP data).
     tasks.append(gate_task("gate_phase9a", "run_phase9a",
                            depends=[dep("wait_cluster")]))
-    tasks.append(nb_task("pull_lineplan_dtc", f"{NB_DTC}/pull_lineplan_to_delta", {
+    tasks.append(nb_task("pull_lineplan_dtc", f"{NB_DTC}/p9a_pull_lineplan_to_delta", {
         "dtc_environment": ENV,
         "customer":        CUST,
         "dtc_workspace":   WS,
@@ -271,9 +265,7 @@ def build_tasks():
         "max_workers":     "4",
     }, depends=[dep("gate_phase9a", outcome="true")]))
 
-    # build_costing_chart needs BOTH dtc_wip_ktb (from pull_master_dtc) and
-    # dtc_lineplan_ktb (from pull_lineplan_dtc) to be ready.
-    tasks.append(nb_task("build_costing_chart", f"{NB_DTC}/build_costing_chart", {
+    tasks.append(nb_task("build_costing_chart", f"{NB_DTC}/p9a_build_costing_chart", {
         "catalog":  CAT,
         "schema":   SCH,
         "customer": CUST,

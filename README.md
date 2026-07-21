@@ -47,24 +47,24 @@ job 294837488757511), defined in `scripts/deploy_job.py`.
 ```
 beproduct/                              # BeProduct-side notebooks + cross-platform push
 ├── 00_init_style_app_registry.py       # Cache folder app IDs → beproduct_style_app_registry (on-demand)
-├── beproduct_style_sync.py             # BeProduct API → ktb_styles (+ 6 sample-app arrays; Finalized filtered)
-├── beproduct_master_data_sync.py       # Admin: pull/push MasterData (dropdowns) + Directory
-├── beproduct_to_dtc_transform.py       # ktb_styles → beproduct_to_dtc_staging (denormalize; sample status UDFs)
-├── dtc_request_manager.py              # Resolve / CREATE / SHARE DTC requests → dtc_request_mapping
-├── beproduct_to_dtc_push.py            # Phase 1: BeProduct → DTC upsert + orphan marks
-├── beproduct_to_dtc_images.py          # Phase 3: front image → DTC "Style Image"
-├── dtc_share_requests.py               # Idempotent request-sharing backfill
+├── p1p7_beproduct_style_sync.py             # BeProduct API → ktb_styles (+ 6 sample-app arrays; Finalized filtered)
+├── p5utl_beproduct_master_data_sync.py       # Admin: pull/push MasterData (dropdowns) + Directory
+├── p1p7_beproduct_to_dtc_transform.py       # ktb_styles → beproduct_to_dtc_staging (denormalize; sample status UDFs)
+├── p1_dtc_request_manager.py              # Resolve / CREATE / SHARE DTC requests → dtc_request_mapping
+├── p1p7_beproduct_to_dtc_push.py            # Phase 1: BeProduct → DTC upsert + orphan marks
+├── p3_beproduct_to_dtc_images.py          # Phase 3: front image → DTC "Style Image"
+├── p1utl_dtc_share_requests.py               # Idempotent request-sharing backfill
 └── orchestrate_sync.py                 # ⚠️ RETIRED — single-notebook fallback only
 
 dtc/
 ├── notebooks/
 │   ├── 00_init_request_registry.py     # Standalone WIP registry build/refresh
 │   ├── 00_init_season_mapping.py       # Seed dtc_seasoncode_mapping
-│   ├── pull_masters_to_delta.py        # Pull KTB WIP sheets → dtc_wip_ktb + registry (Step 3 / Step 7)
-│   ├── pull_fabric_to_delta.py         # Phase 8a: pull KTB FABRIC sheets → dtc_fabric_ktb
-│   ├── pull_lineplan_to_delta.py       # Phase 9a: pull KTB LinePlan → dtc_lineplan_ktb
-│   ├── build_costing_chart.py          # Phase 9a: WIP × LinePlan join → costing_chart
-│   └── 05_push_dtc_to_beproduct.py     # Phase 2: DTC → BeProduct pushback
+│   ├── p1_pull_masters_to_delta.py        # Pull KTB WIP sheets → dtc_wip_ktb + registry (Step 3 / Step 7)
+│   ├── p8a_pull_fabric_to_delta.py         # Phase 8a: pull KTB FABRIC sheets → dtc_fabric_ktb
+│   ├── p9a_pull_lineplan_to_delta.py       # Phase 9a: pull KTB LinePlan → dtc_lineplan_ktb
+│   ├── p9a_build_costing_chart.py          # Phase 9a: WIP × LinePlan join → costing_chart
+│   └── p2_push_dtc_to_beproduct.py     # Phase 2: DTC → BeProduct pushback
 ├── python/                             # Importable modules (deployed as Workspace files)
 │   ├── client/rest_client.py           # Generic REST client (retry, multipart)
 │   ├── connectors/dtc.py               # DTC API connector

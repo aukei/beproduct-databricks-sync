@@ -739,5 +739,5 @@ class DTCConnector:
 
 - Connector: `dtc/python/connectors/dtc.py`
 - REST Client: `dtc/python/client/rest_client.py`
-- Notebook: `dtc/notebooks/pull_masters_to_delta.py` (+ `00_init_request_registry.py`)
+- Notebook: `dtc/notebooks/p1_pull_masters_to_delta.py` (+ `00_init_request_registry.py`)
 - Documentation: `docs/DTC_GUIDE.md`, `docs/ARCHITECTURE.md`, `docs/PHASE1_WORKFLOW.md`, `docs/PHASE2_WORKFLOW.md`, `docs/PHASE3_WORKFLOW.md`

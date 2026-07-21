@@ -47,19 +47,19 @@ api = BeProduct(
 
 | Call | Used by | Purpose |
 |------|---------|---------|
-| `api.style.attributes_list(filters=…)` | `beproduct_style_sync.py` | iterate styles in a folder (pull) |
-| `api.style.attributes_get(header_id)` | `05_push_dtc_to_beproduct.py` | read current values live for an accurate NOOP diff (Phase 2) |
-| `api.style.attributes_update(header_id, fields={…}, colorways=[{"id":…,"fields":{…}}])` | `beproduct_style_push.py`, `05_push_dtc_to_beproduct.py` | write header and/or colorway fields back |
+| `api.style.attributes_list(filters=…)` | `p1p7_beproduct_style_sync.py` | iterate styles in a folder (pull) |
+| `api.style.attributes_get(header_id)` | `p2_push_dtc_to_beproduct.py` | read current values live for an accurate NOOP diff (Phase 2) |
+| `api.style.attributes_update(header_id, fields={…}, colorways=[{"id":…,"fields":{…}}])` | `beproduct_style_push.py`, `p2_push_dtc_to_beproduct.py` | write header and/or colorway fields back |
 | `api.style.app_list(header_id)` | `00_init_style_app_registry.py` | list a folder's applications (ids are folder-constant) |
-| `api.style.app_get(header_id, app_id)` | `beproduct_style_sync.py` | read one application's content (sample-app submit status) |
-| `api.raw_api.get("MasterData/{fieldId}")` | `beproduct_master_data_sync.py` | pull valid dropdown/multiselect choices (token refresh auto-handled) |
-| `api.raw_api.post("MasterData/{fieldId}/Update", body=…)` | `beproduct_master_data_sync.py` | push choice changes back (add / deactivate / rename) |
-| `api.directory.directory_list()` | `beproduct_master_data_sync.py` | paginated iterator over all directory companies |
-| `api.directory.directory_contact_list(header_id=<uuid>)` | `beproduct_master_data_sync.py` | contacts for one company |
-| `api.directory.directory_add(fields=…)` | `beproduct_master_data_sync.py` | create a new directory company |
-| `api.directory.directory_contact_add(header_id, fields=…)` | `beproduct_master_data_sync.py` | add a contact to a company |
-| `api.raw_api.post("Directory/Update/{id}", body=…)` | `beproduct_master_data_sync.py` | update existing company (SDK has no Update) |
-| `api.raw_api.post("Directory/{dId}/Contact/{cId}/Update", body=…)` | `beproduct_master_data_sync.py` | update existing contact (SDK has no Update) |
+| `api.style.app_get(header_id, app_id)` | `p1p7_beproduct_style_sync.py` | read one application's content (sample-app submit status) |
+| `api.raw_api.get("MasterData/{fieldId}")` | `p5utl_beproduct_master_data_sync.py` | pull valid dropdown/multiselect choices (token refresh auto-handled) |
+| `api.raw_api.post("MasterData/{fieldId}/Update", body=…)` | `p5utl_beproduct_master_data_sync.py` | push choice changes back (add / deactivate / rename) |
+| `api.directory.directory_list()` | `p5utl_beproduct_master_data_sync.py` | paginated iterator over all directory companies |
+| `api.directory.directory_contact_list(header_id=<uuid>)` | `p5utl_beproduct_master_data_sync.py` | contacts for one company |
+| `api.directory.directory_add(fields=…)` | `p5utl_beproduct_master_data_sync.py` | create a new directory company |
+| `api.directory.directory_contact_add(header_id, fields=…)` | `p5utl_beproduct_master_data_sync.py` | add a contact to a company |
+| `api.raw_api.post("Directory/Update/{id}", body=…)` | `p5utl_beproduct_master_data_sync.py` | update existing company (SDK has no Update) |
+| `api.raw_api.post("Directory/{dId}/Contact/{cId}/Update", body=…)` | `p5utl_beproduct_master_data_sync.py` | update existing contact (SDK has no Update) |
 
 ### Push-back is type-aware (MultiSelect vs DropDown)
 
@@ -120,7 +120,7 @@ transform** (same pattern as `colorways_json`), so no presentation format is
 pre-baked here.
 
 SSOT for the title→prefix map: the `SAMPLE_APPS` dict, defined identically in
-`beproduct_style_sync.py` and `00_init_style_app_registry.py`.
+`p1p7_beproduct_style_sync.py` and `00_init_style_app_registry.py`.
 
 > DTC push of these fields is a **future step** — they currently land only in
 > `ktb_styles`; the transform → staging → Phase 1 wiring is not done yet.
@@ -132,13 +132,13 @@ SSOT for the title→prefix map: the `SAMPLE_APPS` dict, defined identically in
 | Notebook | Does | Writes |
 |----------|------|--------|
 | `beproduct/00_init_style_app_registry.py` | Cache a folder's application IDs (run on-demand when app setup changes). | `beproduct_style_app_registry` |
-| `beproduct/beproduct_style_sync.py` | Pull styles for a folder (FULL/INCREMENTAL); extract header fields, colorways, front image; enrich with 6 sample-app submit arrays. | `ktb_styles` |
-| `beproduct/beproduct_master_data_sync.py` | **Admin-only (not in DAG).** Pull or push-back MasterData dropdown choices and Directory records/contacts. Four modes: `PULL_ONLY` (default), `PUSH_MASTER_DATA`, `PUSH_DIRECTORY`, `PUSH_ALL`. `dry_run=true` previews push changes without writing. | `beproduct_master_*` (11 tables), `beproduct_directory`, `beproduct_directory_contacts` |
+| `beproduct/p1p7_beproduct_style_sync.py` | Pull styles for a folder (FULL/INCREMENTAL); extract header fields, colorways, front image; enrich with 6 sample-app submit arrays. | `ktb_styles` |
+| `beproduct/p5utl_beproduct_master_data_sync.py` | **Admin-only (not in DAG).** Pull or push-back MasterData dropdown choices and Directory records/contacts. Four modes: `PULL_ONLY` (default), `PUSH_MASTER_DATA`, `PUSH_DIRECTORY`, `PUSH_ALL`. `dry_run=true` previews push changes without writing. | `beproduct_master_*` (11 tables), `beproduct_directory`, `beproduct_directory_contacts` |
 | `standalone/beproduct_style_push.py` | Generic Delta → BeProduct push-back of locally edited rows (`modified_at > synced_at`), type-aware. | BeProduct |
 
 `standalone/beproduct_style_push.py` is a standalone bi-directional helper (not
 part of the DTC daily pipeline; see `standalone/README.md`). The DTC-driven
-pushback is Phase 2 (`dtc/notebooks/05_push_dtc_to_beproduct.py`, see
+pushback is Phase 2 (`dtc/notebooks/p2_push_dtc_to_beproduct.py`, see
 `PHASE2_WORKFLOW.md`).
 
 ---
@@ -197,7 +197,7 @@ WHERE brands IN (SELECT value FROM lft.beproduct.beproduct_master_brands)
 ```
 
 To push choice changes back from the Delta table to BeProduct, run
-`beproduct_master_data_sync` with `mode=PUSH_MASTER_DATA`. The push is PATCH-style:
+`p5utl_beproduct_master_data_sync` with `mode=PUSH_MASTER_DATA`. The push is PATCH-style:
 only rows present in the table are sent; absent rows are left as-is.
 Optional admin columns: `update_value` (rename a choice), `delete_choice` (remove it).
 

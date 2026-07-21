@@ -46,14 +46,14 @@ The DTC-owned columns are deliberately absent from Phase 1 `FIELD_MAPPING`
 ## Daily flow (high level)
 
 ```
-1. BeProduct → Databricks       beproduct_style_sync.py      (styles + colorway detail)
-2. Transform / denormalize      beproduct_to_dtc_transform.py (1 row per style×color,
+1. BeProduct → Databricks       p1p7_beproduct_style_sync.py      (styles + colorway detail)
+2. Transform / denormalize      p1p7_beproduct_to_dtc_transform.py (1 row per style×color,
                                                                carries beproduct_style_id
                                                                + colorway_id)
-3. DTC → Databricks             dtc/notebooks/pull_masters_to_delta.py  (dtc_wip_<cust>)
-4. Resolve requests             beproduct/dtc_request_manager.py
-5. Push BeProduct → DTC         beproduct/beproduct_to_dtc_push.py   (Phase 1 + orphan marks)
-6. Push DTC → BeProduct         dtc/notebooks/05_push_dtc_to_beproduct.py  (Phase 2)
+3. DTC → Databricks             dtc/notebooks/p1_pull_masters_to_delta.py  (dtc_wip_<cust>)
+4. Resolve requests             beproduct/p1_dtc_request_manager.py
+5. Push BeProduct → DTC         beproduct/p1p7_beproduct_to_dtc_push.py   (Phase 1 + orphan marks)
+6. Push DTC → BeProduct         dtc/notebooks/p2_push_dtc_to_beproduct.py  (Phase 2)
 ```
 
 Steps 5 and 6 touch **disjoint field sets**, so order between them is safe and there
@@ -77,9 +77,9 @@ api.style.attributes_update(
 The denormalized staging row only knew the colorway *name*, so Phase 2 would not be
 able to target the colorway. We therefore:
 
-- `beproduct_style_sync.py` now also emits `colorways_json`
+- `p1p7_beproduct_style_sync.py` now also emits `colorways_json`
   (`[{colorway_id, color_name, color_number}, ...]`).
-- `beproduct_to_dtc_transform.py` explodes that detail, so every staging row carries
+- `p1p7_beproduct_to_dtc_transform.py` explodes that detail, so every staging row carries
   `beproduct_style_id` **and** `colorway_id`.
 
 This is a lightweight group-by on pushback (one `attributes_update` per style with a
@@ -88,7 +88,7 @@ evaluated and chosen for simplicity and correctness (see point 4 of the design).
 
 ---
 
-## Phase 2 pushback (`05_push_dtc_to_beproduct.py`)
+## Phase 2 pushback (`p2_push_dtc_to_beproduct.py`)
 
 1. Build an identity map from staging: `(request, LF Style#, Color) → (style_id, colorway_id)`.
 2. Read DTC rows from `dtc_wip_<customer>`, extract the 5 DTC-owned values from
@@ -118,7 +118,7 @@ deleted, and only rows whose key now lives under a *different* request are marke
 (user-entered rows whose key isn't seen anywhere in BeProduct are left untouched).
 
 Implemented as `phase1.compute_orphan_marks()` and wired into
-`beproduct_to_dtc_push.py` (runs for every resolved request, independent of the delta
+`p1p7_beproduct_to_dtc_push.py` (runs for every resolved request, independent of the delta
 filter, so the moved-out request is always reconciled).
 
 ---

@@ -65,7 +65,7 @@ Sync direction (one-way per field; see AGENTS.md "field mapping" for code locati
   [REMOVED Phase 6]: "Legacy Code" DTC→BP. "Customer Style#" DTC column not created.
   key (used for matching, not overwritten): BP Style# + Color / Wash (in-request);
     [Customer, BP Style#, SeasonCode, Brand] (composite/request-routing)
-  BeProduct -> DTC image only (Phase 3, phase3 / beproduct_to_dtc_images):
+  BeProduct -> DTC image only (Phase 3, phase3 / p3_beproduct_to_dtc_images):
     Style Image (binary; uploaded via the multipart images endpoint, only when
     the DTC cell is blank and BeProduct has a valid front_image_url. NEVER
     pushed via the Phase 1 sheetData PATCH, and never read back to BeProduct.)
@@ -133,7 +133,7 @@ Phase 6 changes (2026-06-26, validated live):
       in-request match key once created. Code already writes to this column; sync will
       fail to match existing rows until DTC creates column and migrates data from "LF Style#".
    9. BeProduct styles with Product Status = "Finalized" are EXCLUDED from DTC sync
-      (filtered in beproduct_style_sync.py before app enrichment). Valid sync statuses:
+      (filtered in p1p7_beproduct_style_sync.py before app enrichment). Valid sync statuses:
       Proto, Pre-Line, SMS, Production (any status not equal to "Finalized").
   10. New DTC column "Gender" (PENDING): BP→DTC from BP field_id `gender`. Values:
       Ladies/Mens/Girls/'' (confirmed live). Code staged in FIELD_MAPPING + INTERESTED_FIELDS.

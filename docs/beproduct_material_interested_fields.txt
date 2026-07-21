@@ -9,7 +9,7 @@ Phase 8b: Upsert adopted rows → BeProduct Material Master (planned).
 Scope / filter
 --------------
 Only rows where DTC "Adoption (Y/N)" = "Y" are written to Delta.
-Sheet-type switch (include_test_sheets widget in pull_fabric_to_delta):
+Sheet-type switch (include_test_sheets widget in p8a_pull_fabric_to_delta):
   false (default/production): PROD sheets only — named "<customer> <season> <brand>"
   true  (UAT/dev):            ALL sheets including DEV (" - DEV" suffix) and MILL
                               ("-<MILLCODE>" no-space-dash suffix)

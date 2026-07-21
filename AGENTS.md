@@ -25,8 +25,8 @@ sheets), staged through **Databricks/Delta**.
 - **Phase 9a — DTC LinePlan + Costing Chart**: pull `"KTB LinePlan"` document into
   `dtc_lineplan_ktb`; join WIP × LinePlan on `"Lineplan Ref #"`; transpose 4
   vendor/factory slots → `lft.beproduct.costing_chart`. Runs as two parallel tasks
-  (`pull_lineplan_dtc` → `build_costing_chart`, gated by `run_phase9a`). The
-  `build_costing_chart` task also depends on `pull_dtc` (WIP data).
+  (`pull_lineplan_dtc` → `p9a_build_costing_chart`, gated by `run_phase9a`). The
+  `p9a_build_costing_chart` task also depends on `pull_dtc` (WIP data).
 - **Phase 9b** (planned): NT Orbit Duty Tools API to fill null HTS/Duty/Tariff
   Rate fields, then push changes back to WIP per-slot columns.
 
@@ -50,10 +50,10 @@ fieldId, JSONPath, sync direction. Always update it first, then the code constan
 | DTC → BeProduct (header) | `REVERSE_HEADER_FIELDS` | `dtc/python/sync/phase2.py` |
 | DTC → BeProduct (colorway) | `REVERSE_COLORWAY_FIELDS` | `dtc/python/sync/phase2.py` |
 | DTC → BeProduct (no target yet) | `UNSUPPORTED_FIELDS` | `dtc/python/sync/phase2.py` |
-| BeProduct extraction (raw → master) | `COMPULSORY_FIELDS` / `INTERESTED_FIELDS` | `beproduct/beproduct_style_sync.py` |
-| BeProduct sample-app status (title → column prefix) | `SAMPLE_APPS` | `beproduct/beproduct_style_sync.py` + `beproduct/00_init_style_app_registry.py` |
+| BeProduct extraction (raw → master) | `COMPULSORY_FIELDS` / `INTERESTED_FIELDS` | `beproduct/p1p7_beproduct_style_sync.py` |
+| BeProduct sample-app status (title → column prefix) | `SAMPLE_APPS` | `beproduct/p1p7_beproduct_style_sync.py` + `beproduct/00_init_style_app_registry.py` |
 | BeProduct sample submits → DTC (Phase 7) | `SAMPLE_SUBMIT_FIELDS` + `format_sample_field` | `dtc/python/sync/samples.py` (+ `phase1.FIELD_MAPPING`, transform staging) |
-| BeProduct → DTC transform (denormalize) | `FIELD_MAPPING` + staging `select` | `beproduct/beproduct_to_dtc_transform.py` |
+| BeProduct → DTC transform (denormalize) | `FIELD_MAPPING` + staging `select` | `beproduct/p1p7_beproduct_to_dtc_transform.py` |
 
 Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
 `dtc/tests/test_phase3.py`, `dtc/tests/test_samples.py`.
@@ -81,7 +81,7 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
   [composite/request-routing].
 - **BeProduct → DTC, image only (Phase 3)**: Style Image (`front_image_url` →
   DTC "Style Image"). Binary, so it does NOT ride the Phase 1 sheetData PATCH;
-  uploaded by `beproduct_to_dtc_images` via the multipart images endpoint, only
+  uploaded by `p3_beproduct_to_dtc_images` via the multipart images endpoint, only
   when the DTC cell is blank and BeProduct has a valid `front_image_url`. Still
   one-directional (never read back to BeProduct, never in `phase2.REVERSE_*`).
 
@@ -135,7 +135,7 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
   `DTCConnector.upload_row_image` → `RestClient.post_multipart` (the only client
   method that sends `files=`/`params=` and does NOT force `application/json`).
   **DTC REJECTS `webp` with HTTP 400** (3/3 webp rows failed; jpg/png accepted).
-  `beproduct_to_dtc_images` now classifies via `phase3.classify_image_type` and
+  `p3_beproduct_to_dtc_images` now classifies via `phase3.classify_image_type` and
   **transcodes webp/gif/bmp/tiff → PNG (Pillow) before upload**; jpg/png upload
   as-is; vector/unknown (svg, pdf, ...) are skipped with `unsupported_type`.
   Separately, a subset of BeProduct CDN `frontImage.origin` URLs return **HTTP 403**
@@ -145,7 +145,7 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
 - Request listing works via `GET /v1/requests` with `workspaceName`+`filters` in the
   **request body** (not query params; query param → 400 "Invalid workspaceName").
 - Registry refresh is the shared `sync.registry.refresh` (used by
-  `00_init_request_registry`, `pull_masters_to_delta`, `dtc_request_manager`):
+  `00_init_request_registry`, `p1_pull_masters_to_delta`, `p1_dtc_request_manager`):
   `search_requests(workspace, document_name=document, filters={"requestIsActive":"Y"})`
   lists **active** requests (server-side filter — DTC dev confirmed inactive requests
   400 on get-by-id; field is `requestIsActive`). A client-side `is_active_item` guard
@@ -177,7 +177,7 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
 - Pushback uses `api.style.attributes_update(header_id, fields={fieldId:val},
   colorways=[{"id":colorway_id,"fields":{fieldId:val}}])` — colorway writes need the
   colorway **id**, so the transform carries `colorway_id` into staging
-  (`colorways_json` from `beproduct_style_sync`).
+  (`colorways_json` from `p1p7_beproduct_style_sync`).
 
 **BeProduct schema Phase 6 structural changes (validated live 2026-06-26):**
 - `header_number` field **renamed** in BeProduct from "LF Style Number" → "BP Style Number".
@@ -239,7 +239,7 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
   `submitStatus`, `submitStatusDate`, `dueDate`, `receivedDate`, `fitDate`; plus
   `data.poms[]` (measurements). A sample app **explodes** like colorways/BOM
   (N submit rounds × M sizes) — do NOT collapse it to one status.
-- `beproduct_style_sync` enriches `ktb_styles` with **6 JSON-array columns**:
+- `p1p7_beproduct_style_sync` enriches `ktb_styles` with **6 JSON-array columns**:
   `{proto,preline,sms,fit,pp,top}_sample_json` — each the full list of submit×size
   records (`submit_id/name, size_id/size, is_sample_size, submit_status,
   submit_status_date, due_date, received_date, fit_date`), `'[]'` when no data.
@@ -286,7 +286,7 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
 - **Phase 8a Delta tables**: `dtc_fabric_<customer>` (Adoption=Y rows) +
   `dtc_fabric_registry` (request metadata, same structure as dtc_request_registry).
 - **Job task**: `pull_fabric_dtc` gated by `run_phase8a=true`; runs in parallel with
-  the WIP chain after `wait_cluster`. Notebook: `dtc/notebooks/pull_fabric_to_delta.py`.
+  the WIP chain after `wait_cluster`. Notebook: `dtc/notebooks/p8a_pull_fabric_to_delta.py`.
 - **SSOT field mapping**: `docs/beproduct_material_interested_fields.txt`
 - Do NOT use view ID `6a0ac943fedfa0ca7ff2bf48` for WIP document operations —
   that ID belongs to FABRIC only.
@@ -296,7 +296,7 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
   `"FA HO 27 MENS WESTERN TOPS LINEPLAN - FA27"` (396 rows). No standard
   `<customer> <season> <brand>` naming — LinePlan uses its own naming convention.
 - **No "LINEPLAN_ITS_USE" view** — only `"Full"` (id `69f0788555010bb745140ac4`,
-  30 dynamicFields). `pull_lineplan_to_delta` tries `"LINEPLAN_ITS_USE"` first then
+  30 dynamicFields). `p9a_pull_lineplan_to_delta` tries `"LINEPLAN_ITS_USE"` first then
   falls back to `"Full"`.
 - **Key LinePlan fields** (exact DTC column names — all UPPERCASE):
   `"Lineplan Ref #"` → `lineplan_ref` (join key to WIP `"Lineplan Ref #"`),
@@ -325,7 +325,7 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
 - **Phase 3 image sync is a separate post-Phase-1 step (2026-06-17).** Style Image
   is binary and cannot ride the Phase 1 JSON sheetData PATCH, and its endpoint
   targets an EXISTING row by `rowindex`, so it cannot run at insert time. New
-  notebook `beproduct/beproduct_to_dtc_images.py` runs AFTER `beproduct_to_dtc_push`:
+  notebook `beproduct/p3_beproduct_to_dtc_images.py` runs AFTER `p1p7_beproduct_to_dtc_push`:
   it re-reads each in-scope sheet live (freshest rowIndex + Style Image state),
   and for every row whose cell is blank AND whose BeProduct staging row has a
   valid `front_image_url`, downloads the CDN image and POSTs it to the multipart
@@ -340,13 +340,13 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
   webp is now auto-transcoded to PNG (`phase3.classify_image_type` + Pillow).
 - **Phase 1 now CREATES missing in-scope DTC requests (2026-06-17, reverses prior
   scope).** The earlier rule "Phase 1 does NOT create requests; the project team
-  pre-creates them" is superseded. `dtc_request_manager` creates missing **in-scope**
+  pre-creates them" is superseded. `p1_dtc_request_manager` creates missing **in-scope**
   requests (`connector.create_sheet` → `POST /v1/sheets`) in `dtc_document`, then
   re-scans + resolves. Guardrails: only in-scope names (`<customer> <seasonCode>
   <brand>`; brand-less names → `NOT_IN_SCOPE`, never created); gated by `dry_run`
   (default true = preview only). The registry scan is the shared
   `sync.registry.refresh` (discover → enrich → merge), invoked automatically by
-  `pull_masters_to_delta` and `dtc_request_manager` (default `refresh_registry=true`)
+  `p1_pull_masters_to_delta` and `p1_dtc_request_manager` (default `refresh_registry=true`)
   and standalone by `00_init_request_registry`. NOTE: `create_sheet` is a live,
   not-easily-reversible write; there is no delete-request in the connector.
   **`POST /v1/sheets` body shape VALIDATED LIVE 2026-06-18 (HTTP 201)** after the
@@ -370,8 +370,8 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
   `get_request_shares`, `get_request_share_usergroups`. Project policy: share ALL
   views with `aiagentwip@lifung.com` (AI Agent WIP) and the **Full Version** view
   with the **Fabric Group** user group. Applied automatically by
-  `dtc_request_manager` at create time (`share_on_create=true`, `send_email=N`)
-  and backfillable via the idempotent `beproduct/dtc_share_requests` notebook.
+  `p1_dtc_request_manager` at create time (`share_on_create=true`, `send_email=N`)
+  and backfillable via the idempotent `beproduct/p1utl_dtc_share_requests` notebook.
 - **Legacy change-tracking pipeline removed (2026-06-17).** The old single-table
   `dtc_master_chart_uat` snapshot/change-log flow (`pull_dtc_to_delta`,
   `01_create_sync_tables`, `02_create_snapshot`, `03_detect_changes`,
@@ -432,7 +432,7 @@ pull), converging at Step 4. Steps 1-2 ≈ 110 s; Step 3 ≈ 84 s — they overl
 
 **What was actually slow and why (intra-step cell-level profiling, 2026-06-19):**
 The original hypothesis (serial `get_sheet` HTTP calls = 396 s) was wrong. The real
-costs in `pull_masters_to_delta` were 100% Spark overhead:
+costs in `p1_pull_masters_to_delta` were 100% Spark overhead:
 - Cell 5: 66 per-request DataFrames → `reduce(unionByName)` → Delta overwrite +
   redundant `count()` = **277 s** for 422 rows. Fixed: one flat list → one DF → one
   write → `len()`. Now **8.8 s**.
@@ -445,7 +445,7 @@ costs in `pull_masters_to_delta` were 100% Spark overhead:
 multi-task job, each step's logs are at `runs/get → tasks[].run_id`. Export any
 step directly with `runs/export?run_id=<task_run_id>`. No WORKFLOW_RUN hunting.
 
-**INCREMENTAL mode upsert bug fixed (2026-06-18):** `beproduct_style_sync.py`
+**INCREMENTAL mode upsert bug fixed (2026-06-18):** `p1p7_beproduct_style_sync.py`
 was using `mode="append"` for INCREMENTAL writes, causing duplicates when the
 BeProduct `FolderModifiedAt` filter (folder-scoped, not style-scoped) returned
 styles that were already in `ktb_styles`. Fixed to `DeltaTable.merge` (keyed on
@@ -455,7 +455,7 @@ NOTE: the `FolderModifiedAt` filter is folder-scoped (any change in the KTB fold
 re-qualifies all styles), so INCREMENTAL is NOT reliably faster than FULL for Step 1
 — leave `refresh_mode=INCREMENTAL` (default) but do not expect it to save time.
 
-**BeProduct SDK install (~10 s/run):** `beproduct_style_sync.py` installs the SDK
+**BeProduct SDK install (~10 s/run):** `p1p7_beproduct_style_sync.py` installs the SDK
 via `subprocess.check_call(pip install)` on every run. Isolated in its own cell so
 the cost is measured. To eliminate, bake `beproduct` into the cluster init script.
 
