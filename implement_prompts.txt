@@ -339,5 +339,7 @@ leaving out PHASE8_WORKFLOW and PHASE9_WORKFLOW for now until all planned subpha
 - what are the dtc_master_chart_uat* for? 
 - should there be dtc_master_chart* in addition to above then?
 - what is dtc_request_mapping?
+3. for all the databricks notebooks, prefix them with corresponding phase number as far as possible. 
+4. on MasterChart (WIP doc) - when create new rows / new sheet, put string 'Supplier' in column 'Supplier'
 
 # Phase 9B the NT Orbit Duty Tools for filling in missing HTS Code / Duty Rates / Tariff rates.
