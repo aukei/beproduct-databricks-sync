@@ -295,7 +295,7 @@ In DTC workspace <customer> i.e. KTB, there are sheets of document "<customer> F
 
 
 
-# Phase 9a Preparation of Costing sheet
+# Phase 9a Preparation of Costing Chart
 - In addition to WIP / Fabric document requests, Retrieve also Requests of DTC document "<Customer> LinePlan" e.g. "KTB LinePlan", using view "LINEPLAN_ITS_USE" (preferred) or "Full" if former not exists.
 - Once WIP and LinePlan are in Databricks, they are joined with WIP "Lineplan Ref #" to LinePlan "Lineplan Ref #" to from a "Costing_Chart":
     - transpose [(Main Vendor, Main Factory), (Vendor 1, Factory 1), (Vendor 2, Factory 2), (Vendor 3, Factory 3)] into 4 rows [Vendor, Factory]
@@ -342,4 +342,126 @@ leaving out PHASE8_WORKFLOW and PHASE9_WORKFLOW for now until all planned subpha
 3. for all the databricks notebooks, prefix them with corresponding phase number as far as possible. 
 4. on MasterChart (WIP doc) - when create new rows / new sheet, put string 'Supplier' in column 'Supplier'
 
+# 2026/08/14 test setup
+During upcoming test cycle, BeProduct style drops into "TEST KTB" folder instead of normal "KTB" folder. And previous DTC requests will likely cleared (pending DTC team action).
+Temporarily change the default Databricks job parameters to sync again "TEST KTB".
+
 # Phase 9B the NT Orbit Duty Tools for filling in missing HTS Code / Duty Rates / Tariff rates.
+1. How to call NT Tools - it is an API.
+- API Doc: https://orbitduty.neotangent.com/API-DOCS/#
+- Entra OAuth2
+    - Refresh token
+    - use App Client ID - "BeProduct Integration"
+        - Tenant ID (lft-pd)	c4d8a220-a9ec-4572-8c77-ab36a3ecdbae
+        - Client ID	            c486611e-9bfc-49d5-8930-7d1943884b03
+    
+1.1 Authentication (Microsoft Entra ID / Azure AD)
+The API requires a Microsoft Entra ID bearer token in the `Authorization` header. This is a delegated, per-user token obtained via the OAuth2 authorization-code + refresh-token flow.
+- One-time setup (first use only)
+    - Initiate Entra OAuth2 sequence.
+    e.g. https://login.microsoftonline.com/%7B%7BTenantID%7D%7D/oauth2/v2.0/authorize?client_id=%7B%7BClientID%7D%7D&response_type=code&redirect_uri=XXXX&scope=https://graph.microsoft.com/.default%20offline_access&state=123456`
+    create the callback for interactive auth if necessary, other use any well known auth flow alternatives.
+    scope = https://graph.microsoft.com/.default
+
+    - Stores the refresh token.
+    - Refreshing the access token whenever necessary: Use refresh token to get new access token (~ every hour)
+- !Take `access_token` from the JSON response → use as the Bearer token for Orbit API calls.!
+- need to grant right for the user that call the Orbit API -> checks below endpoint to see if call success:
+    https://orbitduty.neotangent.com/api/v1/health
+    OK return reads like '{"status": "healthy", "timestamp": "2026-08-13T06:48:22.682Z", "version": "string"}'
+ 
+1.2 Request Payload (From costing chart)
+product_description:  Style Description (C), Content (I), Gender (J), Class (K), Sub Class (L)
+Concatenate Columns C + I + J + K + L 
+origin_country_code : Production Country  (Column P)
+export_country_code : Production Country  (Column P)
+import_country_code : Columns T / U / V headers | Each header encodes a market in brackets: T = *Duty Rate (US)* → `US`, U = *Duty Rate (CA)* → `CA`, V = *Duty Rate (MX)* → `MX`. Use the code corresponding to the column that applies. one API call per populated duty-rate column (i.e. up to 3 calls per row: US, CA, MX) |
+de_minimis : false
+mode_of_transport : "freight"
+ 
+- General Duty — the base/standard duty line, always present in `detailed_lines`.
+- Tariff — additional named duty lines beyond General Duty (e.g. *"10% Section 122 tariff on foreign-origin items"*, *"7.5% Section 301 tariff on goods originating from China"*). A single response can contain zero, one, or multiple tariff lines depending on origin/import country.
+ 
+Example input 1:
+ 
+Plain Text
+Plain Text
+{
+  "product_description": "Cotton t-shirt with printed design",
+  "origin_country_code": "BD",
+  "import_country_code": "US",
+  "export_country_code": "BD",
+  "de_minimis": false,
+  "mode_of_transport": "freight"
+}
+ 
+ 
+Example output 1:
+ 
+Plain Text
+Plain Text
+{
+  "success": true,
+  "data": {
+    "total_duty": 266.25,
+    "duty_rate": 0.26625,
+    "currency": "USD",
+    "hs_code": "6109100012",
+    "classification_name": "T-Shirts - cotton (knitted)",
+    "detailed_lines": [
+      {
+        "name": "General Duty",
+        "code": "6109100012",
+        "amount": 165,
+        "rate": 0.165,
+        "type": "duty"
+      },
+      {
+        "name": "10% Section 122 tariff on foreign-origin items",
+        "code": "",
+        "amount": 100,
+        "rate": 0.1,
+        "type": "duty"
+      },
+      {
+        "name": "0.125% Harbor Maintenance Fee (HMF)",
+        "code": "",
+        "amount": 1.25,
+        "rate": 0.00125,
+        "type": "fee"
+      }
+    ],
+    "product_classification_id": "2567",
+    "dutify_id": "3601d989-a623-4747-87a7-a6e7128d4625",
+    "created_at": "2026-06-30T08:50:57.153Z",
+    "origin_country_code": "BD",
+    "import_country_code": "US",
+    "calculation_log": [
+      "Processing API Response for BD -> US",
+      "Shipment Value: $1,000.00 (unit $10 × 100)",
+      "Identified HS Code: 6109100012",
+      "Classification: T-Shirts - cotton (knitted)",
+      "Parsed General Duty Rate from notes: 16.50%",
+      "Found General Duty: $165.00 (16.50% of $1000)",
+      "Found MPF: Merchandise Processing Fee (MPF) - Informal Entry by Sea (shown as note)",
+      "Found duty: 10% Section 122 tariff on foreign-origin items - $100.00 (parsed rate: 10.00%)",
+      "Found fee: 0.125% Harbor Maintenance Fee (HMF) - $1.25 (parsed rate: 0.13%)"
+    ],
+    "unit_price": 10,
+    "has_mpf": true,
+    "quantity": 100,
+    "mode_of_transport": "freight",
+    "total_shipment_value": 1000,
+    "from_cache": false,
+    "ai_classification": {
+      "hs_code": "",
+      "classification_id": "2567",
+      "classification_name": "T-Shirts - cotton (knitted)",
+      "confidence": "High",
+      "reasoning": "The product 'Cotton t-shirt with printed design' was classified by first selecting 'Apparel & Accessories' (1820). Since no gender was specified, the 'Clothing for Men' (2344) branch was chosen as it contains standard garment definitions for adult apparel. Within that branch, 'T-Shirts and Tanks' (2566) was identified as the correct sub-group, and 'T-Shirts - cotton (knitted)' (2567) was selected as the specific leaf node, as t-shirts are fundamentally knitted cotton garments regardless of the printed design."
+    }
+  },
+  "request_id": "1782809459482-9oufuuqyw",
+  "processed_at": "2026-06-30T08:50:59.482Z"
+}
+ 

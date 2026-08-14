@@ -102,7 +102,9 @@ JOB_QUEUE = jobs.QueueSettings(enabled=True)
 JOB_PARAMS = {
     "catalog": "lft",
     "schema": "beproduct",
-    "folder_name": "KTB",
+    # TEMP (2026-08-14): test cycle drops styles into "TEST KTB" instead of "KTB".
+    # Revert folder_name to "KTB" once BeProduct switches back to the normal folder.
+    "folder_name": "TEST KTB",
     "customer": "KTB",
     "dtc_workspace": "KTB",
     "dtc_document": "KTB WIP",
