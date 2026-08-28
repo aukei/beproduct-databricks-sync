@@ -103,11 +103,30 @@ except Exception as e:
     print(f"  ({source_full} unavailable: {str(e)[:120]})")
 
 if not header_id:
-    print(f"  Scanning api.style.attributes_list() for a '{folder_name}' style…")
-    for s in api.style.attributes_list():
-        if (s.get("folder") or {}).get("name") == folder_name:
-            header_id = s["id"]
-            break
+    # Resolve folder_id first and pass it to attributes_list SERVER-SIDE.
+    # NOTE: the SDK kwarg is `folder_id`, NOT `folderId` — the latter is
+    # silently absorbed into **kwargs and never applied, which makes the call
+    # fall back to scanning EVERY folder in the account (confirmed live
+    # 2026-08-27; see the matching fix + note in p1p7_beproduct_style_sync.py).
+    print(f"  Resolving folder_id for '{folder_name}'…")
+    _folders = api.style.folders()
+    _matches = [f for f in _folders if f.get("name") == folder_name]
+    if not _matches:
+        raise RuntimeError(
+            f"No BeProduct style folder named exactly '{folder_name}' — "
+            f"available: {[f.get('name') for f in _folders]}"
+        )
+    if len(_matches) > 1:
+        raise RuntimeError(
+            f"{len(_matches)} folders are named '{folder_name}' "
+            f"(ids={[f.get('id') for f in _matches]}) — ambiguous."
+        )
+    _folder_id = _matches[0]["id"]
+    print(f"  folder_id={_folder_id}; scanning api.style.attributes_list(folder_id=...) "
+          f"for a '{folder_name}' style…")
+    for s in api.style.attributes_list(folder_id=_folder_id):
+        header_id = s["id"]
+        break
     print(f"  header_id from API scan: {header_id}")
 
 if not header_id:

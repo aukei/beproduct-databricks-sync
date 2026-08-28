@@ -133,9 +133,12 @@ if df_map is None or df_map.count() == 0:
 
 mapping = {r.dtc_request_name: r for r in df_map.collect()}
 
-# Registry (for last_pushed delta + state update).
-reg = {r.request_reference: r for r in
-       spark.table(registry_full).where(F.col("environment") == environment).collect()}
+# Registry (for last_pushed delta, active re-check, and state update). Keyed by
+# request_id (the only true identifier - DTC permits two requests to share a
+# name while both are active), NOT by name, so a stale/duplicate name in the
+# registry can never make this pick the wrong request's state.
+reg_by_id = {r.request_id: r for r in
+             spark.table(registry_full).where(F.col("environment") == environment).collect()}
 
 # Staging pending rows.
 df_staging = spark.table(staging_full).where(F.col("sync_status") == "pending")
@@ -198,9 +201,29 @@ for r in (spark.table(staging_full)
 for name, m in mapping.items():
     totals["requests"] += 1
     request_id, sheet_id, view_id = m.request_id, m.sheet_id, m.view_id
-    reg_entry = reg.get(name)
-    last_pushed = getattr(reg_entry, "last_pushed", None) if reg_entry else None
     print(f"\n--- {name}  (request_id={request_id}) ---")
+
+    # Safety re-check (identified only by request_id, never by name): the
+    # mapping row may have been resolved by an earlier dtc_request_manager run;
+    # re-validate against the CURRENT registry snapshot immediately before
+    # transforming/pushing data, since a request can go inactive between runs
+    # (DTC "inactive" == hidden from users == treated as deleted here). If it's
+    # gone inactive (or vanished) since the mapping was written, refuse to push
+    # to it - dtc_request_manager will recreate a fresh request under the same
+    # name on its next run once this is logged.
+    reg_entry = reg_by_id.get(request_id)
+    if reg_entry is None or str(getattr(reg_entry, "request_is_active", "") or "").upper() not in ("Y", "TRUE", "1"):
+        active_val = getattr(reg_entry, "request_is_active", None) if reg_entry else None
+        print(f"  ⛔ request_id={request_id} is inactive/missing in the registry "
+              f"(request_is_active={active_val!r}) - skipping push. Re-run "
+              f"dtc_request_manager to (re)create it.")
+        log(log_rows, name, request_id, "REQUEST_INACTIVE", None, "error",
+            "request_inactive_at_push",
+            f"registry request_is_active={active_val!r} at push-time; target treated as "
+            f"deleted - re-run dtc_request_manager", None)
+        totals["push_failed"] += 1
+        continue
+    last_pushed = getattr(reg_entry, "last_pushed", None)
 
     # Current DTC rows (live) from the WIP_ITS_USE view. Read for EVERY resolved
     # request (even with no BeProduct delta) so moved-out orphans are detected.

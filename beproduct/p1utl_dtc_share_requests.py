@@ -10,7 +10,7 @@ This notebook applies the project sharing policy to a set of requests,
 idempotently:
   1. Share ALL views with the AI Agent service user (default
      aiagentwip@lifung.com)  -> POST /v1/requests/{id}/shares/{userEmail}
-  2. Share the "Full Version" view with the "Fabric Group" user group
+  2. Share the "Full Version" view with the "Kontoor Project Team" user group
      -> POST /v1/requests/{id}/shares/usergroups/{userGroupName}
 
 It is safe to re-run: existing shares are detected (GET .../shares[/usergroups])
@@ -25,7 +25,7 @@ Parameters:
                      dtc_request_mapping for this environment.
   - share_user_email (default: aiagentwip@lifung.com)
   - user_view_scope  "ALL" (default) = every view; or a CSV of view names.
-  - share_user_group (default: Fabric Group)   blank = skip group share
+  - share_user_group (default: Kontoor Project Team)   blank = skip group share
   - group_view_names (default: Full Version)    CSV of views shared to the group
   - send_email       "Y" | "N" (default N) -- whether DTC emails the recipients
   - dry_run          (default: true) -- compute & log only, no share calls
@@ -68,7 +68,7 @@ dbutils.widgets.text("dtc_workspace", "KTB", "DTC Workspace")
 dbutils.widgets.text("request_names", "", "Request names CSV (blank = all in mapping)")
 dbutils.widgets.text("share_user_email", "aiagentwip@lifung.com", "Share-all-views user email")
 dbutils.widgets.text("user_view_scope", "ALL", "User views: ALL or CSV of view names")
-dbutils.widgets.text("share_user_group", "Fabric Group", "User group (blank = skip)")
+dbutils.widgets.text("share_user_group", "Kontoor Project Team", "User group (blank = skip)")
 dbutils.widgets.text("group_view_names", "Full Version", "Views shared to group (CSV)")
 dbutils.widgets.text("send_email", "N", "Email recipients (Y/N)")
 dbutils.widgets.text("dry_run", "true", "Dry Run (true/false)")

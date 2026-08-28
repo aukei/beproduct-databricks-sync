@@ -111,6 +111,36 @@ check(registry.is_active_item({"active": 1}) is True, "active=1 active")
 check(registry.is_active_item({"requestReference": "KTB FW26 X"}) is True,
       "no flag present -> kept (don't silently drop)")
 
+print("\n[6d] find_duplicate_active_names: flags names shared by 2+ distinct ids")
+dup = registry.find_duplicate_active_names([
+    {"request_reference": "KTB FW26 Wrangler", "request_id": "r1"},
+    {"request_reference": "KTB FW26 Wrangler", "request_id": "r2"},
+    {"request_reference": "KTB SS27 Wrangler", "request_id": "r3"},
+])
+check(dup == {"KTB FW26 Wrangler": ["r1", "r2"]},
+      f"exactly the colliding name is flagged with both ids (got {dup})")
+
+print("\n[6e] find_duplicate_active_names: no collision -> empty dict")
+dup2 = registry.find_duplicate_active_names([
+    {"request_reference": "KTB FW26 Wrangler", "request_id": "r1"},
+    {"request_reference": "KTB SS27 Wrangler", "request_id": "r3"},
+])
+check(dup2 == {}, "no duplicates -> empty dict")
+
+print("\n[6f] find_duplicate_active_names: same id repeated (not a real collision) ignored")
+dup3 = registry.find_duplicate_active_names([
+    {"request_reference": "KTB FW26 Wrangler", "request_id": "r1"},
+    {"request_reference": "KTB FW26 Wrangler", "request_id": "r1"},
+])
+check(dup3 == {}, "duplicate row for the SAME request_id is not flagged as a collision")
+
+print("\n[6g] find_duplicate_active_names: rows missing name/id are skipped safely")
+dup4 = registry.find_duplicate_active_names([
+    {"request_reference": None, "request_id": "r1"},
+    {"request_reference": "KTB FW26 Wrangler", "request_id": None},
+])
+check(dup4 == {}, "rows without both fields are ignored, no crash")
+
 print("\n[7] REGISTRY_COLS matches expected 19-col schema order")
 check(len(registry.REGISTRY_COLS) == 19, "19 registry columns")
 check(registry.REGISTRY_COLS[0] == "environment" and registry.REGISTRY_COLS[4] == "request_id",

@@ -312,6 +312,30 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
 - **Phase 9a Delta tables**: `dtc_lineplan_ktb` + `dtc_lineplan_registry`.
   `costing_chart` = fully overwritten join result (Style × Color × Vendor/Factory).
 
+**BeProduct `attributes_list` folder scoping bug (found + fixed live, 2026-08-27):**
+- The BeProduct SDK's `api.style.attributes_list(folder_id: str = "", ...)` takes
+  a `folder_id` kwarg. Passing `folderId=` (wrong casing) is silently absorbed
+  into `**kwargs`/`raw_api.post(**kwargs)` and never applied — the call falls
+  back to `folder_id=""` and returns EVERY style across the WHOLE account, not
+  just the intended folder. Confirmed live: an ad-hoc "list styles in TEST KTB"
+  query using `folderId=` returned all 104 account-wide styles (99 SANDBOX +
+  Apparel + KTB + TEST KTB combined) instead of the 8 actually in TEST KTB;
+  fixed by switching to `folder_id=`, verified against both `TEST KTB` (8
+  styles, matches the DTC web portal) and `KTB` (158 styles, all confirmed
+  `folder.name == 'KTB'`).
+- `beproduct/p1p7_beproduct_style_sync.py` (the daily Phase 1/7 style sync) and
+  `beproduct/00_init_style_app_registry.py`'s fallback API scan had the SAME
+  class of bug in a different shape: neither passed `folder_id` AT ALL to
+  `attributes_list()` — they fetched the **entire account** every run and
+  post-filtered client-side by `style.folder.name == folder_name`. This gave
+  correct RESULTS (name equality is unambiguous today) but was needlessly slow
+  and would silently break if two folders were ever named identically. Fixed
+  (2026-08-27): both notebooks now resolve `folder_id` once via
+  `api.style.folders()` (raising if the name is missing or ambiguous) and pass
+  it to `attributes_list(folder_id=...)` so the API itself scopes the result
+  server-side; the old client-side name check is kept only as a defense-in-depth
+  sanity assertion (should now always be a no-op).
+
 ## Decisions on record
 
 - **`create_sheet` payload fix (2026-06-17): `requestName` → `requestReference`.**
@@ -369,7 +393,9 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
   idempotency). Connector: `share_request_with_user`, `share_request_with_usergroup`,
   `get_request_shares`, `get_request_share_usergroups`. Project policy: share ALL
   views with `aiagentwip@lifung.com` (AI Agent WIP) and the **Full Version** view
-  with the **Fabric Group** user group. Applied automatically by
+  with the **Kontoor Project Team** user group (**changed 2026-08-27**, was
+  "Fabric Group" — do not confuse with the unrelated DTC data column also named
+  "Fabric Group" in `phase1.FIELD_MAPPING`). Applied automatically by
   `p1_dtc_request_manager` at create time (`share_on_create=true`, `send_email=N`)
   and backfillable via the idempotent `beproduct/p1utl_dtc_share_requests` notebook.
 - **Legacy change-tracking pipeline removed (2026-06-17).** The old single-table

@@ -21,6 +21,28 @@ Discovery scan: by default it refreshes the registry (sync.registry.refresh) at 
 start so existing DTC requests aren't mistaken for missing (avoids duplicate
 creation), and again after creating new ones.
 
+Active-only registry contract: DTC "inactive" == hidden from users == treated as
+DELETED here. `registry.refresh()` registers only active requests and, on a full
+auto-discover, reconciles any previously-registered row that disappeared from the
+active scan (`request_is_active='N'`, `in_scope=false`; row + sync state kept, not
+deleted). Because this resolver only ever matches names against
+`in_scope == True` rows, a name whose PREVIOUS target request went inactive since
+the last run naturally falls through to "missing" here and is (re-)CREATED as a
+brand-new request under the same name (gated by `dry_run`, same as any other
+missing-in-scope name) - there is no separate "recreate" code path, it is the same
+missing -> create flow.
+
+Duplicate-name guard: DTC allows two requests to share the exact same
+`requestReference` while both are concurrently active - they are distinguished
+only by `requestId`, never by name. This resolver, however, must pick ONE target
+request per derived name, so it assumes active in-scope WIP requests have unique
+names within the workspace+document scope. Any violation is detected
+(`registry.find_duplicate_active_names`) and logged as a `DUPLICATE_ACTIVE_NAME`
+error for every colliding name (whether or not it currently has pending staging
+rows) - it is NEVER silently resolved by picking an arbitrary one of the
+colliding requests, and NEVER treated as "missing" (which would create yet a
+third request).
+
 Schedule: after transform (12:00 UTC), before push.
 
 Parameters:
@@ -89,7 +111,7 @@ dbutils.widgets.text("refresh_registry", "true", "Scan + refresh registry first"
 # Sharing: a freshly created request is visible only to its creator until shared.
 dbutils.widgets.text("share_on_create", "true", "Share newly created requests")
 dbutils.widgets.text("share_user_email", "aiagentwip@lifung.com", "Share-all-views user email")
-dbutils.widgets.text("share_user_group", "Fabric Group", "User group (blank = skip)")
+dbutils.widgets.text("share_user_group", "Kontoor Project Team", "User group (blank = skip)")
 dbutils.widgets.text("group_view_names", "Full Version", "Views shared to group (CSV)")
 dbutils.widgets.text("send_email", "N", "Email share recipients (Y/N)")
 
@@ -173,15 +195,46 @@ if refresh_registry:
     )
 
 
-def load_reg_by_name():
+def load_active_reg_rows():
+    """Active, in-scope registry rows for this environment (raw Row objects).
+
+    "Active" per the registry's own contract: `in_scope == True` (computed by
+    `registry.build_registry_row`/reconciled by `registry.reconcile_inactive`,
+    which marks a request `request_is_active='N', in_scope=false` the moment a
+    full active-only rescan no longer sees it - DTC "inactive" == hidden from
+    users == treated as deleted for our purposes, never silently kept around).
+    """
     reg = spark.table(registry_full).where(
         (F.col("environment") == environment) & (F.col("in_scope") == True)  # noqa: E712
     )
-    return {r.request_reference: r for r in reg.collect()}
+    return reg.collect()
 
 
-def resolve_name(name, reg_by_name):
+def load_reg_by_name():
+    """(reg_by_name, duplicate_names) from the CURRENT active/in-scope registry.
+
+    DTC allows two requests to share a name while both are active (identified
+    only by requestId). This integration resolves a push target BY NAME, so we
+    assume active in-scope WIP requests have unique names within this
+    workspace+document scope; `duplicate_names` surfaces any violation
+    (name -> [request_id, ...]) so callers flag it as an error instead of
+    silently picking one of the colliding requests.
+    """
+    reg_rows = load_active_reg_rows()
+    duplicate_names = registry.find_duplicate_active_names([r.asDict() for r in reg_rows])
+    reg_by_name = {r.request_reference: r for r in reg_rows
+                   if r.request_reference not in duplicate_names}
+    return reg_by_name, duplicate_names
+
+
+def resolve_name(name, reg_by_name, duplicate_names):
     """('ok', mapping_dict) | ('error', (op, reason, detail, request_id)) | ('missing', None)."""
+    if name in duplicate_names:
+        ids = duplicate_names[name]
+        return ("error", ("DUPLICATE_ACTIVE_NAME", "duplicate_active_name",
+                          f"{len(ids)} concurrently-active in-scope DTC requests share this "
+                          f"name (request_ids={ids}); cannot safely resolve a single push "
+                          f"target - rename or deactivate one of them in DTC.", None))
     entry = reg_by_name.get(name)
     if entry is None:
         return ("missing", None)
@@ -200,14 +253,29 @@ def resolve_name(name, reg_by_name):
 
 # COMMAND ----------
 
-reg_by_name = load_reg_by_name()
+reg_by_name, duplicate_names = load_reg_by_name()
 resolved_rows = []   # for dtc_request_mapping (rows the push will process)
 log_rows = []        # errors / create events
 missing = []         # names not present in the registry
 
+# Proactive audit: surface EVERY ambiguous active/in-scope name in this scope
+# (not just ones with pending staging rows right now), so the collision is
+# visible before it silently blocks a future push.
+if duplicate_names:
+    print(f"\n⚠️  {len(duplicate_names)} request name(s) have 2+ concurrently-ACTIVE "
+          f"in-scope requests (DTC permits duplicate names, IDs differ - our WIP "
+          f"routing cannot safely pick one):")
+    for dup_name, ids in duplicate_names.items():
+        print(f"    - {dup_name!r}: request_ids={ids}")
+        log_rows.append((now, run_id, "registry_audit", environment, dup_name, None,
+                         "DUPLICATE_ACTIVE_NAME", None, None, None, "error",
+                         "duplicate_active_name",
+                         f"{len(ids)} concurrently-active in-scope requests share this "
+                         f"name: {ids}", None))
+
 # Pass 1: resolve against the current registry.
 for name in req_names:
-    status, payload = resolve_name(name, reg_by_name)
+    status, payload = resolve_name(name, reg_by_name, duplicate_names)
     if status == "ok":
         print(f"  ✅ {name}: resolved -> request_id={payload['request_id']}")
         resolved_rows.append(payload)
@@ -296,9 +364,9 @@ if created_any:
         environment=environment, workspace=workspace, document=document,
         customer=customer, registry_table=registry_full,
     )
-    reg_by_name = load_reg_by_name()
+    reg_by_name, duplicate_names = load_reg_by_name()
     for name in to_create:
-        status, payload = resolve_name(name, reg_by_name)
+        status, payload = resolve_name(name, reg_by_name, duplicate_names)
         if status == "ok":
             print(f"  ✅ {name}: resolved after create -> request_id={payload['request_id']}")
             resolved_rows.append(payload)

@@ -299,6 +299,49 @@ else:
         since_iso = None
 
 # ============================================================================
+# Step 2b: Resolve folder_id (server-side folder scoping)
+# ============================================================================
+# CRITICAL: api.style.attributes_list() takes a `folder_id` kwarg (NOT
+# `folderId`) to filter server-side. Passing the wrong kwarg name is silently
+# swallowed (absorbed into the SDK's **kwargs and never applied), which makes
+# the call fall back to folder_id="" and return EVERY style across the WHOLE
+# account (all folders), not just this one — confirmed live 2026-08-27 (an
+# ad-hoc "TEST KTB" query returned all 104 account-wide styles instead of the
+# 8 actually in that folder until `folder_id=` was used). This step resolves
+# the folder's ID ONCE via the cheap `api.style.folders()` list call, then
+# Step 3 passes it correctly so the API itself returns only this folder's
+# styles (instead of pulling every folder in the account and filtering
+# client-side by name afterwards, which is both slower and, if a folder name
+# is ever duplicated in the account, ambiguous).
+
+print(f"\n{'='*80}")
+print("Step 2b: Resolve folder_id for folder_name='{}'".format(folder_name_val))
+print("=" * 80)
+
+try:
+    print(f"📁 Listing BeProduct style folders...")
+    all_folders = api.style.folders()
+    matches = [f for f in all_folders if f.get("name") == folder_name_val]
+    print(f"   Found {len(all_folders)} folder(s) in account: "
+          f"{[f.get('name') for f in all_folders]}")
+    if not matches:
+        raise ValueError(
+            f"No BeProduct style folder named exactly '{folder_name_val}' "
+            f"(case-sensitive) — available: {[f.get('name') for f in all_folders]}"
+        )
+    if len(matches) > 1:
+        raise ValueError(
+            f"{len(matches)} folders are named '{folder_name_val}' "
+            f"(ids={[f.get('id') for f in matches]}) — folder names must be "
+            f"unique for folder_id resolution to be unambiguous."
+        )
+    folder_id_val = matches[0]["id"]
+    print(f"✅ Resolved folder_id={folder_id_val} for '{folder_name_val}'")
+except Exception as e:
+    print(f"❌ Failed to resolve folder_id: {str(e)}")
+    raise
+
+# ============================================================================
 # Step 3: Fetch Styles
 # ============================================================================
 
@@ -307,7 +350,7 @@ print("Step 3: Fetch Styles from BeProduct")
 print("=" * 80)
 
 try:
-    print(f"📥 Fetching styles from folder '{folder_name_val}'...")
+    print(f"📥 Fetching styles from folder '{folder_name_val}' (folder_id={folder_id_val})...")
     print(f"   (This may take a moment...)")
     
     filters = None
@@ -325,10 +368,11 @@ try:
     all_styles = []
     count = 0
     
-    print(f"\n   Calling api.style.attributes_list(filters={filters})...")
+    print(f"\n   Calling api.style.attributes_list(folder_id={folder_id_val}, filters={filters})...")
     
-    # Get iterator
-    iterator = api.style.attributes_list(filters=filters)
+    # Get iterator — folder_id filters SERVER-SIDE so only this folder's styles
+    # are returned (see Step 2b for why this must be `folder_id`, not `folderId`).
+    iterator = api.style.attributes_list(folder_id=folder_id_val, filters=filters)
     print(f"   Iterator created: {type(iterator)}")
     
     # Iterate through results
@@ -425,8 +469,11 @@ try:
             
             print(f"     Result {len(all_styles)}: folder='{folder_name}', lf_style={lf_style}, id={style_id}...")
         
-        # Filter by specified folder (case-sensitive match)
-        # Folder is nested: style.get("folder", {}).get("name")
+        # Sanity check only: `folder_id` (Step 2b) already scopes this query
+        # server-side, so every result SHOULD belong to this folder. Keep a
+        # defense-in-depth guard rather than trusting that blindly — if the API
+        # ever returns a style from a different folder, surface it loudly
+        # instead of silently mixing folders' data.
         folder_obj = style.get("folder", {})
         actual_folder = folder_obj.get("name", "") if folder_obj else ""
         if actual_folder == folder_name_val:
@@ -434,23 +481,29 @@ try:
             count += 1
             if count % 50 == 0:
                 print(f"     Matched {count} styles so far...")
+        else:
+            print(f"   ⚠️  UNEXPECTED: folder_id={folder_id_val} query returned a style from "
+                  f"folder '{actual_folder}' (expected '{folder_name_val}') — id={style.get('id')}. "
+                  f"Excluding it from this sync (server-side folder_id scoping may not be "
+                  f"behaving as expected).")
     
     print(f"\n✅ Fetch complete:")
-    print(f"   Total results from API: {len(all_styles)}")
-    print(f"   Styles with folder='{folder_name_val}': {len(styles)}")
+    print(f"   Total results from API (folder_id-scoped): {len(all_styles)}")
+    print(f"   Styles confirmed folder='{folder_name_val}': {len(styles)}")
     
     if len(all_styles) == 0:
-        print(f"\n   ⚠️  API returned 0 results!")
+        print(f"\n   ⚠️  API returned 0 results for folder_id={folder_id_val} ('{folder_name_val}')!")
         print(f"   Possible reasons:")
-        print(f"     - No styles exist in your BeProduct instance")
+        print(f"     - The folder is genuinely empty")
         print(f"     - Credentials are invalid")
         print(f"     - Filter is too restrictive")
     
     if len(all_styles) > 0 and len(styles) == 0:
         unique_folders = set(s.get("folder", {}).get("name", "?") for s in all_styles if s.get("folder"))
-        print(f"\n   ⚠️  WARNING: API returned {len(all_styles)} styles, but NONE matched folder '{folder_name_val}'")
-        print(f"   Unique folders in results: {unique_folders}")
-        print(f"   (Check folder name spelling and case sensitivity)")
+        print(f"\n   ⚠️  WARNING: folder_id={folder_id_val} query returned {len(all_styles)} styles, "
+              f"but NONE actually carry folder name '{folder_name_val}'")
+        print(f"   Folders seen in results: {unique_folders}")
+        print(f"   (This would indicate the SDK/API folder_id scoping is not working as expected)")
 
 except Exception as e:
     print(f"❌ Failed to fetch styles: {str(e)}")

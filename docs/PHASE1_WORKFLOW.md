@@ -128,10 +128,28 @@ will **create** the DTC request/sheet (`POST /v1/sheets` via
 - **Sharing (gated by `share_on_create`, default true):** a freshly created request
   is visible only to its creator (the API identity). Immediately after a successful
   create, `p1_dtc_request_manager` shares it: **all views → `aiagentwip@lifung.com`**
-  (AI Agent WIP) and the **Full Version** view → the **Fabric Group** user group.
-  Share events are logged to `beproduct_to_dtc_sync_log` (stage `share`).
+  (AI Agent WIP) and the **Full Version** view → the **Kontoor Project Team** user
+  group. Share events are logged to `beproduct_to_dtc_sync_log` (stage `share`).
   Already-created requests can be (re-)shared idempotently with the standalone
   `beproduct/p1utl_dtc_share_requests.py` notebook.
+- **Recreate-on-inactive:** a request name is resolved only against
+  **active + in-scope** registry rows. If the request that a name previously
+  resolved to has since gone **inactive** (DTC "inactive" = hidden from users =
+  treated as deleted), the next `registry.refresh()` reconciliation marks that row
+  `request_is_active='N', in_scope=false`, so the name falls through to "missing"
+  here and is **recreated** as a brand-new request under the same name (same
+  missing → create path, gated by `dry_run`) — there is no separate recreate code
+  path. `p1p7_beproduct_to_dtc_push.py` also re-validates the target request's
+  active status directly against the registry (by `request_id`) immediately before
+  pushing, as a final safety net against staleness between resolver and push runs.
+- **Duplicate-name guard:** DTC allows two requests to share the exact same name
+  while both are concurrently active (they are distinguished only by `requestId`).
+  This integration assumes active in-scope WIP request names are unique within a
+  workspace+document scope; `registry.find_duplicate_active_names()` detects any
+  violation and `p1_dtc_request_manager` logs it as `DUPLICATE_ACTIVE_NAME` (stage
+  `registry_audit`) instead of silently picking one of the colliding requests —
+  the colliding name is neither resolved nor treated as missing (so it is never
+  auto-created a third time).
 
 Validated `POST /v1/sheets` body (HTTP 201): `requestReference` (NOT `requestName`),
 non-empty `requestDescription`, `viewName`, and `requestAssigneeSharingViewNames`/

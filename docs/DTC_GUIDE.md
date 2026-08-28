@@ -97,8 +97,16 @@ auto-discover, in-scope rows absent from the scan are **marked** inactive
 (`POST /v1/sheets`) in `dtc_document`, then re-scans + resolves. Gated by `dry_run`
 (default `true` = preview). Newly created requests are **shared** (gated by
 `share_on_create`): all views → `aiagentwip@lifung.com`, Full Version → the
-`Fabric Group` user group. Backfill existing requests with
+`Kontoor Project Team` user group. Backfill existing requests with
 `beproduct/p1utl_dtc_share_requests.py`. Names that don't parse are logged `NOT_IN_SCOPE`.
+
+Names only resolve against **active + in-scope** registry rows, so a name whose
+previous target request went **inactive** (hidden = deleted) falls through to
+"missing" and is recreated under the same name on the next run (same
+missing → create path). Conversely, if 2+ requests are concurrently active with
+the identical name (DTC permits this — it IDs requests only by `requestId`), the
+name is flagged `DUPLICATE_ACTIVE_NAME` and never resolved/created for, since we
+cannot safely pick one.
 
 ---
 

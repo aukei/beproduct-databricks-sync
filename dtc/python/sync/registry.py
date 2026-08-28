@@ -82,6 +82,39 @@ def discover_request_ids(connector, workspace: str, document: str) -> List[str]:
     return [r["requestId"] for r in discover_requests(connector, workspace, document)]
 
 
+def find_duplicate_active_names(rows: List[Dict[str, Any]]) -> Dict[str, List[str]]:
+    """Detect request names shared by MORE THAN ONE concurrently-active,
+    in-scope request within the scanned rows.
+
+    DTC itself allows two requests to carry the identical `requestReference`
+    while both are active - they are identified only by `requestId`, never by
+    name. Our BeProduct -> DTC routing, however, resolves a target request
+    FROM a derived name (`"<Customer> <SeasonCode> <Brand>"`), so for the
+    purpose of this integration's WIP tracking we ASSUME active, in-scope WIP
+    requests have unique names within a document scope. When that assumption
+    is violated we cannot safely pick one of the ambiguous requests as "the"
+    target, so callers must flag/log an error and refuse to resolve/push to
+    any of them (never silently pick one) until the collision is fixed in DTC
+    (rename or deactivate one of the duplicates).
+
+    :rows: dict-like registry rows (e.g. `Row.asDict()`), each with at least
+           `request_reference` and `request_id`. Callers should pre-filter to
+           the rows they consider "active" (e.g. `in_scope == True`).
+    :returns: {request_reference: [request_id, ...]} only for names with 2+
+              distinct request_ids; empty dict when no collisions exist.
+    """
+    by_name: Dict[str, List[str]] = {}
+    for r in rows:
+        name = r.get("request_reference")
+        rid = r.get("request_id")
+        if not name or not rid:
+            continue
+        ids = by_name.setdefault(name, [])
+        if rid not in ids:
+            ids.append(rid)
+    return {name: ids for name, ids in by_name.items() if len(ids) > 1}
+
+
 def build_registry_row(
     scope: Optional[Dict[str, Any]],
     *,

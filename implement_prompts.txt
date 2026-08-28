@@ -346,14 +346,23 @@ leaving out PHASE8_WORKFLOW and PHASE9_WORKFLOW for now until all planned subpha
 During upcoming test cycle, BeProduct style drops into "TEST KTB" folder instead of normal "KTB" folder. And previous DTC requests will likely cleared (pending DTC team action).
 Temporarily change the default Databricks job parameters to sync again "TEST KTB".
 
+# 2026/08/28 check point
+- DTC request - should register only 'active' Requests
+    - previously registered requests could turn 'inactive' = hidden from user, this is same as 'delete'
+    - Before data transformation, ensure requests in registry are active
+    - Create new request if previously created target request become inactive
+- For all new created request, share "" them to "aiagentwip@lifung.com" and user group "Kontoor Project Team"
+- Requests can have the same name, and concurrently active, identified only by ID
+- For the purpose of integration tracking, assume active WIP requests have unique names. Flag error otherwise.
+
+
+
 # Phase 9B the NT Orbit Duty Tools for filling in missing HTS Code / Duty Rates / Tariff rates.
 1. How to call NT Tools - it is an API.
 - API Doc: https://orbitduty.neotangent.com/API-DOCS/#
 - Entra OAuth2
     - Refresh token
-    - use App Client ID - "BeProduct Integration"
-        - Tenant ID (lft-pd)	c4d8a220-a9ec-4572-8c77-ab36a3ecdbae
-        - Client ID	            c486611e-9bfc-49d5-8930-7d1943884b03
+    - use Personal account "auchunkei@lifung.com"
     
 1.1 Authentication (Microsoft Entra ID / Azure AD)
 The API requires a Microsoft Entra ID bearer token in the `Authorization` header. This is a delegated, per-user token obtained via the OAuth2 authorization-code + refresh-token flow.
@@ -464,4 +473,9 @@ Plain Text
   "request_id": "1782809459482-9oufuuqyw",
   "processed_at": "2026-06-30T08:50:59.482Z"
 }
- 
+
+1.3 Fields to fill (summary)
+- Make costing table name a parameter. Default to "lft.beproduct.costing_chart", Testing use "lft.beproduct.costing_chart_kei"
+- 
+
+1.4 Push update to DTC
