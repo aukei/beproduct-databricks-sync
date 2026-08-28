@@ -158,7 +158,8 @@
         4d. log detail exceptions to sync log table.
     5. No push back to BeProduct in this phase.
 
-## Phase 1 Checking & Clarifications 
+
+# Phase 1 Checking & Clarifications 
 
 - valid IN-SCOPE 'KTB ...' UAT request ID (sacrificial requestId) = 6a26581854e92e7acd8fa71b
 - Within a single in-scope request (e.g. 'KTB FW26 Wrangler'), can the per-row 'Brand' column contain multiple brands, or is it exactly one brand per request? (The KON sample mixes Modern/Wrangler/Lee, but that's out of scope.) This determines the (LF Style#, SeasonCode, Brand) match semantics.
@@ -252,6 +253,23 @@ verify @beproduct/p5utl_beproduct_master_data_sync.py  does it still work agains
 - it is known that the directory list API throughput is 2rec/sec. So push and pull ops should be separated.
 - Directory "update" is actually massaging another table to upsert record to this directory master. Add a cell containing a template merge SQL that cater the modifiedAt logic, and admin can supply the actual merge statement later.
 
+## master data sync between (XTS) DTC <> BeProduct
+Before any Style/Material/Costing sync steps, some master data should be upsert into BeProduct from DTC.
+This is actually phase 0 in logical sense.
+- DTC workspace "KTB" Document "XTS Master"
+    1. Request ref "XTS Supplier Master" for partner type "SUPPLIER" 
+    2. Request ref "XTS Factory Master" for partner type "FACTORY"
+    /*3. Request ref "XTS Mill Master" for partner type "MILL"*/
+- DTC request structure mirror and should upsert into lft.beproduct.beproduct_directory table, primary key on "name"
+    - Despite there is 'id' and 'directory_id' fields, BeProduct treat "name" + "type" as key.
+    - [Supplier|Mill|Factory] Name -> 'name'
+    - [Supplier|Mill|Factory] Code -> 'directory_id'
+    - 'Type' by ref name above
+    - all the rest: address, country, state, zip, city, phone, fax, website, notes are optional 
+    - Production Country -> 'country'
+- Verify p5utl master data sync can upload any changed / new record to BeProduct master.
+
+
 
 # Phase 6 Structural clean up $12
 - BeProduct Style contains 2 new fields LABEL = "BP STYLE NUMBER", "Brand", no "Legacy code" 
@@ -276,6 +294,18 @@ For each style, of the 6 Sample apps: Proto, PreLine, SMS, Fit, PP, TOP, retriev
 - PP Sample -> 2nd Fit Sample Approval Status
 - TOP Sample -> TOP Sample Approval Status 
 Include in the field the complete list of submits info, use submitStatus and submitStatusDate of first size:[name, sizes[0].submitStatus, sizes[0].submitStatusDate] 
+
+## verification 28/8
+Some adjustment was made to DTC WIP doc structure, below should be the dest fields for the 6 samples:
+- Proto Sample -> Proto Sample - Sample Status
+- PreLine Sample -> Pre-line Sample - Status
+- SMS Sample -> SMS - Sample Status
+- Fit Sample -> 2nd Fit Sample Approval Status
+- PP Sample -> PP Sample Submission Approval Status
+- TOP Sample -> TOP Sample Approval Status 
+
+Take out the '[[' ']]' in the resulting string.  
+- result string reads like "submit1",'Status1","Date1" </br> "submit2","status2","Date2"
 
 # phase 8a Upload DTC Fabric sheets to Databricks, prepare to further upsert to BeProduct Material master.
 In DTC workspace <customer> i.e. KTB, there are sheets of document "<customer> FABRIC" i.e. "KTB FABRIC". They contains material information to be sync to BeProduct in phase 8B. Here focus On

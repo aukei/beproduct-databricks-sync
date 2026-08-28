@@ -92,13 +92,20 @@ FIELD_MAPPING: Dict[str, str] = {
     "gender": "Gender",                # Phase 6: new field (pending DTC column creation)
     # --- Phase 7: sample-app submit history (BeProduct → DTC, all 6 apps) ---
     # Formatted by sync.samples.format_sample_field in the transform; each value is
-    # a JSON list of [submit_name, submitStatus, submitStatusDate] (first size).
-    # DTC column presence confirmed 2026-07-07 (198-field view) except Pre-Line (*).
+    # ONE quoted, comma-separated line PER submit: "name","status","date" - NOT a
+    # JSON array (no [ ] brackets), multiple submits stacked on separate
+    # newline-separated lines. NOTE: norm() (below) must preserve embedded
+    # newlines for this to actually reach DTC as separate lines - see norm()'s
+    # docstring.
+    # DTC column presence confirmed 2026-08-28 (204-field view). Fit/PP destinations
+    # changed from the 2026-07-07 mapping (was "1st Fit ..."/"2nd Fit ...") after a
+    # DTC WIP doc restructure — see sync/samples.py module docstring for detail.
+    # "PP Sample Submission Approval Status" confirmed correct by the project team.
     "proto_sample_status":   "Proto Sample - Sample Status",
     "preline_sample_status": "Pre-line Sample - Status",      # note: lowercase 'l', dash
     "sms_sample_status":     "SMS - Sample Status",
-    "fit_sample_status":     "1st Fit Sample Approval Status",
-    "pp_sample_status":      "2nd Fit Sample Approval Status",
+    "fit_sample_status":     "2nd Fit Sample Approval Status",           # was "1st Fit Sample Approval Status"
+    "pp_sample_status":      "PP Sample Submission Approval Status",     # was "2nd Fit Sample Approval Status"
     "top_sample_status":     "TOP Sample Approval Status",
     # --- default-fill (only written when DTC cell is blank; see DEFAULT_FILL_COLS) ---
     "supplier": "Supplier",            # Phase 6: new DTC column; default = "Supplier"
@@ -138,20 +145,28 @@ _NULLISH = {"", "n/a", "na", "none", "null", "nan"}
 
 def norm(value: Any) -> Optional[str]:
     """
-    Normalise a cell value for matching / equality comparison.
+    Normalise a cell value for matching / equality comparison. This is also
+    what actually gets PUSHED to DTC (build_target_payload stores norm(value)
+    in the payload), so it must preserve any structure the value intentionally
+    carries - not just be a comparison-only helper.
 
     - None -> None
-    - trims, collapses internal runs of whitespace to a single space
+    - trims, collapses internal runs of NON-NEWLINE whitespace to a single space
+    - intentional embedded newlines (``\\n``) are PRESERVED, never collapsed to
+      a space - needed for sync.samples.format_sample_field's multi-submit,
+      one-line-per-submit output (changed 2026-08-28) to actually reach DTC as
+      separate lines instead of being flattened into one space-joined line
     - common null sentinels ("N/A", "none", ...) -> None
 
-    Whitespace is collapsed because the live DTC data contains values like
-    ' WMG-R808-263 002' (leading space) and 'Body ' (trailing space). Case and
-    dash-vs-space are intentionally preserved (e.g. 'WMG-J876-263-001' vs
-    'WMG-J876-263 001' are NOT merged) to avoid collapsing distinct styles.
+    Non-newline whitespace is collapsed because the live DTC data contains
+    values like ' WMG-R808-263 002' (leading space) and 'Body ' (trailing
+    space). Case and dash-vs-space are intentionally preserved (e.g.
+    'WMG-J876-263-001' vs 'WMG-J876-263 001' are NOT merged) to avoid
+    collapsing distinct styles.
     """
     if value is None:
         return None
-    s = re.sub(r"\s+", " ", str(value)).strip()
+    s = re.sub(r"[^\S\n]+", " ", str(value)).strip()
     if s.lower() in _NULLISH:
         return None
     return s

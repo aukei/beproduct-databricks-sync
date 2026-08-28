@@ -44,15 +44,30 @@ to the Delta row so it is not re-pushed on the next run.
 
 TYPICAL ADMIN WORKFLOW (external upsert → push)
 -------------------------------------------------
+IMPORTANT (clarified 2026-08-28): BeProduct's Directory record is keyed by
+**`name` + `partner_type` TOGETHER**, NOT `directory_id`/`id` (despite those
+columns existing) and NOT `name` alone — the SAME name is expected and fine
+across DIFFERENT partner types (e.g. the same entity legitimately exists as
+both a SUPPLIER and a FACTORY record). Cell 5b's template below still shows
+`directory_id` as an illustrative example key for a generic/future source,
+but any upsert MUST match on `(name, partner_type)` in practice. See
+`beproduct/p0_xts_master_to_directory_upsert.py` for the concrete, active
+(non-template) implementation of this workflow against DTC's "XTS Master"
+document — it MERGEs on `name AND partner_type`, uses
+`COALESCE(src.field, tgt.field)` on every non-key field so a source that
+doesn't provide a field (e.g. XTS Master has no address/phone/etc. at all)
+never destroys real data already in `beproduct_directory`. `partner_type`
+can never change on a matched row since it's part of the join key itself.
+
 1. An external pipeline upserts massaged data into beproduct_directory,
    setting modified_at = current_timestamp() on changed rows:
 
      MERGE INTO lft.beproduct.beproduct_directory AS tgt
      USING <source_table> AS src
-     ON tgt.directory_id = src.directory_id
+     ON tgt.name = src.name AND tgt.partner_type = src.partner_type  -- BeProduct's real key
      WHEN MATCHED AND (<fields changed> OR tgt.modified_at <= tgt.extracted_at)
        THEN UPDATE SET
-         name = src.name, address = src.address, ...,
+         address = COALESCE(src.address, tgt.address), ...,  -- never NULL-out real data
          modified_at = current_timestamp()      -- flags for push
      WHEN NOT MATCHED THEN INSERT (
        id, directory_id, name, partner_type, ...,
@@ -544,6 +559,22 @@ else:
 #
 # Run this cell AFTER PULL_ONLY and BEFORE PUSH_DIRECTORY / PUSH_ONLY.
 #
+# The template below shows the recommended MERGE pattern for a GENERIC/future
+# external source. For the concrete, ACTIVE implementation sourcing DTC's
+# "XTS Master" document, use the dedicated notebook instead of this template:
+#     beproduct/p0_xts_master_to_directory_upsert.py
+# (it matches on `name` + `partner_type`, COALESCEs every field so nulls never
+# destroy existing data, and reports true (name, partner_type) collisions —
+# NOT the same name under a different partner_type, which is expected/valid.)
+#
+# MATCH KEY: `name` + `partner_type` TOGETHER (clarified 2026-08-28) —
+# BeProduct's Directory record is keyed by name+type, NOT `directory_id`/`id`
+# (despite those columns existing) and NOT `name` alone. The same name is
+# fine across different partner types (e.g. the same entity legitimately
+# exists as both a SUPPLIER and a FACTORY record). This template now matches
+# on `(name, partner_type)` to stay correct for any future source that
+# copies it.
+#
 # The template below shows the recommended MERGE pattern.
 # Replace the source query and field list, then uncomment spark.sql().
 #
@@ -557,6 +588,13 @@ else:
 #   id = UUID  + modified_at > extracted_at  → UPDATE to BeProduct on push
 #   id = NULL  (any timestamps)              → ADD   to BeProduct on push
 #   id = UUID  + modified_at == extracted_at → skip (already in sync)
+#
+# COALESCE, not blind overwrite: a source that only ever supplies SOME fields
+# (e.g. XTS Master has no address/phone/website/notes at all) must not NULL
+# out real values already in beproduct_directory just because its own column
+# is blank. Every SET below is `COALESCE(src.field, tgt.field)` for exactly
+# this reason — copy that pattern for any new source, don't revert to a bare
+# `tgt.field = src.field` assignment.
 # ============================================================================
 
 _MERGE_TEMPLATE = f"""
@@ -572,8 +610,9 @@ USING (
     -- TODO: replace with your source table or transformation query
     -- Example:  SELECT * FROM lft.beproduct.your_staging_table
     SELECT
-        directory_id,   -- match key (human-readable partner code)
-        name,
+        name,           -- match key part 1 (BeProduct's real Directory key)
+        partner_type,   -- match key part 2 — together with name, NOT alone
+        directory_id,   -- human-readable partner code (optional per source)
         address,
         country,
         state,
@@ -583,40 +622,43 @@ USING (
         fax,
         website,
         notes,
-        active,
-        partner_type    -- used only for new inserts (cannot change after creation)
+        active
     FROM <your_source>
 ) AS src
-ON tgt.directory_id = src.directory_id
+ON tgt.name = src.name AND tgt.partner_type = src.partner_type
 
--- ── Existing record: only update when something actually changed ─────────────
+-- ── Existing record: only update when a SOURCE-PROVIDED value actually
+--    changes something (COALESCE means a NULL from src is a no-op, never a
+--    destructive overwrite of real existing data). partner_type is never
+--    compared/updated here because it's already part of the join key — a
+--    MATCHED row is by definition already the same partner_type. ────────────
 WHEN MATCHED AND (
-       tgt.name     IS DISTINCT FROM src.name
-    OR tgt.address  IS DISTINCT FROM src.address
-    OR tgt.country  IS DISTINCT FROM src.country
-    OR tgt.state    IS DISTINCT FROM src.state
-    OR tgt.zip      IS DISTINCT FROM src.zip
-    OR tgt.city     IS DISTINCT FROM src.city
-    OR tgt.phone    IS DISTINCT FROM src.phone
-    OR tgt.fax      IS DISTINCT FROM src.fax
-    OR tgt.website  IS DISTINCT FROM src.website
-    OR tgt.notes    IS DISTINCT FROM src.notes
-    OR tgt.active   IS DISTINCT FROM src.active
+       COALESCE(src.directory_id, tgt.directory_id) IS DISTINCT FROM tgt.directory_id
+    OR COALESCE(src.address,      tgt.address)      IS DISTINCT FROM tgt.address
+    OR COALESCE(src.country,      tgt.country)      IS DISTINCT FROM tgt.country
+    OR COALESCE(src.state,        tgt.state)        IS DISTINCT FROM tgt.state
+    OR COALESCE(src.zip,          tgt.zip)          IS DISTINCT FROM tgt.zip
+    OR COALESCE(src.city,         tgt.city)         IS DISTINCT FROM tgt.city
+    OR COALESCE(src.phone,        tgt.phone)        IS DISTINCT FROM tgt.phone
+    OR COALESCE(src.fax,          tgt.fax)          IS DISTINCT FROM tgt.fax
+    OR COALESCE(src.website,      tgt.website)      IS DISTINCT FROM tgt.website
+    OR COALESCE(src.notes,        tgt.notes)        IS DISTINCT FROM tgt.notes
+    OR COALESCE(src.active,       tgt.active)       IS DISTINCT FROM tgt.active
     -- TODO: add / remove field comparisons to match your source columns
 )
 THEN UPDATE SET
-    tgt.name        = src.name,
-    tgt.address     = src.address,
-    tgt.country     = src.country,
-    tgt.state       = src.state,
-    tgt.zip         = src.zip,
-    tgt.city        = src.city,
-    tgt.phone       = src.phone,
-    tgt.fax         = src.fax,
-    tgt.website     = src.website,
-    tgt.notes       = src.notes,
-    tgt.active      = src.active,
-    tgt.modified_at = current_timestamp()   -- ← flags this row for PUSH_DIRECTORY
+    tgt.directory_id = COALESCE(src.directory_id, tgt.directory_id),
+    tgt.address      = COALESCE(src.address,      tgt.address),
+    tgt.country      = COALESCE(src.country,      tgt.country),
+    tgt.state        = COALESCE(src.state,        tgt.state),
+    tgt.zip          = COALESCE(src.zip,          tgt.zip),
+    tgt.city         = COALESCE(src.city,         tgt.city),
+    tgt.phone        = COALESCE(src.phone,        tgt.phone),
+    tgt.fax          = COALESCE(src.fax,          tgt.fax),
+    tgt.website      = COALESCE(src.website,      tgt.website),
+    tgt.notes        = COALESCE(src.notes,        tgt.notes),
+    tgt.active       = COALESCE(src.active,       tgt.active),
+    tgt.modified_at  = current_timestamp()   -- ← flags this row for PUSH_DIRECTORY
 
 -- ── New record: id = NULL so PUSH_DIRECTORY calls Directory/Add ──────────────
 WHEN NOT MATCHED BY TARGET
@@ -644,7 +686,10 @@ VALUES (
 )
 
 -- ── Optional: deactivate records absent from the source ──────────────────────
--- Uncomment if your source is authoritative (i.e. missing = deleted).
+-- Uncomment ONLY if <your_source> is a COMPLETE, authoritative list of every
+-- record of its kind (missing = deleted). DO NOT uncomment this for a narrow
+-- source like XTS Master, which only covers ~40-60 of beproduct_directory's
+-- ~3852 records — it would incorrectly deactivate almost the entire table.
 -- WHEN NOT MATCHED BY SOURCE AND tgt.active = true
 -- THEN UPDATE SET
 --     tgt.active      = false,
@@ -655,6 +700,8 @@ print("=" * 80)
 print("CELL 5b — DATA MASSAGE template (read-only display)")
 print("=" * 80)
 print("Copy and adapt the MERGE SQL below, then uncomment spark.sql().")
+print("For XTS Master specifically, use beproduct/p0_xts_master_to_directory_upsert.py")
+print("instead of adapting this template.")
 print(_MERGE_TEMPLATE)
 
 # ── Uncomment and fill in your source query to run the merge ─────────────────

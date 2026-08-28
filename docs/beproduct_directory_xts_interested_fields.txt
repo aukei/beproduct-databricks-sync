@@ -1,0 +1,83 @@
+DTC "XTS Master" → BeProduct Directory field mapping (Phase 0)
+================================================================
+Confirmed live against DTC workspace "KTB", document "XTS Master"
+(get_view_definition on all views, 2026-08-28).
+
+Phase 0: Pull DTC XTS Master sheets → Delta (dtc_xts_master_ktb), then upsert
+into BeProduct Directory staging (beproduct_directory), matched by NAME +
+PARTNER_TYPE together. Logically precedes Style/Material/Costing sync.
+
+SCOPE (clarified 2026-08-28): only SUPPLIER and FACTORY are in scope for now.
+"XTS Mill Master" is intentionally excluded — its "Mill" view has no code
+column, and live checking found it currently holds no real Mill company data
+in UAT (100% brand-config rows, Type="Fabric Brand"). Re-adding it later only
+requires extending sync.xts_master.XTS_REQUESTS/FIELD_MAP.
+
+Match key
+---------
+BeProduct's Directory record is keyed by `name` + `partner_type` TOGETHER —
+NOT `id`/`directory_id` (despite those columns existing), and NOT `name`
+alone (confirmed by the project team). The same name is expected and fine
+across DIFFERENT partner types — e.g. the same physical entity can
+legitimately exist as both a SUPPLIER record and a FACTORY record. The
+upsert MERGE matches `ON tgt.name = src.name AND tgt.partner_type = src.partner_type`.
+
+Requests / partner types (exact requestReference match only — the
+"(BACKUP)"-named siblings that also exist in this document are excluded,
+as is "XTS Mill Master" per the scope decision above)
+------------------------------------------------------------------------
+  "XTS Supplier Master" -> partner_type SUPPLIER  (DTC view "Supplier")
+  "XTS Factory Master"  -> partner_type FACTORY   (DTC view "Factory")
+
+Partner type is derived from WHICH REQUEST/view a row was read from — NEVER
+from a literal "Type" cell (see below, "Type" means something else here).
+
+CRITICAL — this is not a rich vendor-master sheet
+--------------------------------------------------
+None of address/state/zip/city/phone/fax/website/notes exist ANYWHERE in this
+document (Supplier or Factory view) — always NULL for every XTS-sourced row
+until DTC adds them.
+
+"Type" column pollution (Supplier only — Factory has no Type column):
+the Supplier sheet mixes real company rows with BRAND-level access-sharing
+config rows, distinguished ONLY by "Type":
+  Type="Brand"    (Supplier sheet) -> EXCLUDED (not a real company)
+  Type="Supplier" (Supplier sheet) -> KEPT (real supplier company)
+As of 2026-08-28 in UAT: Supplier sheet is 34 real / 8 brand rows (42 total).
+This filter lives in `dtc/python/sync/xts_master.py`
+(`EXCLUDE_TYPE_VALUES` / `is_brand_row()`), unit-tested in
+`dtc/tests/test_xts_master.py`.
+
+Field mapping (DTC column -> beproduct_directory column)
+----------------------------------------------------------
+partner_type | DTC column          | beproduct_directory column | Notes
+─────────────┼─────────────────────┼─────────────────────────────┼──────────────────────────────
+SUPPLIER     | Supplier Name       | name                        | match key (with partner_type)
+SUPPLIER     | Supplier Code       | directory_id                |
+SUPPLIER     | (none)              | country                     | always NULL — no such field
+FACTORY      | Factory Name        | name                        | match key (with partner_type)
+FACTORY      | Factory Code        | directory_id                | NOT "Customer Factory ID" (unmapped, in data_json)
+FACTORY      | Production Country  | country                     |
+ALL          | (none)              | address/state/zip/city/     | always NULL — none of these fields
+             |                     | phone/fax/website/notes     | exist anywhere in this document
+
+Name collisions across partner types are NOT a problem
+---------------------------------------------------------------------------
+19/34 real Supplier rows (as of 2026-08-28) share the exact same `name` AND
+code as a Factory row (e.g. "SUPPLIER ASPGAR" / code "ASPGAR" in both
+sheets) — the same entity likely acts as both supplier and factory. Since
+the Directory key is (name, partner_type) together, this is simply TWO
+separate, valid Directory records (one SUPPLIER, one FACTORY) — nothing to
+resolve. A TRUE collision only happens if the SAME (name, partner_type) pair
+repeats (e.g. a duplicate row within one sheet); `sync.xts_master.dedupe_by_key`
+handles that case deterministically (prefer a row with a real code, then
+row_index) and reports every such collision so nothing is silently dropped.
+
+Downstream push (unchanged — see docs/PHASE5_WORKFLOW.md)
+-----------------------------------------------------------
+`p5utl_beproduct_master_data_sync.py` mode=PUSH_DIRECTORY pushes any row
+where `id IS NULL OR extracted_at IS NULL OR modified_at > extracted_at`:
+  id IS NULL   -> BeProduct Directory/Add   (new company)
+  id = <uuid>  -> BeProduct Directory/Update (existing company; partnerType
+                  excluded from the payload — immutable after creation)
+This part of the pipeline needed no changes — verified correct as-is.

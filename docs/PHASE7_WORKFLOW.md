@@ -1,7 +1,8 @@
 # Phase 7: BeProduct Sample-App Submit History → DTC
 
 **Status:** Implemented ✅ (pure-Python formatter unit-tested, all 6 DTC columns
-confirmed in the 198-field WIP_ITS_USE view, 2026-07-07)
+confirmed in the 204-field WIP_ITS_USE view, 2026-08-28 — Fit/PP destinations
+changed from the original 2026-07-07 mapping after a DTC WIP doc restructure)
 
 Phase 7 enriches the Phase 1 DTC push with the **complete sample-app submit
 history** for each style. It follows the same shape as Phase 3 (image upload):
@@ -24,21 +25,30 @@ BeProduct stores, per style, up to **6 sample applications** of type
 | Proto Sample | `proto` | `Proto Sample - Sample Status` |
 | PreLine Sample | `preline` | `Pre-line Sample - Status` *(lowercase 'l', dash)* |
 | SMS Sample | `sms` | `SMS - Sample Status` |
-| Fit Sample | `fit` | `1st Fit Sample Approval Status` |
-| PP Sample | `pp` | `2nd Fit Sample Approval Status` |
+| Fit Sample | `fit` | `2nd Fit Sample Approval Status` *(changed 2026-08-28, was `1st Fit Sample Approval Status`)* |
+| PP Sample | `pp` | `PP Sample Submission Approval Status` *(changed 2026-08-28, was `2nd Fit Sample Approval Status`; requested name `PP Sample Approval Status` does not exist live — this is the only plausible match, confirm with the project team)* |
 | TOP Sample | `top` | `TOP Sample Approval Status` |
 
 For each app, Phase 7 reads the **complete list of submit rounds** for that style
-and writes a single DTC cell containing a compact JSON array — one triple per
-submit taken from that submit's **first size**:
+and writes a single DTC cell containing **one quoted, comma-separated line per
+submit** (confirmed 2026-08-28), taken from that submit's **first size**:
 
 ```
-[submit_name, submitStatus, submitStatusDate]
+"submit_name","submitStatus","submitStatusDate"
 ```
 
-Example (Boy Short Sleeve Tee — PP Sample):
-```json
-[["1ST Submit","Approved with Corrections","2026-05-11T11:39:48.528Z"]]
+Multiple submits are stacked on separate lines (newline-separated) — this is a
+plain quoted string, **not** a JSON array (no `[` `]` brackets at all).
+
+Example (Boy Short Sleeve Tee — PP Sample, one submit):
+```
+"1ST Submit","Approved with Corrections","2026-05-11T11:39:48.528Z"
+```
+
+Example (two submits — one line each):
+```
+"1ST Submit","Requested","2026-05-14T00:00:00Z"
+"2ND Submit","Approved","2026-06-20T00:00:00Z"
 ```
 
 Empty history (no submits yet) → `""` (value skipped by `phase1.norm`, not pushed).
@@ -96,18 +106,27 @@ from sync.samples import format_sample_field, SAMPLE_SUBMIT_FIELDS
 raw = '[{"submit_id":"s1","submit_name":"1ST Submit","size":"S",' \
       '"submit_status":"Approved","submit_status_date":"2026-05-01T00:00:00Z",...}]'
 
-# Output: compact JSON, first size per submit, ordered by submit
+# Output: one quoted comma-separated line per submit, first size per submit
 result = format_sample_field(raw)
-# → '[["1ST Submit","Approved","2026-05-01T00:00:00Z"]]'
+# → '"1ST Submit","Approved","2026-05-01T00:00:00Z"'
 ```
 
 **Rules:**
 - Records are grouped by `submit_id` (falls back to `submit_name` if absent).
 - Only the **first size** of each submit is used (first record per submit_id in
   the flattened array).
-- Multiple submit rounds → multiple triples in the array (order preserved).
-- Compact separators (`","` and `":"`) so `phase1.norm()` is stable — no
-  incidental whitespace that would cause false diff re-pushes.
+- Multiple submit rounds → **one line per submit**, joined with `\n` (order
+  preserved) — confirmed 2026-08-28. This is NOT a JSON array (no `[` `]`
+  brackets at all; superseded a same-day flat-array iteration, itself a fix of
+  the original nested array-of-arrays that always showed a doubled `[[`/`]]`).
+- Every value is always double-quoted; a missing status/date renders as empty
+  quotes (`""`), never the literal text `None`. An embedded double-quote is
+  escaped by doubling it (CSV-style: `"` → `""`).
+- **Critical**: `phase1.build_target_payload()` pushes `phase1.norm(value)`
+  verbatim as the DTC payload value — `norm()` was updated 2026-08-28 to
+  preserve embedded newlines (it only collapses non-newline whitespace), so
+  the multi-line structure actually reaches DTC as separate lines instead of
+  being flattened into one space-joined line.
 
 ---
 
@@ -120,8 +139,8 @@ SAMPLE_SUBMIT_FIELDS = {
     "proto_sample_json":   {"staging": "proto_sample_status",   "dtc": "Proto Sample - Sample Status"},
     "preline_sample_json": {"staging": "preline_sample_status", "dtc": "Pre-line Sample - Status"},
     "sms_sample_json":     {"staging": "sms_sample_status",     "dtc": "SMS - Sample Status"},
-    "fit_sample_json":     {"staging": "fit_sample_status",     "dtc": "1st Fit Sample Approval Status"},
-    "pp_sample_json":      {"staging": "pp_sample_status",      "dtc": "2nd Fit Sample Approval Status"},
+    "fit_sample_json":     {"staging": "fit_sample_status",     "dtc": "2nd Fit Sample Approval Status"},
+    "pp_sample_json":      {"staging": "pp_sample_status",      "dtc": "PP Sample Submission Approval Status"},
     "top_sample_json":     {"staging": "top_sample_status",     "dtc": "TOP Sample Approval Status"},
 }
 ```
@@ -157,11 +176,21 @@ for _raw_col, _spec in SAMPLE_SUBMIT_FIELDS.items():
 
 ## DTC column notes
 
-All 6 DTC columns confirmed present in the 198-field `WIP_ITS_USE` view
-(2026-07-07). Important naming gotcha:
+All 6 DTC columns confirmed present in the 204-field `WIP_ITS_USE` view
+(2026-08-28). Important naming gotchas:
 
 - `"Pre-line Sample - Status"` uses **lowercase `l`** in "line" and a **dash**
   separator. Not "Pre-Line" or "Pre-Line Sample Submission Status".
+- **Fit/PP destinations changed 2026-08-28** after a DTC WIP doc restructure
+  (198 → 204 fields): Fit now maps to `"2nd Fit Sample Approval Status"`
+  (was `"1st Fit Sample Approval Status"` — that column still exists in the
+  view but is no longer the Phase 7 target), and PP now maps to
+  `"PP Sample Submission Approval Status"` (was `"2nd Fit Sample Approval
+  Status"`). The requested PP name was `"PP Sample Approval Status"` — no
+  field with that exact name exists; `"PP Sample Submission Approval
+  Status"` was the only plausible live match (confirmed via
+  `get_view_definition`) and has since been **confirmed correct by the
+  project team** (2026-08-28).
 
 Phase 1 push treats these like any other updatable field — they are overwritten
 on every push (not default-fill). An empty string (`""`) is treated as `None`

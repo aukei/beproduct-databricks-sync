@@ -8,6 +8,7 @@ This document is the single reference for **components**, **data flow**, and the
 **data model on Azure Databricks (ADB)**. It merges what used to live in
 `BEPRODUCT_TO_DTC_GUIDE.md`, `dtc/README.md`, and `dtc/DATA_MODEL.md`.
 
+- Phase 0 (DTC XTS Master → BeProduct Directory): `PHASE0_WORKFLOW.md`
 - Forward field sync (BeProduct → DTC): `PHASE1_WORKFLOW.md`
 - Reverse field sync (DTC → BeProduct): `PHASE2_WORKFLOW.md`
 - Image sync (BeProduct → DTC): `PHASE3_WORKFLOW.md`
@@ -15,6 +16,7 @@ This document is the single reference for **components**, **data flow**, and the
 - Style field-mapping SSOT: `beproduct_style_interested_fields.txt`
 - Material field-mapping SSOT: `beproduct_material_interested_fields.txt`
 - Costing chart field-mapping SSOT: `costing_interested_fields.txt`
+- Directory/XTS field-mapping SSOT: `beproduct_directory_xts_interested_fields.txt`
 - Phase 5 (Master Data): `PHASE5_WORKFLOW.md`
 - Phase 7 (Sample history): `PHASE7_WORKFLOW.md`
 - Pipeline diagram (Mermaid source, render locally): `DIAGRAM.md`
@@ -212,7 +214,7 @@ Workspace ("KTB")
 | `ktb_styles` | 1 row / style | `id`, `bp_style_number` (header_number; was `lf_style_number`), `lf_style_number` (new separate field), `brand` (brand_hk), `brands` (brands_multi), `gender`, `season`, `year`, `product_status` (excl. Finalized at sync time), `description`, `product_category`, `product_sub_category`, `division`, `garment_finish`, `techpack_stage`, `customer_style_number`, `lot_code`, `parent_vendor`, `factory`; `colorways_json`; `front_image_url`; **6 sample-app columns** `{proto,preline,sms,fit,pp,top}_sample_json` (JSON arrays of submit×size records; transform formats into DTC status strings via `sync.samples`); `data_json`; timestamps |
 | `beproduct_style_app_registry` | 1 row / (folder × app) | Cache of folder-constant application IDs (`00_init_style_app_registry`). `folder_name`, `app_id`, `app_title`, `app_type`, `is_sample`, `column_prefix`, `registered_at`. Sync reads `is_sample=true` to know which apps to `app_get`. |
 | `beproduct_master_*` | 1 row / valid choice | 11 tables (brands, teams, seasons, years, product_status, product_category, product_sub_category, division, techpack_stage, parent_vendor, factory); columns `field_id`, `value`, `code`, `active`, `data_json`, `synced_at`. `garment_finish` omitted — free-text field, no choices. Used to validate dropdown/multiselect values before push-back. Written (and optionally pushed back to BeProduct) by `p5utl_beproduct_master_data_sync`. |
-| `beproduct_directory` | 1 row / company | Directory of vendors, factories, and partners. Columns: `id` (BeProduct UUID, null for new records), `directory_id` (human-readable code), `name`, `partner_type`, `address`, `country`, `state`, `zip`, `city`, `phone`, `fax`, `website`, `notes`, `active`, `data_json`, `synced_at`. `id = NULL` rows are Added; `id = <uuid>` rows are Updated on next push. |
+| `beproduct_directory` | 1 row / company | Directory of vendors, factories, and partners. Columns: `id` (BeProduct UUID, null for new records), `directory_id` (human-readable code), `name`, `partner_type`, `address`, `country`, `state`, `zip`, `city`, `phone`, `fax`, `website`, `notes`, `active`, `data_json`, `synced_at`. `id = NULL` rows are Added; `id = <uuid>` rows are Updated on next push. Matched by **`name`** (Phase 0 upsert), not `directory_id`. |
 | `beproduct_directory_contacts` | 1 row / contact | Contacts within a directory company. Columns: `directory_id` (parent company UUID), `contact_id` (null = new), `email`, `first_name`, `last_name`, `title`, `mobile_phone`, `work_phone`, `role`, `active`, `data_json`, `synced_at`. |
 
 Details + BeProduct API/SDK usage: `BEPRODUCT_GUIDE.md`.
@@ -237,6 +239,8 @@ Details + BeProduct API/SDK usage: `BEPRODUCT_GUIDE.md`.
 | `dtc_fabric_registry` | 1 row / FABRIC request | Phase 8a registry, same shape as `dtc_request_registry`. |
 | `dtc_lineplan_<customer>` | 1 row / LinePlan row | Phase 9a. `lineplan_ref`, `projected_volume`, `target_ldp`, `target_fob`, `internal_sourced` (Supplier Type), `gender`, `category`, `product_line`, `region`, `season_launched`, `data_json`. |
 | `dtc_lineplan_registry` | 1 row / LinePlan request | Phase 9a registry. |
+| `dtc_xts_master_ktb` | 1 row / kept XTS sheet row | Phase 0. `partner_type` (SUPPLIER/FACTORY/MILL), `name`, `directory_id`, `country`, always-NULL optional cols (no address/phone/etc. exist in XTS Master), `request_id`, `request_reference`, `view_name`, `data_json`. Brand-config rows (`Type="Brand"`/`"Fabric Brand"`) already filtered out at pull time. |
+| `dtc_xts_master_registry` | 1 row / XTS Master request | Phase 0 registry: `partner_type`, `request_id`, `request_reference`, `sheet_id`, `view_id`, `view_name`, `row_count`, `last_extracted`, `msgs`. |
 | `costing_chart` | 1 row / (style × color × vendor slot) | Phase 9a output. Key: `[customer, bp_style_no, color_name, lineplan_ref, factory_slot, supplier, factory]`. Includes HTS/Duty fields per slot (null = Phase 9b NT Orbit pending). Full overwrite each run. |
 
 - **DTC operation keys:** `row_id` → UPDATE; `row_index` → INSERT/DELETE.

@@ -8,6 +8,16 @@ on prior **verified** discoveries instead of re-deriving them.
 Bi-directional sync between **BeProduct** (style PLM) and **DTC** ("Data Collab"
 sheets), staged through **Databricks/Delta**.
 
+- **Phase 0 — DTC XTS Master → BeProduct Directory**: logically precedes Style/
+  Material/Costing sync. Pulls DTC workspace "KTB", document "XTS Master"
+  (requests "XTS Supplier Master"/"XTS Factory Master" — "XTS Mill Master" is
+  intentionally OUT OF SCOPE for now, see decision below) into
+  `lft.beproduct.dtc_xts_master_ktb` (`dtc/notebooks/p0_pull_xts_master_to_delta.py`),
+  then upserts into `lft.beproduct.beproduct_directory`
+  (`beproduct/p0_xts_master_to_directory_upsert.py`), matched by **`name` +
+  `partner_type` together** (BeProduct's real Directory key — NOT `id`/
+  `directory_id`, and NOT `name` alone). Admin-triggered, same as Phase 5 —
+  not wired into the scheduled DAG.
 - **Phase 1 — BeProduct → DTC** (`docs/PHASE1_WORKFLOW.md`): push BeProduct-owned
   style fields into the matching DTC request (upsert); create + share missing
   in-scope requests.
@@ -17,7 +27,17 @@ sheets), staged through **Databricks/Delta**.
   image into the DTC "Style Image" cell (binary, separate step).
 - **Phase 7 — BeProduct → DTC sample history**: push BeProduct sample-app submit
   history (all 6 apps: Proto/PreLine/SMS/Fit/PP/TOP) into the matching DTC status
-  columns as JSON lists of `[submit_name, submitStatus, submitStatusDate]`.
+  columns as one quoted, comma-separated line PER submit: `"submit_name",
+  "submitStatus","submitStatusDate"` — NOT a JSON array (no `[` `]` at all),
+  multiple submits stacked on separate newline-separated lines (confirmed
+  2026-08-28; `phase1.norm()` preserves embedded newlines so the multi-line
+  structure survives to the actual DTC push).
+  Proto → "Proto Sample - Sample Status", PreLine → "Pre-line Sample - Status",
+  SMS → "SMS - Sample Status", Fit → "2nd Fit Sample Approval Status",
+  PP → "PP Sample Submission Approval Status", TOP → "TOP Sample Approval Status".
+  All 6 DTC columns confirmed in the 204-field view
+  (2026-08-28; Fit/PP destinations changed from the original 2026-07-07 mapping
+  after a DTC WIP doc restructure — see Verified discoveries log).
 - **Phase 8a — DTC FABRIC → Delta**: pull `"KTB FABRIC"` document sheets (Adoption=Y
   rows only) into `lft.beproduct.dtc_fabric_ktb` + `dtc_fabric_registry`. Runs as an
   independent parallel task in the DAG (`pull_fabric_dtc`, gated by `run_phase8a`).
@@ -65,13 +85,25 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
   BP Style# (new match key, pending DTC col), LF Style# (optional), Legacy Code (optional);
   Supplier (default-fill "Supplier" when blank; pending DTC col).
   **Filter**: styles with Product Status = "Finalized" are excluded from staging/DTC sync.
-- **BeProduct → DTC (Phase 7, sample submit history)**: All 6 apps now mapped.
+- **BeProduct → DTC (Phase 7, sample submit history)**: All 6 apps mapped.
   Proto → "Proto Sample - Sample Status", PreLine → "Pre-line Sample - Status",
-  SMS → "SMS - Sample Status", Fit → "1st Fit Sample Approval Status",
-  PP → "2nd Fit Sample Approval Status", TOP → "TOP Sample Approval Status".
-  Each value is a JSON list of `[submit_name, submitStatus, submitStatusDate]`
-  (first size per submit). All 6 DTC columns confirmed in the 198-field view
-  (2026-07-07). Note: "Pre-line Sample - Status" uses lowercase 'l' and dash.
+  SMS → "SMS - Sample Status", Fit → "2nd Fit Sample Approval Status",
+  PP → "PP Sample Submission Approval Status", TOP → "TOP Sample Approval Status".
+  Each value is one quoted, comma-separated line PER submit: `"submit_name",
+  "submitStatus","submitStatusDate"` — NOT a JSON array (no `[` `]` at all),
+  multiple submits stacked on separate newline-separated lines (confirmed
+  2026-08-28; `phase1.norm()` preserves embedded newlines so the multi-line
+  structure survives to the actual DTC push — superseded a same-day flat-JSON-
+  array iteration, itself a fix of the original nested array-of-arrays that
+  always showed doubled `[[`/`]]` for the common single-submit case). All 6
+  DTC columns confirmed in the 204-field view (2026-08-28; Fit/PP destinations
+  changed from the original 2026-07-07 mapping after a DTC WIP doc restructure
+  — was Fit → "1st Fit Sample Approval Status", PP → "2nd Fit Sample Approval
+  Status"). Note: "Pre-line Sample - Status" uses lowercase 'l' and dash.
+  Requested PP destination "PP Sample Approval Status" does not exist live —
+  "PP Sample Submission Approval Status" was the only plausible match
+  (confirmed via `get_view_definition`) and has since been **confirmed
+  correct by the project team** (2026-08-28).
 - **DTC → BeProduct**: Main Vendor (Sampling) (`parent_vendor`), Main Factory
   (Sampling) (`factory`) [header]; Lot# (`drawing_number_walmart`) [colorway];
   Main Factory Customer ID (no target → skipped).
@@ -118,6 +150,64 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
 - Directory pull throughput: ~2 records/sec via `directory_list()`, ~30 min for 3852
   records. Pull is `PULL_ONLY` mode only. `PUSH_DIRECTORY` skips the pull and uses
   change detection (`modified_at > extracted_at`) to push only pending rows.
+
+**DTC "XTS Master" document (Phase 0, live-validated 2026-08-28):**
+- Workspace "KTB", document "XTS Master" has exactly the 3 requested requests
+  (`"XTS Supplier Master"`, `"XTS Factory Master"`, `"XTS Mill Master"`), plus 3
+  `"(BACKUP)"`/differently-named siblings (`"XTS (BACKUP) Supplier Master"`,
+  `"XTS (BACKUP) Factory Master"`, `"KTB (BACKUP) Mill Master"`) — all
+  `requestIsActive='Y'`. **Scope decision (2026-08-28): only Supplier and
+  Factory are pulled** — `"XTS Mill Master"` is intentionally out of scope for
+  now (see next bullet for why), and the `(BACKUP)` siblings are deliberately
+  excluded regardless. The Phase 0 pull matches **exact** `requestReference`
+  only (`sync.xts_master.XTS_REQUESTS`).
+- All 6 requests share the SAME 4 views (`Supplier`, `Mill`, `Factory`,
+  `WIP_ITS_USE` — identical view IDs across all 6 requests in the document,
+  confirmed via `get_views`), even though only `Supplier`/`Factory` are used.
+  The `WIP_ITS_USE` view here (id `6a3907f6df772fd797ee5b7c`) is the same one
+  already flagged elsewhere in this doc as belonging to a *different*
+  document than KTB WIP — do not use it for anything; Phase 0 never touches
+  it. The `Mill` view (id `6a3b351185ceba6dca6712e5`) has NO code column at
+  all, and in UAT its 8 rows are 100% brand-config rows (`Type="Fabric
+  Brand"`, same 8 brand names as Supplier's brand rows below) — there is
+  currently NO real Mill company data in this environment, which is why it
+  was excluded from scope rather than pulled empty.
+- **The document is NOT a rich vendor-master sheet.** `GET /v1/views/{id}`
+  (authoritative field list, not sample rows) confirms the in-scope views:
+  - `"Supplier"` view: `Supplier Name`, `Supplier Code`, `Customer Vendor ID`,
+    `Type`, plus 9 request-sharing/access-config columns (`Brand Views`,
+    `Group Users Name`, `Agent Alert Recipient (...)`, etc.) — NO
+    address/state/zip/city/phone/fax/website/notes at all.
+  - `"Factory"` view: only 4 fields — `Factory Name`, `Factory Code`,
+    `Customer Factory ID`, `Production Country`. No `Type` column, no
+    sharing/config columns, no address/phone/etc. either.
+  - None of address/state/zip/city/phone/fax/website/notes exist ANYWHERE in
+    either in-scope view — they are always `NULL` for every XTS-sourced
+    `beproduct_directory` row until DTC adds them.
+- **CRITICAL data-quality finding**: the `Supplier` sheet is polluted with
+  BRAND-level access-sharing config rows interleaved with real company rows,
+  distinguishable ONLY by the `Type` column: `Type="Brand"` (8/42 rows in
+  UAT, e.g. "Wrangler", "Blue Bell", "Slam Jam" — brand names, not companies,
+  always blank code) vs `Type="Supplier"` for real rows (34/42 rows, each
+  with a real code). `sync.xts_master.EXCLUDE_TYPE_VALUES` / `is_brand_row()`
+  filters these out. Partner type is derived from WHICH REQUEST/view a row
+  came from, never from the `Type` cell's literal value.
+- **Directory match key correction (2026-08-28, same day, supersedes the
+  initial hypothesis below)**: BeProduct's Directory record is keyed by
+  **`name` + `partner_type` TOGETHER**, not `name` alone as first assumed.
+  This means the SAME name legitimately recurring under a DIFFERENT partner
+  type (see next bullet) is simply two separate, valid Directory records —
+  NOT a collision requiring a pick. `sync.xts_master.find_duplicate_keys` /
+  `dedupe_by_key` operate on the `(name, partner_type)` pair; a true
+  collision only exists if that exact pair repeats (e.g. a duplicate row
+  within one sheet).
+- 19 of the 34 real Supplier rows share the exact same `name` AND code as a
+  Factory row (e.g. `"SUPPLIER ASPGAR"` / code `ASPGAR` appears in both
+  sheets) — the same physical entity apparently acts as both a sourcing
+  supplier and a production factory. Under the corrected (name, partner_type)
+  key model this is expected and unproblematic (both records are created);
+  it was initially (incorrectly) treated as a same-name collision needing a
+  SUPPLIER-wins tie-break before the key model was clarified the same day.
 
 **DTC API (validated 2026-06-17):**
 - Sheet upsert: `PATCH /v1/sheets/{sheetId}/views/{viewId}` body
@@ -261,8 +351,35 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
 - DTC push of sample status is **wired for all 6 apps (Phase 7)**: Proto/PreLine/SMS/Fit/PP/TOP
   → DTC status columns via `sync.samples.format_sample_field` (transform UDF) +
   `phase1.FIELD_MAPPING`. Each DTC cell gets a JSON list of `[submit_name,
-  submitStatus, submitStatusDate]` (first size per submit). All 6 DTC columns confirmed in
-  the 198-field view (2026-07-07). Note: "Pre-line Sample - Status" uses lowercase 'l' and dash.
+  submitStatus, submitStatusDate]` (first size per submit). All 6 DTC columns confirmed in the
+  198-field view (2026-07-07). Note: "Pre-line Sample - Status" uses lowercase 'l' and dash.
+  **Superseded 2026-08-28**: the DTC WIP doc was restructured (198 → 204 fields) and Fit/PP
+  now target different columns — see the "Current direction partition" section above for the
+  current mapping (Fit → "2nd Fit Sample Approval Status", PP → "PP Sample Submission Approval
+  Status") and `sync/samples.py`'s module docstring for full detail.
+- **Phase 7 DTC WIP restructure (live-validated 2026-08-28)**: `get_view_definition` on the
+  KTB WIP_ITS_USE view (id `69f04983501f3d9cf4fc379c`) now returns **204 fields** (up from
+  198 on 2026-07-03). Both `"1st Fit Sample Approval Status"` and `"2nd Fit Sample Approval
+  Status"` still exist side-by-side; only WHICH ONE Phase 7 pushes Fit to changed (now `2nd`,
+  was `1st`). The old PP target `"2nd Fit Sample Approval Status"` was reassigned away from PP
+  (now used by Fit) — PP's new field is `"PP Sample Submission Approval Status"` (confirmed
+  present). The literally-requested name `"PP Sample Approval Status"` does **not** exist in
+  the view at all — flagged, not silently guessed past this one plausible match; **confirmed
+  correct by the project team** the same day.
+- **`format_sample_field()` output format changed 2026-08-28 (two iterations same day)**:
+  first from a nested array-of-arrays (`[["name","status","date"]]` — always doubled
+  `[[`/`]]` for the very common single-submit case) to a single flat JSON array
+  (`["name","status","date", ...]`); then per follow-up request, to a plain
+  **non-JSON** format: one quoted, comma-separated line PER submit
+  (`"name","status","date"`), multiple submits stacked on separate `\n`-separated
+  lines — no `[` `]` brackets at all in either single- or multi-submit cases.
+  **Critical companion fix**: `phase1.build_target_payload()` stores `phase1.norm(value)`
+  as the actual pushed payload value (not the raw pre-norm value), and `norm()`'s
+  original regex (`\s+` → single space) would have silently collapsed the new format's
+  intentional `\n` separators into a single space before the value ever reached DTC —
+  found and fixed the same day by changing the regex to `[^\S\n]+` (collapses all
+  whitespace EXCEPT newlines). No other current field legitimately contains embedded
+  newlines, so this is a no-op for every other column.
 
 **DTC FABRIC document (KTB, validated 2026-07-16):**
 - Document "KTB FABRIC", Workspace "KTB". **39 active requests** in two patterns:
@@ -497,6 +614,8 @@ python3 dtc/tests/test_phase1.py        # Phase 1 core unit tests
 python3 dtc/tests/test_phase2.py        # Phase 2 core unit tests
 python3 dtc/tests/test_phase3.py        # Phase 3 image-upload core unit tests
 python3 dtc/tests/test_samples.py       # Phase 7 sample formatter unit tests
+python3 dtc/tests/test_registry.py      # request-registry pure-function unit tests
+python3 dtc/tests/test_xts_master.py    # Phase 0 XTS Master pure-function unit tests
 python3 dtc/tests/test_phase1_live.py   # live reversible DTC write test (needs UAT)
 python scripts/check_dtc_view.py        # DTC WIP_ITS_USE column readiness check
 python scripts/upload_notebooks.py --dry-run   # preview Databricks notebook upload

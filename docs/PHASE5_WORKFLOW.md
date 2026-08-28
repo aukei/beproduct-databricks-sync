@@ -115,17 +115,27 @@ After a successful push: `extracted_at ← modified_at ← now()` (row is "in sy
 ### External-upsert MERGE template
 
 The notebook (Cell 5b) contains a ready-to-use MERGE SQL template for
-admin-supplied data:
+admin-supplied data. **Match key is `name`** (clarified 2026-08-28 — BeProduct
+treats `name` as the Directory's real key, not `id`/`directory_id`, despite
+those columns existing), and every field uses `COALESCE(src.field, tgt.field)`
+so a source that only supplies SOME fields never NULLs out real data already
+in `beproduct_directory`:
 
 ```sql
 MERGE INTO lft.beproduct.beproduct_directory AS tgt
 USING (<your_source>) AS src
-ON tgt.directory_id = src.directory_id
-WHEN MATCHED AND (<fields changed>)
-  THEN UPDATE SET …, tgt.modified_at = current_timestamp()   -- flags for push
+ON tgt.name = src.name
+WHEN MATCHED AND (<COALESCE(src.field, tgt.field) IS DISTINCT FROM tgt.field>)
+  THEN UPDATE SET field = COALESCE(src.field, tgt.field), …,
+       tgt.modified_at = current_timestamp()   -- flags for push
 WHEN NOT MATCHED BY TARGET
   THEN INSERT (id=NULL, …, modified_at=current_timestamp())  -- NULL id → Add on push
 ```
+
+For the concrete, active (non-template) implementation of this workflow
+sourced from DTC's "XTS Master" document, see **Phase 0**
+(`docs/PHASE0_WORKFLOW.md`) — it runs BEFORE this notebook's `PUSH_DIRECTORY`
+mode, populating exactly the pending rows this change-detection then pushes.
 
 ---
 

@@ -54,12 +54,12 @@ here — they flow the other way in Phase 2. Authoritative mapping:
 | LF Style#         | header `lf_style_number`           | Phase 6 optional (new separate field) |
 | Legacy Code       | header `customer_style_number`     | Phase 6 optional; was DTC→BP before |
 | Supplier          | *(constant "Supplier")*            | Phase 6 default-fill; only written when DTC cell blank |
-| Proto Sample - Sample Status  | sample app `proto_sample`   | Phase 7; JSON list |
-| Pre-line Sample - Status      | sample app `preline_sample` | Phase 7; JSON list |
-| SMS - Sample Status           | sample app `sms_sample`     | Phase 7; JSON list |
-| 1st Fit Sample Approval Status | sample app `fit_sample`    | Phase 7; JSON list |
-| 2nd Fit Sample Approval Status | sample app `pp_sample`     | Phase 7; JSON list |
-| TOP Sample Approval Status    | sample app `top_sample`     | Phase 7; JSON list |
+| Proto Sample - Sample Status  | sample app `proto_sample`   | Phase 7; one quoted line per submit (not JSON) |
+| Pre-line Sample - Status      | sample app `preline_sample` | Phase 7; one quoted line per submit (not JSON) |
+| SMS - Sample Status           | sample app `sms_sample`     | Phase 7; one quoted line per submit (not JSON) |
+| 2nd Fit Sample Approval Status | sample app `fit_sample`    | Phase 7; changed 2026-08-28, was "1st Fit Sample Approval Status" |
+| PP Sample Submission Approval Status | sample app `pp_sample` | Phase 7; changed 2026-08-28, was "2nd Fit Sample Approval Status"; confirmed by project team |
+| TOP Sample Approval Status    | sample app `top_sample`     | Phase 7; one quoted line per submit (not JSON) |
 
 ---
 

@@ -470,11 +470,13 @@ try:
         col("front_image_url"),
 
         # Phase 7: sample-app submit-history status strings (BeProduct → DTC, all 6)
+        # (Fit/PP destinations changed 2026-08-28 after a DTC WIP doc restructure —
+        # see sync/samples.py module docstring)
         col("proto_sample_status"),        # -> "Proto Sample - Sample Status"
         col("preline_sample_status"),      # -> "Pre-line Sample - Status"
         col("sms_sample_status"),          # -> "SMS - Sample Status"
-        col("fit_sample_status"),          # -> "1st Fit Sample Approval Status"
-        col("pp_sample_status"),           # -> "2nd Fit Sample Approval Status"
+        col("fit_sample_status"),          # -> "2nd Fit Sample Approval Status" (was "1st Fit ...")
+        col("pp_sample_status"),           # -> "PP Sample Submission Approval Status" (was "2nd Fit ...")
         col("top_sample_status"),          # -> "TOP Sample Approval Status"
 
         # Default-fill columns: staged as constants; Phase 1 only writes when DTC cell is blank

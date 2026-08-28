@@ -44,6 +44,12 @@ check(norm("  WMG-J876-263   001 ") == "WMG-J876-263 001", "collapses/trims whit
 check(norm("N/A") is None and norm("") is None and norm(None) is None, "null sentinels -> None")
 check(norm("Body ") == "Body", "trailing space trimmed")
 check(norm("WMG-J876-263-001") != norm("WMG-J876-263 001"), "dash vs space NOT merged")
+check(norm('"A","B","C"\n"D","E","F"') == '"A","B","C"\n"D","E","F"',
+      "embedded newline is PRESERVED, not collapsed to a space - critical for "
+      "sync.samples.format_sample_field's multi-submit output to actually reach "
+      "DTC as separate lines (build_target_payload pushes norm(value) verbatim)")
+check(norm("A   \t  B\nC") == "A B\nC",
+      "non-newline whitespace (spaces/tabs) around a newline still collapses normally")
 
 print("\n[2] parse_request_reference() / is_in_scope()")
 p = parse_request_reference("KTB FW26 Wrangler Western")

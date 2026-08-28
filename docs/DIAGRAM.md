@@ -134,8 +134,8 @@ flowchart TB
 | `proto_sample_status` | `Proto Sample - Sample Status` | 7 |
 | `preline_sample_status` | `Pre-line Sample - Status` | 7 |
 | `sms_sample_status` | `SMS - Sample Status` | 7 |
-| `fit_sample_status` | `1st Fit Sample Approval Status` | 7 |
-| `pp_sample_status` | `2nd Fit Sample Approval Status` | 7 |
+| `fit_sample_status` | `2nd Fit Sample Approval Status` (was `1st Fit ...`) | 7 |
+| `pp_sample_status` | `PP Sample Submission Approval Status` (was `2nd Fit ...`) | 7 |
 | `top_sample_status` | `TOP Sample Approval Status` | 7 |
 | `front_image_url` | `Style Image` (Phase 3, binary) | 3 |
 
