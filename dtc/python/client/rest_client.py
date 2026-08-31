@@ -4,7 +4,7 @@ Generic REST client wrapper for API calls with authentication, retry, and error 
 
 import logging
 import time
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Callable
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -22,6 +22,7 @@ class RestClient:
         timeout: int = 30,
         max_retries: int = 3,
         backoff_factor: float = 0.5,
+        bearer_token_provider: Optional[Callable[[], str]] = None,
     ):
         """
         Initialize REST client.
@@ -32,10 +33,20 @@ class RestClient:
             timeout: Request timeout in seconds
             max_retries: Number of retries for failed requests
             backoff_factor: Backoff factor for exponential retry
+            bearer_token_provider: Optional zero-arg callable returning a fresh
+                Bearer token (e.g. ``EntraTokenProvider.get_access_token``,
+                see ``client.entra_auth``). When set, every request sends
+                ``Authorization: Bearer <token>`` instead of (or in addition
+                to) the static ``x-api-key`` header. The callable is invoked
+                on EVERY request so a short-lived OAuth2 access token can be
+                transparently refreshed by the caller (Phase 9b / NT Orbit
+                Duty Tools API, which uses delegated Microsoft Entra ID auth
+                rather than a static API key).
         """
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.timeout = timeout
+        self.bearer_token_provider = bearer_token_provider
 
         # Create session with retry strategy
         self.session = requests.Session()
@@ -94,6 +105,10 @@ class RestClient:
         }
         if self.api_key:
             headers["x-api-key"] = self.api_key
+        if self.bearer_token_provider is not None:
+            token = self.bearer_token_provider()
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
         return headers
 
     def get(
@@ -207,6 +222,10 @@ class RestClient:
         req_headers: Dict[str, str] = {}
         if self.api_key:
             req_headers["x-api-key"] = self.api_key
+        if self.bearer_token_provider is not None:
+            token = self.bearer_token_provider()
+            if token:
+                req_headers["Authorization"] = f"Bearer {token}"
         if headers:
             req_headers.update(headers)
 

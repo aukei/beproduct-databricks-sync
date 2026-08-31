@@ -47,8 +47,23 @@ sheets), staged through **Databricks/Delta**.
   vendor/factory slots → `lft.beproduct.costing_chart`. Runs as two parallel tasks
   (`pull_lineplan_dtc` → `p9a_build_costing_chart`, gated by `run_phase9a`). The
   `p9a_build_costing_chart` task also depends on `pull_dtc` (WIP data).
-- **Phase 9b** (planned): NT Orbit Duty Tools API to fill null HTS/Duty/Tariff
-  Rate fields, then push changes back to WIP per-slot columns.
+- **Phase 9b — NT Orbit Duty Tools**: for `costing_chart` rows missing
+  `hts_code` / `duty_rate_us` / `duty_rate_ca` / `duty_rate_mx` / `tariff_rate`,
+  calls the NT Orbit Duty Tools 3rd-party API
+  (https://orbitduty.neotangent.com/API-DOCS/, `POST /api/v1/calcuate/single/`)
+  — up to one call per row per still-blank market (US/CA/MX), cached in-run —
+  fills the gaps on `costing_chart` (write-once), and optionally
+  (`push_to_wip=true`) PATCHes the HTS/Duty values back onto the live DTC WIP
+  per-slot columns (Tariff Rate has no WIP column yet — see decisions log).
+  Auth is Microsoft Entra ID delegated OAuth2 (refresh_token → access_token),
+  NOT the DTC x-api-key scheme — see `dtc/python/client/entra_auth.py` and the
+  one-time setup CLI `scripts/nt_orbit_oauth_setup.py`. Runs as job task
+  `fill_duty_rates`, gated by `run_phase9b` (default `false` until UAT-
+  validated live), after `build_costing_chart`. Costing chart table name is a
+  job parameter `costing_chart_table` (default `lft.beproduct.costing_chart`;
+  testing override `lft.beproduct.costing_chart_kei`). Notebook:
+  `dtc/notebooks/p9b_fill_duty_rates.py`; pure logic + tests:
+  `dtc/python/sync/duty.py` / `dtc/tests/test_duty.py`.
 
 Each field syncs **one way only** (no loops). Direction table below.
 Components, data flow, and the full ADB data model: `docs/ARCHITECTURE.md`.
@@ -120,10 +135,15 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
 ## Ground rules / invariants
 
 1. **Validate live before/while coding.** Local creds in `.env`
-   (`BEPRODUCT_*`, `DATABRICKS_*`); on Databricks use secret scope `beproduct`
-   (`client_id`, `client_secret`, `refresh_token`, `company_domain`,
-   `dtc_api_key_<env>`). There is a sacrificial in-scope DTC request for reversible
-   write tests: `KTB FW26 Wrangler` (UAT request `6a26581854e92e7acd8fa71b`).
+   (`BEPRODUCT_*`, `DATABRICKS_*`, `NT_ORBIT_*`); on Databricks use secret scope
+   `beproduct` (`client_id`, `client_secret`, `refresh_token`, `company_domain`,
+   `dtc_api_key_<env>`, and Phase 9b's `nt_orbit_tenant_id`, `nt_orbit_client_id`,
+   `nt_orbit_client_secret` [optional], `nt_orbit_refresh_token` — seeded once via
+   `scripts/nt_orbit_oauth_setup.py`; rotated refresh tokens are then persisted to
+   the Delta control table `lft.beproduct.nt_orbit_oauth_state`, NOT back into the
+   secret scope, since `dbutils.secrets` is read-only). There is a sacrificial
+   in-scope DTC request for reversible write tests: `KTB FW26 Wrangler` (UAT
+   request `6a26581854e92e7acd8fa71b`).
 2. **Match BeProduct fields by `fieldId`, not display name** (names are inconsistently
    cased / have trailing spaces).
 3. **One field, one direction.** Never add a field to both `phase1.FIELD_MAPPING` and
@@ -616,7 +636,9 @@ python3 dtc/tests/test_phase3.py        # Phase 3 image-upload core unit tests
 python3 dtc/tests/test_samples.py       # Phase 7 sample formatter unit tests
 python3 dtc/tests/test_registry.py      # request-registry pure-function unit tests
 python3 dtc/tests/test_xts_master.py    # Phase 0 XTS Master pure-function unit tests
+python3 dtc/tests/test_duty.py          # Phase 9b NT Orbit Duty Tools pure-function unit tests
 python3 dtc/tests/test_phase1_live.py   # live reversible DTC write test (needs UAT)
+python scripts/nt_orbit_oauth_setup.py  # ONE-TIME Entra ID interactive login for NT Orbit (Phase 9b)
 python scripts/check_dtc_view.py        # DTC WIP_ITS_USE column readiness check
 python scripts/upload_notebooks.py --dry-run   # preview Databricks notebook upload
 python scripts/upload_notebooks.py             # deploy notebooks to Databricks

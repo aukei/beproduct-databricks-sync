@@ -18,14 +18,25 @@ now retired) with one job whose pipeline steps are first-class tasks. Benefits:
 
 DAG
 ---
-    wait_cluster ─┬─► bp_style_sync ─► transform ─┐
-                  │                                ├─► request_manager ─► gate_phase1 ─► phase1_push ─┐
-                  ├─► pull_master_dtc ───────────────────┘         │                                         │
-                  │       │                                   └─► gate_phase3 ──────────────┐          │
-                  │       └─► gate_phase2 ─► phase2_push                                    ├─► repull_dtc ─► phase3_images
-                  │                                                                         (run_if=ALL_DONE)
-                  └─► gate_phase8a ─► pull_fabric_dtc   (parallel, independent of WIP chain)
-                  └─► gate_phase9a ─► pull_lineplan_dtc ─► build_costing_chart  (parallel)
+    wait_cluster ─► gate_phase0 ─► phase0_pull ─► phase0_upsert ─► phase0_push ─┬─► bp_style_sync ─► transform ─┐
+                                                                                │                                ├─► request_manager ─► gate_phase1 ─► phase1_push ─┐
+                                                                                ├─► pull_master_dtc ───────────────┘         │                                         │
+                                                                                │       │                             └─► gate_phase3 ──────────────┐          │
+                                                                                │       └─► gate_phase2 ─► phase2_push                                  ├─► repull_dtc ─► phase3_images
+                                                                                │                                                                      (run_if=ALL_DONE)
+                                                                                ├─► gate_phase8a ─► pull_fabric_dtc   (parallel, independent of WIP chain)
+                                                                                └─► gate_phase9a ─► pull_lineplan_dtc ─► build_costing_chart ─► gate_phase9b ─► fill_duty_rates
+
+Phase 0 (DTC XTS Master → BeProduct Directory) runs FIRST: pull → upsert →
+PUSH_DIRECTORY, then every Style/Material/Costing step proceeds. All downstream
+roots wait on `phase0_push` with `run_if=ALL_DONE` so a disabled `run_phase0`
+skips only Phase 0 and never deadlocks the rest of the DAG.
+
+Phase 0 (DTC "XTS Master" Supplier/Factory → BeProduct Directory) is the FIRST
+step: pull DTC masters → upsert beproduct_directory (match name+partner_type) →
+PUSH_DIRECTORY to BeProduct. It logically precedes every Style/Material/Costing
+step, which all wait on phase0_push (run_if=ALL_DONE so a disabled run_phase0
+doesn't deadlock the rest of the DAG).
 
 Cluster
 -------
@@ -115,6 +126,8 @@ JOB_PARAMS = {
     "refresh_mode": "FULL",
     "dry_run": "false",
     "delta_only": "true",
+    "run_phase0": "true",            # Phase 0: push new/updated DTC Supplier/Factory masters → BeProduct Directory
+    "xts_document": "XTS Master",    # DTC document name for Phase 0 (XTS Master → Directory)
     "run_phase1": "true",
     "run_phase2": "true",
     "run_phase3": "true",
@@ -122,6 +135,9 @@ JOB_PARAMS = {
     "include_test_sheets": "false",  # false=PROD sheets only; true=include DEV+MILL (for UAT)
     "run_phase9a": "true",           # Phase 9a: pull LinePlan + build costing chart
     "lineplan_document": "KTB LinePlan",  # DTC document name for Phase 9a
+    "run_phase9b": "false",          # Phase 9b: NT Orbit duty/HTS/tariff fill (default off until UAT-validated)
+    "costing_chart_table": "lft.beproduct.costing_chart",  # test override: lft.beproduct.costing_chart_kei
+    "push_duty_to_wip": "false",     # Phase 9b: also PATCH filled values back to DTC WIP
     "push_blanks": "false",
     "img_http_timeout": "30",
     "img_max_uploads": "0",
@@ -137,8 +153,10 @@ def P(name: str) -> str:
 # Convenience refs
 CAT, SCH = P("catalog"), P("schema")
 CUST, WS, DOC, ENV = P("customer"), P("dtc_workspace"), P("dtc_document"), P("dtc_environment")
+XTS_DOC      = P("xts_document")
 FABRIC_DOC   = P("fabric_document")
 LINEPLAN_DOC = P("lineplan_document")
+COSTING_TABLE = P("costing_chart_table")
 DRY = P("dry_run")
 
 
@@ -153,7 +171,7 @@ def nb_task(task_key, notebook_path, params, depends=None, run_if=None, timeout=
     )
 
 
-def gate_task(task_key, param_name, depends):
+def gate_task(task_key, param_name, depends, run_if=None):
     """Condition task: proceed on the 'true' edge when {{job.parameters.<param>}} == 'true'."""
     return jobs.Task(
         task_key=task_key,
@@ -161,6 +179,7 @@ def gate_task(task_key, param_name, depends):
             op=jobs.ConditionTaskOp.EQUAL_TO, left=P(param_name), right="true"
         ),
         depends_on=depends,
+        run_if=run_if,
     )
 
 
@@ -178,11 +197,31 @@ def build_tasks():
     tasks.append(nb_task("wait_cluster", f"{NB_BP}/wait_cluster", {},
                          timeout=600))  # 10-min cap; warm-up never takes this long
 
+    # ── Phase 0 — DTC XTS Master (Supplier/Factory) → BeProduct Directory ───
+    # Runs FIRST, before any Style/Material/Costing step. Chain:
+    #   pull (DTC → dtc_xts_master_ktb) → upsert (→ beproduct_directory, match
+    #   name+partner_type) → push (PUSH_DIRECTORY → BeProduct Directory API).
+    # All downstream Style/Material/Costing steps wait on phase0_push
+    # (run_if=ALL_DONE, so a disabled run_phase0 doesn't deadlock them).
+    tasks.append(gate_task("gate_phase0", "run_phase0", depends=[dep("wait_cluster")]))
+    tasks.append(nb_task("phase0_pull", f"{NB_DTC}/p0_pull_xts_master_to_delta", {
+        "dtc_environment": ENV, "dtc_workspace": WS, "dtc_document": XTS_DOC,
+        "catalog": CAT, "schema": SCH,
+    }, depends=[dep("gate_phase0", outcome="true")]))
+    tasks.append(nb_task("phase0_upsert", f"{NB_BP}/p0_xts_master_to_directory_upsert", {
+        "catalog": CAT, "schema": SCH, "source_table": "dtc_xts_master_ktb",
+        "dry_run": DRY,
+    }, depends=[dep("phase0_pull")]))
+    tasks.append(nb_task("phase0_push", f"{NB_BP}/p5utl_beproduct_master_data_sync", {
+        "catalog": CAT, "schema_name": SCH, "mode": "PUSH_DIRECTORY",
+        "dry_run": DRY, "fetch_contacts": "false",
+    }, depends=[dep("phase0_upsert")]))
+
     # Step 1 — BeProduct -> ktb_styles  (Phase 1+7: style sync + sample-app enrichment)
     tasks.append(nb_task("bp_style_sync", f"{NB_BP}/p1p7_beproduct_style_sync", {
         "folder_name": P("folder_name"), "refresh_mode": P("refresh_mode"),
         "catalog": CAT, "schema": SCH, "table_name": "ktb_styles",
-    }, depends=[dep("wait_cluster")]))
+    }, depends=[dep("phase0_push")], run_if=jobs.RunIf.ALL_DONE))
 
     # Step 2 — transform (Phase 1+7: denormalize + sample-status UDFs)
     tasks.append(nb_task("transform", f"{NB_BP}/p1p7_beproduct_to_dtc_transform", {
@@ -196,7 +235,7 @@ def build_tasks():
         "dtc_environment": ENV, "customer": CUST, "dtc_workspace": WS, "dtc_document": DOC,
         "catalog": CAT, "schema": SCH, "write_mode": "overwrite",
         "refresh_registry": "true", "max_workers": "4",
-    }, depends=[dep("wait_cluster")]))
+    }, depends=[dep("phase0_push")], run_if=jobs.RunIf.ALL_DONE))
 
     # Step 4 — request manager (Phase 1: create + share missing requests)
     tasks.append(nb_task("request_manager", f"{NB_BP}/p1_dtc_request_manager", {
@@ -239,7 +278,7 @@ def build_tasks():
 
     # ── Phase 8a — Pull DTC FABRIC sheets → dtc_fabric_<customer> ──────────────
     tasks.append(gate_task("gate_phase8a", "run_phase8a",
-                           depends=[dep("wait_cluster")]))
+                           depends=[dep("phase0_push")], run_if=jobs.RunIf.ALL_DONE))
     tasks.append(nb_task("pull_fabric_dtc", f"{NB_DTC}/p8a_pull_fabric_to_delta", {
         "dtc_environment":     ENV,
         "customer":            CUST,
@@ -272,6 +311,21 @@ def build_tasks():
         "schema":   SCH,
         "customer": CUST,
     }, depends=[dep("pull_lineplan_dtc"), dep("pull_master_dtc")]))
+
+    # ── Phase 9b — Fill HTS/Duty/Tariff via NT Orbit Duty Tools ────────────────
+    tasks.append(gate_task("gate_phase9b", "run_phase9b",
+                           depends=[dep("build_costing_chart")]))
+    tasks.append(nb_task("fill_duty_rates", f"{NB_DTC}/p9b_fill_duty_rates", {
+        "catalog":             CAT,
+        "schema":              SCH,
+        "customer":            CUST,
+        "costing_chart_table": COSTING_TABLE,
+        "dtc_environment":     ENV,
+        "dtc_workspace":       WS,
+        "dry_run":             DRY,
+        "push_to_wip":         P("push_duty_to_wip"),
+        "max_workers":         "4",
+    }, depends=[dep("gate_phase9b", outcome="true")]))
 
     return tasks
 

@@ -268,7 +268,7 @@ This is actually phase 0 in logical sense.
     - all the rest: address, country, state, zip, city, phone, fax, website, notes are optional 
     - Production Country -> 'country'
 - Verify p5utl master data sync can upload any changed / new record to BeProduct master.
-
+- the daily DAG now require to push any new or updated DTC supplier / facory master to BeProduct directory
 
 
 # Phase 6 Structural clean up $12
@@ -393,7 +393,10 @@ Temporarily change the default Databricks job parameters to sync again "TEST KTB
 - Entra OAuth2
     - Refresh token
     - use Personal account "auchunkei@lifung.com"
-    
+- Make costing chart table name a parameter. 
+    - Default to "lft.beproduct.costing_chart"
+    - Testing use "lft.beproduct.costing_chart_kei"
+
 1.1 Authentication (Microsoft Entra ID / Azure AD)
 The API requires a Microsoft Entra ID bearer token in the `Authorization` header. This is a delegated, per-user token obtained via the OAuth2 authorization-code + refresh-token flow.
 - One-time setup (first use only)
@@ -409,9 +412,9 @@ The API requires a Microsoft Entra ID bearer token in the `Authorization` header
     https://orbitduty.neotangent.com/api/v1/health
     OK return reads like '{"status": "healthy", "timestamp": "2026-08-13T06:48:22.682Z", "version": "string"}'
  
-1.2 Request Payload (From costing chart)
-product_description:  Style Description (C), Content (I), Gender (J), Class (K), Sub Class (L)
-Concatenate Columns C + I + J + K + L 
+1.2 Request Payload (From databricks lft.beproduct.costing_chart)
+API = "/calcuate/single/"
+product_description:  Style Description (C), Content (I), Gender (J), Class (K), Sub Class (L) = Concatenate Columns C + I + J + K + L 
 origin_country_code : Production Country  (Column P)
 export_country_code : Production Country  (Column P)
 import_country_code : Columns T / U / V headers | Each header encodes a market in brackets: T = *Duty Rate (US)* → `US`, U = *Duty Rate (CA)* → `CA`, V = *Duty Rate (MX)* → `MX`. Use the code corresponding to the column that applies. one API call per populated duty-rate column (i.e. up to 3 calls per row: US, CA, MX) |
@@ -422,9 +425,6 @@ mode_of_transport : "freight"
 - Tariff — additional named duty lines beyond General Duty (e.g. *"10% Section 122 tariff on foreign-origin items"*, *"7.5% Section 301 tariff on goods originating from China"*). A single response can contain zero, one, or multiple tariff lines depending on origin/import country.
  
 Example input 1:
- 
-Plain Text
-Plain Text
 {
   "product_description": "Cotton t-shirt with printed design",
   "origin_country_code": "BD",
@@ -434,11 +434,7 @@ Plain Text
   "mode_of_transport": "freight"
 }
  
- 
 Example output 1:
- 
-Plain Text
-Plain Text
 {
   "success": true,
   "data": {
@@ -505,7 +501,9 @@ Plain Text
 }
 
 1.3 Fields to fill (summary)
-- Make costing table name a parameter. Default to "lft.beproduct.costing_chart", Testing use "lft.beproduct.costing_chart_kei"
-- 
+- duty_rate_xx (xx corresponds to import_country_code)
+- tariff_rate (only present in "Found duty:" row when import_country_code='US')
+- hts_code (= data.hs_code)
 
 1.4 Push update to DTC
+- transpose again like phase 9A, i.e. reverse  4 rows [Vendor, Factory] into single DTC row [(Main Vendor, Main Factory), (Vendor 1, Factory 1), (Vendor 2, Factory 2), (Vendor 3, Factory 3)]

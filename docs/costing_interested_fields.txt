@@ -93,13 +93,40 @@ LinePlan may have multiple rows per "Lineplan Ref #" (different colors / regions
 The join uses the FIRST non-null value per ref# for order_quantity / target_ldp /
 target_fob / supplier_type (Spark first() with ignorenulls=True).
 
-Phase 9b plan
--------------
+Phase 9b — implemented (dtc/notebooks/p9b_fill_duty_rates.py)
+---------------------------------------------------------------
 For costing rows where hts_code IS NULL or duty_rate_* IS NULL or tariff_rate IS NULL:
-  1. Call NT Orbit Duty Tools 3rd-party API (with result caching).
-  2. Fill in the values on costing_chart.
-  3. If any row fetched from NT Orbit, push updated HTS / Duty / Tariff values
-     back to the corresponding per-slot WIP columns via Phase 1 PATCH.
+  1. Call the NT Orbit Duty Tools 3rd-party API
+     (https://orbitduty.neotangent.com/API-DOCS/, POST /api/v1/calcuate/single/)
+     — one call per market (US/CA/MX) whose duty_rate_xx column is still blank
+     for that row, with in-run result caching keyed on
+     (product_description, origin_country, import_country) so identical
+     style/slot combinations across colors are only looked up once.
+  2. Fill in the values on costing_chart (write-once — never overwrites an
+     already-populated cell). duty_rate_xx is taken from the response's
+     "General Duty" detailed_line rate (NOT the combined data.duty_rate,
+     which also includes tariff + fees); tariff_rate is the sum of any other
+     type="duty" detailed_lines, and is only ever set from a US-market call.
+  3. If push_to_wip=true, push updated HTS / Duty Rate values back to the
+     corresponding per-slot WIP columns via the same Phase 1 PATCH contract
+     (DTCConnector.patch_rows, UPDATE-only since the WIP rows already exist).
+     Tariff Rate has NO live WIP column yet (see note above) so it is pushed
+     to nowhere — it stays in costing_chart only; the push step logs this as
+     a "skipped" reason rather than silently dropping the value.
+
+Auth: NT Orbit requires a per-user Microsoft Entra ID delegated OAuth2 bearer
+token (NOT the DTC x-api-key scheme) — refresh_token -> access_token via
+dtc/python/client/entra_auth.py. One-time interactive setup:
+scripts/nt_orbit_oauth_setup.py (run locally, once, as the delegated user).
+Rotated refresh tokens are persisted to lft.<schema>.nt_orbit_oauth_state
+(dbutils.secrets is read-only, so they cannot be written back to the secret
+scope from a notebook).
+
+Costing chart table name is a PARAMETER (widget/job-param `costing_chart_table`):
+  default : lft.beproduct.costing_chart
+  testing : lft.beproduct.costing_chart_kei
+Pure decision logic (no Spark/HTTP) lives in dtc/python/sync/duty.py, unit
+tested in dtc/tests/test_duty.py.
 
 Costing chart key
 -----------------
