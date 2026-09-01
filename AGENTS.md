@@ -16,8 +16,13 @@ sheets), staged through **Databricks/Delta**.
   then upserts into `lft.beproduct.beproduct_directory`
   (`beproduct/p0_xts_master_to_directory_upsert.py`), matched by **`name` +
   `partner_type` together** (BeProduct's real Directory key — NOT `id`/
-  `directory_id`, and NOT `name` alone). Admin-triggered, same as Phase 5 —
-  not wired into the scheduled DAG.
+  `directory_id`, and NOT `name` alone). **Wired into the daily DAG**
+  (2026-08-31) as the FIRST step, gated by `run_phase0` (default `true`):
+  `wait_cluster → gate_phase0 → phase0_pull → phase0_upsert → phase0_push`
+  (`p5utl_beproduct_master_data_sync` mode=`PUSH_DIRECTORY`, which pushes only
+  rows where `id IS NULL OR extracted_at IS NULL OR modified_at > extracted_at`).
+  Every Style/Material/Costing task then waits on `phase0_push`
+  (`run_if=ALL_DONE`, so disabling `run_phase0` doesn't deadlock them).
 - **Phase 1 — BeProduct → DTC** (`docs/PHASE1_WORKFLOW.md`): push BeProduct-owned
   style fields into the matching DTC request (upsert); create + share missing
   in-scope requests.
@@ -50,18 +55,38 @@ sheets), staged through **Databricks/Delta**.
 - **Phase 9b — NT Orbit Duty Tools**: for `costing_chart` rows missing
   `hts_code` / `duty_rate_us` / `duty_rate_ca` / `duty_rate_mx` / `tariff_rate`,
   calls the NT Orbit Duty Tools 3rd-party API
-  (https://orbitduty.neotangent.com/API-DOCS/, `POST /api/v1/calcuate/single/`)
-  — up to one call per row per still-blank market (US/CA/MX), cached in-run —
-  fills the gaps on `costing_chart` (write-once), and optionally
-  (`push_to_wip=true`) PATCHes the HTS/Duty values back onto the live DTC WIP
-  per-slot columns (Tariff Rate has no WIP column yet — see decisions log).
-  Auth is Microsoft Entra ID delegated OAuth2 (refresh_token → access_token),
-  NOT the DTC x-api-key scheme — see `dtc/python/client/entra_auth.py` and the
-  one-time setup CLI `scripts/nt_orbit_oauth_setup.py`. Runs as job task
-  `fill_duty_rates`, gated by `run_phase9b` (default `false` until UAT-
-  validated live), after `build_costing_chart`. Costing chart table name is a
-  job parameter `costing_chart_table` (default `lft.beproduct.costing_chart`;
-  testing override `lft.beproduct.costing_chart_kei`). Notebook:
+  (https://orbitduty.neotangent.com/API-DOCS/, `POST /api/v1/calculate/single/`)
+  — up to one call per row per still-blank market (US/CA/MX). Each call is
+  ~30s and `costing_chart` is FULLY OVERWRITTEN by every Phase 9a run, so
+  in-run dedup alone isn't enough — a PERSISTENT cross-run cache table
+  (`duty_cache_table`, default `lft.beproduct.nt_orbit_duty_cache`, never
+  wiped) keyed on `(product_description, origin_country, import_country)` is
+  checked FIRST; a hit within `cache_ttl_days` (default 180 — tariff policy
+  does change over time) skips the API call entirely, and only genuinely new
+  or stale combinations reach NT Orbit. Fills the gaps on `costing_chart`
+  (write-once), and optionally (`push_to_wip=true`) PATCHes the HTS/Duty
+  values back onto the live DTC WIP per-slot columns (Tariff Rate has no WIP
+  column yet — see decisions log). Auth is Microsoft Entra ID delegated
+  OAuth2 (refresh_token → access_token), NOT the DTC x-api-key scheme — see
+  `dtc/python/client/entra_auth.py` and the one-time setup CLI
+  `scripts/nt_orbit_oauth_setup.py`. Entra rotates the refresh_token on
+  (most) uses; the notebook auto-persists the rotated value to
+  `lft.beproduct.nt_orbit_oauth_state` every run and prefers it over the
+  static secret next time — so, like BeProduct's OAuth, this is "seed once,
+  then fully automatic" (no manual secret-scope updates needed) as long as
+  the job keeps running at least every ~90 days, which it does (3x/day).
+  Runs as job task `fill_duty_rates`, gated by `run_phase9b` (**live in the
+  DAG as of 2026-09-01**: `run_phase9b=true`, `push_duty_to_wip=true` on the
+  deployed job `BeProduct_DTC_sync_dag` — both were `false` during earlier
+  development), after `build_costing_chart`. The `p9b_fill_duty_rates.py`
+  notebook's OWN standalone widget default for `dry_run` is still `"true"`
+  (safe for ad-hoc/interactive runs from the ADB portal without job
+  parameters); the deployed job's `dry_run` parameter is `false` (shared
+  across every phase, same as Phase 1/2/3), so scheduled runs push for real.
+  Costing chart table name is a job parameter `costing_chart_table` (default
+  `lft.beproduct.costing_chart`; testing override
+  `lft.beproduct.costing_chart_kei`); cache table/TTL are also job
+  parameters (`duty_cache_table` / `duty_cache_ttl_days`). Notebook:
   `dtc/notebooks/p9b_fill_duty_rates.py`; pure logic + tests:
   `dtc/python/sync/duty.py` / `dtc/tests/test_duty.py`.
 
@@ -138,12 +163,32 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
    (`BEPRODUCT_*`, `DATABRICKS_*`, `NT_ORBIT_*`); on Databricks use secret scope
    `beproduct` (`client_id`, `client_secret`, `refresh_token`, `company_domain`,
    `dtc_api_key_<env>`, and Phase 9b's `nt_orbit_tenant_id`, `nt_orbit_client_id`,
-   `nt_orbit_client_secret` [optional], `nt_orbit_refresh_token` — seeded once via
-   `scripts/nt_orbit_oauth_setup.py`; rotated refresh tokens are then persisted to
-   the Delta control table `lft.beproduct.nt_orbit_oauth_state`, NOT back into the
-   secret scope, since `dbutils.secrets` is read-only). There is a sacrificial
-   in-scope DTC request for reversible write tests: `KTB FW26 Wrangler` (UAT
-   request `6a26581854e92e7acd8fa71b`).
+   `nt_orbit_client_secret`, `nt_orbit_refresh_token` — seeded once via
+   `scripts/nt_orbit_oauth_setup.py`; rotated refresh tokens are then persisted
+   to the Delta control table `lft.beproduct.nt_orbit_oauth_state`, NOT back
+   into the secret scope, since `dbutils.secrets` is read-only). **Update
+   2026-08-31: Phase 9b now uses a DEDICATED confidential app registration**
+   (client_id `d270069e-20cc-4e63-ba38-156fb0ee9296`, tenant_id
+   `c4d8a220-a9ec-4572-8c77-ab36a3ecdbae` — supersedes the earlier "reuse an
+   existing shared client_id, no secret" assumption below, and also
+   supersedes an earlier client_id `c486611e-9bfc-49d5-8930-7d1943884b03`
+   whose redirect_uri was registered under the "Mobile and desktop
+   applications" platform and hit AADSTS700025 — see decisions log), so
+   `nt_orbit_client_secret` IS set and used. The Entra login is still a
+   DELEGATED-USER sign-in (auchunkei@lifung.com), never client-credentials
+   (app-only) — NT Orbit authorizes the signed-in person, not the app. Real
+   secret VALUES must only ever live in the untracked local `.env` and the
+   Databricks secret scope — never in `.env.example` or any other tracked
+   file. There is a sacrificial in-scope DTC request for reversible write
+   tests: `KTB FW26 Wrangler` (UAT request `6a26581854e92e7acd8fa71b`).
+   Because this is now a dedicated app registration, its redirect URI IS
+   ours to register, so `python scripts/nt_orbit_oauth_setup.py --flow authcode
+   --redirect-uri http://localhost:8765/callback` (register that same URI on
+   the app in the Entra portal first) is the recommended one-time login —
+   fully scripted, no manual copy/paste. `--flow manual` (Postman's
+   `https://oauth.pstmn.io/v1/browser-callback`, no redirect-URI registration
+   needed) and `--flow devicecode` (RFC 8628) remain as no-portal-access
+   fallbacks; all three end in the same `access_token`/`refresh_token` pair.
 2. **Match BeProduct fields by `fieldId`, not display name** (names are inconsistently
    cased / have trailing spaces).
 3. **One field, one direction.** Never add a field to both `phase1.FIELD_MAPPING` and
@@ -475,6 +520,28 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
 
 ## Decisions on record
 
+- **NT Orbit / Entra token endpoint AADSTS700025 (live-validated 2026-08-31).**
+  Registering `http://localhost:8765/callback` under the app's "Mobile and
+  desktop applications" platform in the Entra portal makes Entra treat EVERY
+  token request using that redirect_uri as a public client — it rejects
+  `client_secret` with `AADSTS700025` ("Client is public so neither
+  'client_assertion' nor 'client_secret' should be presented"), even though
+  the app registration (`c486611e-9bfc-49d5-8930-7d1943884b03`) has a secret
+  configured. This is determined by the redirect_uri's PLATFORM TYPE, not by
+  whether the app has a secret. Fix: register the redirect_uri under "Web"
+  instead. `entra_auth.exchange_code_for_tokens`/`refresh_access_token` also
+  auto-detect this specific error (`error_codes` contains `700025`) and
+  retry once without the secret, so a misconfigured platform type degrades
+  to a public-client exchange instead of hard-failing the login (unit-tested
+  in `dtc/tests/test_entra_auth.py` with a mocked 401 response).
+  **Resolved 2026-08-31**: rather than fix the platform type on
+  `c486611e-...`'s existing redirect_uri, a fresh dedicated app registration
+  (client_id `d270069e-20cc-4e63-ba38-156fb0ee9296`) was created with
+  `http://localhost:8765/callback` registered correctly under "Web" from the
+  start. `--flow authcode` against it completed the one-time login
+  successfully (health check confirmed `auchunkei@lifung.com` is authorized
+  against NT Orbit). `c486611e-...` is abandoned/unused going forward —
+  `d270069e-...` is the live Phase 9b client_id.
 - **`create_sheet` payload fix (2026-06-17): `requestName` → `requestReference`.**
   The original `POST /v1/sheets` payload used the key `requestName`; the DTC API
   uses `requestReference` everywhere (GET responses, search filters, `get_request`
@@ -636,8 +703,10 @@ python3 dtc/tests/test_phase3.py        # Phase 3 image-upload core unit tests
 python3 dtc/tests/test_samples.py       # Phase 7 sample formatter unit tests
 python3 dtc/tests/test_registry.py      # request-registry pure-function unit tests
 python3 dtc/tests/test_xts_master.py    # Phase 0 XTS Master pure-function unit tests
-python3 dtc/tests/test_duty.py          # Phase 9b NT Orbit Duty Tools pure-function unit tests
+python3 dtc/tests/test_duty.py          # Phase 9b NT Orbit Duty Tools pure-function unit tests (fixture-based)
+python3 dtc/tests/test_entra_auth.py    # Phase 9b Entra OAuth2 URL-building / callback-parsing pure-function unit tests
 python3 dtc/tests/test_phase1_live.py   # live reversible DTC write test (needs UAT)
+python3 dtc/tests/test_nt_orbit_live.py # LIVE Entra OAuth2 + real NT Orbit API call (needs NT_ORBIT_* env + RUN_NT_ORBIT_LIVE_TEST=true; skips cleanly otherwise)
 python scripts/nt_orbit_oauth_setup.py  # ONE-TIME Entra ID interactive login for NT Orbit (Phase 9b)
 python scripts/check_dtc_view.py        # DTC WIP_ITS_USE column readiness check
 python scripts/upload_notebooks.py --dry-run   # preview Databricks notebook upload

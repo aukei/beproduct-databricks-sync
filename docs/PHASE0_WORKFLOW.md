@@ -1,7 +1,10 @@
 # Phase 0: DTC XTS Master → BeProduct Directory
 
-**Status:** Implemented ✅ — admin-only, manually triggered (same as Phase 5),
-**not in the daily DAG**.
+**Status:** Implemented ✅ — **wired into the daily DAG** (2026-08-31) as the
+FIRST step, gated by `run_phase0` (default `true`):
+`wait_cluster → gate_phase0 → phase0_pull → phase0_upsert → phase0_push`.
+Every Style/Material/Costing task waits on `phase0_push` (`run_if=ALL_DONE`,
+so disabling `run_phase0` only skips Phase 0, never deadlocks the DAG).
 
 Notebooks:
 1. `dtc/notebooks/p0_pull_xts_master_to_delta.py` — pull DTC → `dtc_xts_master_ktb`
@@ -9,7 +12,7 @@ Notebooks:
 3. `beproduct/p5utl_beproduct_master_data_sync.py` mode=`PUSH_DIRECTORY` — push to BeProduct (unchanged, already correct — see below)
 
 Phase 0 logically precedes Style/Material/Costing sync: BeProduct partner
-(Supplier/Factory/Mill) master data should be current before those phases run.
+(Supplier/Factory) master data should be current before those phases run.
 
 > Field mapping SSOT: `docs/beproduct_directory_xts_interested_fields.txt`
 > Pure logic + unit tests: `dtc/python/sync/xts_master.py`, `dtc/tests/test_xts_master.py`

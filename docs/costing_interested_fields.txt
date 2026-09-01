@@ -96,17 +96,25 @@ target_fob / supplier_type (Spark first() with ignorenulls=True).
 Phase 9b — implemented (dtc/notebooks/p9b_fill_duty_rates.py)
 ---------------------------------------------------------------
 For costing rows where hts_code IS NULL or duty_rate_* IS NULL or tariff_rate IS NULL:
-  1. Call the NT Orbit Duty Tools 3rd-party API
-     (https://orbitduty.neotangent.com/API-DOCS/, POST /api/v1/calcuate/single/)
-     — one call per market (US/CA/MX) whose duty_rate_xx column is still blank
-     for that row, with in-run result caching keyed on
-     (product_description, origin_country, import_country) so identical
-     style/slot combinations across colors are only looked up once.
+  1. Check the PERSISTENT cross-run cache table `duty_cache_table`
+     (default lft.beproduct.nt_orbit_duty_cache; NEVER overwritten by Phase
+     9a, unlike costing_chart) for a hit on
+     (product_description, origin_country, import_country), fresh within
+     `cache_ttl_days` (default 180). A hit is used directly — NO API call.
+     Only a miss/stale entry calls the NT Orbit Duty Tools 3rd-party API
+     (https://orbitduty.neotangent.com/API-DOCS/, POST /api/v1/calculate/single/,
+     one call per market US/CA/MX still needed). This matters because each
+     call is ~30s and costing_chart is FULLY OVERWRITTEN by every Phase 9a
+     run (see below) — without a cache that survives ACROSS runs, every
+     daily run would re-look-up every row from scratch.
   2. Fill in the values on costing_chart (write-once — never overwrites an
      already-populated cell). duty_rate_xx is taken from the response's
      "General Duty" detailed_line rate (NOT the combined data.duty_rate,
      which also includes tariff + fees); tariff_rate is the sum of any other
      type="duty" detailed_lines, and is only ever set from a US-market call.
+     Newly-fetched results are also written into the persistent cache table
+     so the NEXT run (even after Phase 9a wipes costing_chart) can reuse
+     them without another API call.
   3. If push_to_wip=true, push updated HTS / Duty Rate values back to the
      corresponding per-slot WIP columns via the same Phase 1 PATCH contract
      (DTCConnector.patch_rows, UPDATE-only since the WIP rows already exist).
@@ -118,13 +126,27 @@ Auth: NT Orbit requires a per-user Microsoft Entra ID delegated OAuth2 bearer
 token (NOT the DTC x-api-key scheme) — refresh_token -> access_token via
 dtc/python/client/entra_auth.py. One-time interactive setup:
 scripts/nt_orbit_oauth_setup.py (run locally, once, as the delegated user).
-Rotated refresh tokens are persisted to lft.<schema>.nt_orbit_oauth_state
-(dbutils.secrets is read-only, so they cannot be written back to the secret
-scope from a notebook).
+Entra rotates the refresh_token on (most) uses; the notebook auto-persists
+the rotated value to lft.<schema>.nt_orbit_oauth_state every run
+(dbutils.secrets is read-only, so it cannot be written back to the secret
+scope from a notebook) and prefers that table's value over the static secret
+on every subsequent run — so, like BeProduct's OAuth, this is "seed once,
+then fully automatic" as long as the job keeps running at least every ~90
+days (it runs 3x/day). No manual secret-scope updates needed after the
+initial seed.
+
+Live in the deployed job as of 2026-09-01: `run_phase9b=true` and
+`push_duty_to_wip=true` on `BeProduct_DTC_sync_dag` (both were `false` during
+earlier development). The notebook's own standalone widget default for
+`dry_run` remains `"true"` (safe for ad-hoc/interactive runs without job
+parameters); the job's shared `dry_run` parameter is `false`.
 
 Costing chart table name is a PARAMETER (widget/job-param `costing_chart_table`):
   default : lft.beproduct.costing_chart
   testing : lft.beproduct.costing_chart_kei
+Persistent duty-lookup cache table + TTL are also PARAMETERS
+(`duty_cache_table` / `cache_ttl_days`), default
+lft.beproduct.nt_orbit_duty_cache / 180 days.
 Pure decision logic (no Spark/HTTP) lives in dtc/python/sync/duty.py, unit
 tested in dtc/tests/test_duty.py.
 

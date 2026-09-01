@@ -413,7 +413,7 @@ The API requires a Microsoft Entra ID bearer token in the `Authorization` header
     OK return reads like '{"status": "healthy", "timestamp": "2026-08-13T06:48:22.682Z", "version": "string"}'
  
 1.2 Request Payload (From databricks lft.beproduct.costing_chart)
-API = "/calcuate/single/"
+API = "/calculate/single/"
 product_description:  Style Description (C), Content (I), Gender (J), Class (K), Sub Class (L) = Concatenate Columns C + I + J + K + L 
 origin_country_code : Production Country  (Column P)
 export_country_code : Production Country  (Column P)
@@ -507,3 +507,15 @@ Example output 1:
 
 1.4 Push update to DTC
 - transpose again like phase 9A, i.e. reverse  4 rows [Vendor, Factory] into single DTC row [(Main Vendor, Main Factory), (Vendor 1, Factory 1), (Vendor 2, Factory 2), (Vendor 3, Factory 3)]
+
+2. Test the real oauth flow and actual api behaviour using env var
+
+3. i am told to use my own entry id (auchunkei@lifung.com) instead of a separate app client ID for this. does it simplify / change above doc?
+export NT_ORBIT_TENANT_ID=c4d8a220-a9ec-4572-8c77-ab36a3ecdbae
+export NT_ORBIT_CLIENT_ID=c486611e-9bfc-49d5-8930-7d1943884b03
+export NT_ORBIT_CLIENT_SECRET=XXXX
+
+4.1 each api call is up to 30s. So the costing-chart update will take long - and should be grouped to call only when necessary - same input same output, if value already exist then no need to call again. 
+Design a persistent caching mechanism, e.g. cache API results in table with a configurable TTL.
+
+4.2 Make sure the OrbitDuty refresh token is self healing in databricks job runs

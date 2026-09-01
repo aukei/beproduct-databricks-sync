@@ -12,10 +12,10 @@ hourly without the caller having to think about it.
 
 Endpoints used:
   GET  /api/v1/health            -> {"status": "healthy", ...}   (auth smoke test)
-  POST /api/v1/calcuate/single/   -> duty/tariff calculation for one shipment
-       (NOTE: "calcuate" is the API's own spelling/typo, not ours — confirmed
-       against the Phase 9b spec's literal endpoint path; kept verbatim so a
-       copy-paste from the API docs matches this connector exactly.)
+  POST /api/v1/calculate/single/  -> duty/tariff calculation for one shipment
+       (the Phase 9b spec's prose used "/calcuate/single/" — a typo in the
+       written spec, not in the live API; live-validated 2026-09-01 that the
+       real endpoint is spelled "calculate". `/calcuate/single/` 404s.)
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 # UAT/PROD host was given for NT Orbit, unlike DTC).
 DEFAULT_BASE_URL = "https://orbitduty.neotangent.com"
 
-CALCULATE_SINGLE_ENDPOINT = "/api/v1/calcuate/single/"
+CALCULATE_SINGLE_ENDPOINT = "/api/v1/calculate/single/"
 HEALTH_ENDPOINT = "/api/v1/health"
 
 
@@ -80,7 +80,7 @@ class NTOrbitConnector:
 
     def calculate_single(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """
-        POST /api/v1/calcuate/single/ — calculate duty/tariff for one
+        POST /api/v1/calculate/single/ — calculate duty/tariff for one
         product/shipment.
 
         Args:

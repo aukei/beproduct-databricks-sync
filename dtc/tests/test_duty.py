@@ -8,6 +8,7 @@ or with pytest:
     pytest dtc/tests/test_duty.py
 """
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "python"))
@@ -17,6 +18,8 @@ from sync.duty import (
     build_product_description, build_calc_request, cache_key,
     markets_needing_lookup, row_needs_any_lookup, extract_duty_fields,
     merge_lookup_into_row, build_wip_patch_fields, DutyLookupResult,
+    is_cache_entry_stale, build_cache_row, cache_row_to_result,
+    DUTY_CACHE_KEY_COLS, DEFAULT_CACHE_TTL_DAYS,
 )
 
 _failures = []
@@ -181,6 +184,52 @@ try:
     check(False, "unknown factory_slot should raise")
 except ValueError:
     check(True, "unknown factory_slot raises ValueError")
+
+print("\n[7] Persistent cross-run cache — is_cache_entry_stale() / build_cache_row() / cache_row_to_result()")
+now = datetime(2026, 9, 1, tzinfo=timezone.utc)
+
+check(DUTY_CACHE_KEY_COLS == ("product_description", "origin_country_code", "import_country_code"),
+      "cache key columns match cache_key()'s tuple order")
+
+check(is_cache_entry_stale(None, now) is True, "missing looked_up_at is always treated as stale")
+fresh = now - timedelta(days=1)
+check(is_cache_entry_stale(fresh, now, ttl_days=DEFAULT_CACHE_TTL_DAYS) is False,
+      "1-day-old entry is NOT stale under the default TTL")
+old = now - timedelta(days=DEFAULT_CACHE_TTL_DAYS + 1)
+check(is_cache_entry_stale(old, now, ttl_days=DEFAULT_CACHE_TTL_DAYS) is True,
+      "entry older than the TTL IS stale")
+boundary = now - timedelta(days=30)
+check(is_cache_entry_stale(boundary, now, ttl_days=30) is False,
+      "exactly at the TTL boundary is NOT yet stale (> comparison, not >=)")
+check(is_cache_entry_stale(boundary, now, ttl_days=10) is True,
+      "a shorter custom ttl_days is respected")
+
+key_us = cache_key(row2, "US")
+cache_row = build_cache_row(key_us, result, looked_up_at=now)
+check(cache_row == {
+    "product_description": build_product_description(row2),
+    "origin_country_code": "BD",
+    "import_country_code": "US",
+    "hts_code": "6109100012",
+    "duty_rate": 0.165,
+    "tariff_rate": 0.1,
+    "classification_name": "T-Shirts - cotton (knitted)",
+    "looked_up_at": now,
+}, "build_cache_row() produces the exact persistent-table row shape")
+
+reconstructed = cache_row_to_result(cache_row)
+check(reconstructed.hts_code == result.hts_code
+      and reconstructed.duty_rate == result.duty_rate
+      and reconstructed.tariff_rate == result.tariff_rate
+      and reconstructed.classification_name == result.classification_name,
+      "cache_row_to_result() round-trips a persistent-cache row back into a usable DutyLookupResult")
+
+# A cache hit reconstructed this way must behave identically to a fresh
+# lookup when merged onto a row - this is the whole point of the persistent
+# cache (skip the ~30s API call, not skip the fill).
+merged_from_cache = merge_lookup_into_row(target_row, "US", reconstructed)
+check(merged_from_cache == updates_us,
+      "merging a cache-reconstructed result produces the same fields as a live lookup")
 
 # ---------------------------------------------------------------------------
 print(f"\n{'='*60}")

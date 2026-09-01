@@ -135,9 +135,11 @@ JOB_PARAMS = {
     "include_test_sheets": "false",  # false=PROD sheets only; true=include DEV+MILL (for UAT)
     "run_phase9a": "true",           # Phase 9a: pull LinePlan + build costing chart
     "lineplan_document": "KTB LinePlan",  # DTC document name for Phase 9a
-    "run_phase9b": "false",          # Phase 9b: NT Orbit duty/HTS/tariff fill (default off until UAT-validated)
+    "run_phase9b": "true",           # Phase 9b: NT Orbit duty/HTS/tariff fill (live in the DAG 2026-09-01)
     "costing_chart_table": "lft.beproduct.costing_chart",  # test override: lft.beproduct.costing_chart_kei
-    "push_duty_to_wip": "false",     # Phase 9b: also PATCH filled values back to DTC WIP
+    "duty_cache_table": "lft.beproduct.nt_orbit_duty_cache",  # Phase 9b: persistent cross-run NT Orbit result cache
+    "duty_cache_ttl_days": "180",     # Phase 9b: re-query a cached lookup after this many days
+    "push_duty_to_wip": "true",      # Phase 9b: also PATCH filled values back to DTC WIP
     "push_blanks": "false",
     "img_http_timeout": "30",
     "img_max_uploads": "0",
@@ -294,7 +296,7 @@ def build_tasks():
 
     # ── Phase 9a — Pull LinePlan + Build Costing Chart ─────────────────────────
     tasks.append(gate_task("gate_phase9a", "run_phase9a",
-                           depends=[dep("wait_cluster")]))
+                           depends=[dep("phase0_push")], run_if=jobs.RunIf.ALL_DONE))
     tasks.append(nb_task("pull_lineplan_dtc", f"{NB_DTC}/p9a_pull_lineplan_to_delta", {
         "dtc_environment": ENV,
         "customer":        CUST,
@@ -320,6 +322,8 @@ def build_tasks():
         "schema":              SCH,
         "customer":            CUST,
         "costing_chart_table": COSTING_TABLE,
+        "duty_cache_table":    P("duty_cache_table"),
+        "cache_ttl_days":      P("duty_cache_ttl_days"),
         "dtc_environment":     ENV,
         "dtc_workspace":       WS,
         "dry_run":             DRY,

@@ -8,9 +8,7 @@ For every ``lft.beproduct.costing_chart`` row (built by Phase 9a,
 ``duty_rate_us`` / ``duty_rate_ca`` / ``duty_rate_mx`` and/or ``tariff_rate``:
 
   1. Call the NT Orbit Duty Tools API (https://orbitduty.neotangent.com) once
-     per market (US/CA/MX) still needing a value, with in-run caching so an
-     identical (product_description, origin_country, import_country) tuple is
-     never looked up twice.
+     per market (US/CA/MX) still needing a value.
   2. Merge the results back onto ``costing_chart`` (write-once — an existing
      non-blank value is never overwritten; matches Phase 1's default-fill
      semantics).
@@ -21,14 +19,43 @@ For every ``lft.beproduct.costing_chart`` row (built by Phase 9a,
      exist in the WIP view yet (confirmed 2026-07-17); those pushes are
      skipped and logged, the value stays in ``costing_chart`` only.
 
+PERSISTENT cross-run caching (critical — each NT Orbit call is ~30s)
+----------------------------------------------------------------------
+``costing_chart`` is FULLY OVERWRITTEN by every Phase 9a run (see its own
+docstring), which wipes every hts_code/duty_rate_*/tariff_rate value Phase 9b
+previously filled. Without a cache that survives ACROSS runs, every single
+daily run would have to re-look-up EVERY row from scratch at ~30s/call — for
+hundreds of rows that's tens of minutes of pure API latency, for data that
+almost never actually changes.
+
+So this notebook keeps a separate, NEVER-overwritten Delta table,
+``duty_cache_table`` (default ``lft.beproduct.nt_orbit_duty_cache``), keyed on
+``sync.duty.DUTY_CACHE_KEY_COLS`` = (product_description, origin_country_code,
+import_country_code). Same input -> same output, so before calling NT Orbit
+for any (row, market) that still needs a value, this table is checked first;
+a hit is used directly (skips the network call entirely) unless it's older
+than ``cache_ttl_days`` (default 180 — tariff/duty POLICY does change over
+time, e.g. Section 301/122 rate changes, so this is not cached forever).
+Only genuinely new (style/content/gender/class/sub_class, origin, market)
+combinations, or ones that have gone stale, ever reach the live API. Newly
+fetched results are written back into this table (never deleted), so the
+NT Orbit cost for a given combination is paid roughly once per
+``cache_ttl_days``, not once per Phase 9a rebuild.
+
 Auth (Microsoft Entra ID delegated OAuth2, NOT the DTC x-api-key scheme)
 -------------------------------------------------------------------------
 The Orbit API takes a per-user Entra ID access token. This notebook only
 performs step 2 of the flow (refresh_token -> access_token, roughly hourly);
 step 1 (the ONE-TIME interactive authorization-code login as
 "auchunkei@lifung.com") is done locally via
-``scripts/nt_orbit_oauth_setup.py``, whose output seeds the Databricks secret
-scope. See dtc/python/client/entra_auth.py for the full flow.
+``scripts/nt_orbit_oauth_setup.py`` (delegated login as auchunkei@lifung.com
+against a dedicated app registration created for this integration — a
+confidential client with its own client_secret), whose output seeds the
+Databricks secret scope. ``nt_orbit_client_secret`` IS expected to be present
+for this setup; it is read best-effort (falls back to None) purely so the
+same code also works unchanged if a future setup switches to a public-client
+flow (device-code/manual) that has no secret. See
+dtc/python/client/entra_auth.py for the full flow.
 
 Because ``dbutils.secrets`` is READ-ONLY, a rotated refresh token (Entra
 commonly rotates it on every use) cannot be written back into the secret
@@ -72,6 +99,10 @@ dbutils.widgets.text("dry_run", "true", "Dry run (true/false) — skip writes")
 dbutils.widgets.text("push_to_wip", "false", "Push filled values back to DTC WIP (true/false)")
 dbutils.widgets.text("max_workers", "4", "Parallel NT Orbit call threads")
 dbutils.widgets.text("batch_size", "100", "Rows per WIP PATCH call")
+dbutils.widgets.text("duty_cache_table", "lft.beproduct.nt_orbit_duty_cache",
+                     "Persistent cross-run NT Orbit result cache (fully-qualified)")
+dbutils.widgets.text("cache_ttl_days", str(duty.DEFAULT_CACHE_TTL_DAYS),
+                     "Days before a cached lookup is re-queried")
 
 catalog       = dbutils.widgets.get("catalog")
 schema        = dbutils.widgets.get("schema")
@@ -83,6 +114,8 @@ dry_run       = dbutils.widgets.get("dry_run").strip().lower() == "true"
 push_to_wip   = dbutils.widgets.get("push_to_wip").strip().lower() == "true"
 max_workers   = int(dbutils.widgets.get("max_workers") or 4)
 batch_size    = int(dbutils.widgets.get("batch_size") or 100)
+duty_cache_table = dbutils.widgets.get("duty_cache_table").strip()
+cache_ttl_days   = int(dbutils.widgets.get("cache_ttl_days") or duty.DEFAULT_CACHE_TTL_DAYS)
 
 wip_table       = f"{catalog}.{schema}.dtc_wip_{customer.lower()}"
 registry_table  = f"{catalog}.{schema}.dtc_request_registry"
@@ -94,6 +127,7 @@ print("PHASE 9b — Fill HTS Code / Duty Rate / Tariff Rate (NT Orbit Duty Tools
 print("=" * 72)
 print(f"  Costing chart : {costing_table}")
 print(f"  WIP table     : {wip_table}")
+print(f"  Duty cache    : {duty_cache_table}  (ttl={cache_ttl_days}d)")
 print(f"  dry_run={dry_run}  push_to_wip={push_to_wip}  max_workers={max_workers}")
 
 # COMMAND ----------
@@ -118,7 +152,7 @@ nt_orbit_client_id     = dbutils.secrets.get(scope="beproduct", key="nt_orbit_cl
 try:
     nt_orbit_client_secret = dbutils.secrets.get(scope="beproduct", key="nt_orbit_client_secret")
 except Exception:
-    nt_orbit_client_secret = None  # public/native app registration; secret not required
+    nt_orbit_client_secret = None  # tolerate a future public-client (no-secret) setup
 
 if _stored:
     nt_orbit_refresh_token = _stored[0]["refresh_token"]
@@ -181,20 +215,57 @@ print(f"  Rows needing at least one NT Orbit lookup: {len(needing)}")
 
 # COMMAND ----------
 
-# ── Step 2: Call NT Orbit (with in-run caching) ───────────────────────────────
-print(f"\nStep 2: Calling NT Orbit with {max_workers} worker(s) …")
+# ── Step 2: Consult the PERSISTENT cross-run cache before calling NT Orbit ───
+# Each call is ~30s and costing_chart is fully rebuilt by every Phase 9a run,
+# so the persistent cache (not just in-run dedup) is what keeps this notebook
+# fast on the 2nd+ run. See module docstring.
+print(f"\nStep 2: Checking persistent cache {duty_cache_table} …")
 
-cache: dict = {}       # duty.cache_key(row, country) -> DutyLookupResult | Exception
-cache_lock_hits = 0
-call_jobs = []         # (row_idx, country_code, cache_key)
+spark.sql(f"""
+CREATE TABLE IF NOT EXISTS {duty_cache_table} (
+  product_description STRING, origin_country_code STRING, import_country_code STRING,
+  hts_code STRING, duty_rate DOUBLE, tariff_rate DOUBLE, classification_name STRING,
+  looked_up_at TIMESTAMP
+) USING DELTA
+""")
 
+persistent_cache_rows = spark.table(duty_cache_table).collect()
+persistent_cache: dict = {}   # duty.cache_key(...) -> cache row dict
+for r in persistent_cache_rows:
+    rd = r.asDict()
+    persistent_cache[(rd["product_description"], rd["origin_country_code"],
+                      rd["import_country_code"])] = rd
+print(f"  Persistent cache has {len(persistent_cache)} entrie(s)")
+
+call_jobs = []          # (row_idx, country_code, cache_key)
 for idx, row in enumerate(needing):
     for country_code in duty.markets_needing_lookup(row):
         key = duty.cache_key(row, country_code)
         call_jobs.append((idx, country_code, key))
 
 unique_keys = {k for _, _, k in call_jobs}
-print(f"  Lookup calls needed: {len(call_jobs)}  (unique: {len(unique_keys)})")
+
+cache: dict = {}         # duty.cache_key(...) -> DutyLookupResult  (used for ALL keys this run)
+keys_from_cache_hit = set()
+keys_to_call = set()
+for key in unique_keys:
+    cache_row = persistent_cache.get(key)
+    if cache_row is not None and not duty.is_cache_entry_stale(
+        cache_row.get("looked_up_at"), now, ttl_days=cache_ttl_days
+    ):
+        cache[key] = duty.cache_row_to_result(cache_row)
+        keys_from_cache_hit.add(key)
+    else:
+        keys_to_call.add(key)
+
+print(f"  Lookups needed: {len(unique_keys)} unique  "
+      f"({len(keys_from_cache_hit)} served from cache, {len(keys_to_call)} require a live call)")
+
+# COMMAND ----------
+
+# ── Step 2b: Call NT Orbit ONLY for keys not served by the persistent cache ──
+print(f"\nStep 2b: Calling NT Orbit for {len(keys_to_call)} uncached key(s) "
+      f"with {max_workers} worker(s) …")
 
 
 def _call(key):
@@ -209,19 +280,58 @@ def _call(key):
 
 
 errors = {}
-if unique_keys:
+newly_fetched: dict = {}   # duty.cache_key(...) -> DutyLookupResult (to persist below)
+if keys_to_call:
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {pool.submit(_call, k): k for k in unique_keys}
+        futures = {pool.submit(_call, k): k for k in keys_to_call}
         for future in as_completed(futures):
             key = futures[future]
             try:
                 _, result = future.result()
                 cache[key] = result
+                newly_fetched[key] = result
             except Exception as e:
                 errors[key] = str(e)
                 print(f"  ❌ {key}: {e}")
 
-print(f"  ✅ {len(cache)} unique lookups OK, {len(errors)} failed")
+print(f"  ✅ {len(newly_fetched)} new live lookup(s) OK, {len(errors)} failed "
+      f"(+ {len(keys_from_cache_hit)} served from cache = {len(cache)} total)")
+
+# COMMAND ----------
+
+# ── Step 2c: Persist newly-fetched results into the cross-run cache ─────────
+if newly_fetched and not dry_run:
+    print(f"\nStep 2c: Writing {len(newly_fetched)} new entrie(s) to {duty_cache_table} …")
+    cache_rows = [duty.build_cache_row(key, result, looked_up_at=now)
+                  for key, result in newly_fetched.items()]
+    CACHE_SCHEMA = StructType([
+        StructField("product_description", StringType()),
+        StructField("origin_country_code", StringType()),
+        StructField("import_country_code", StringType()),
+        StructField("hts_code", StringType()),
+        StructField("duty_rate", DoubleType()),
+        StructField("tariff_rate", DoubleType()),
+        StructField("classification_name", StringType()),
+        StructField("looked_up_at", TimestampType()),
+    ])
+    (spark.createDataFrame(cache_rows, CACHE_SCHEMA)
+          .createOrReplaceTempView("_p9b_cache_updates"))
+    on_clause = " AND ".join(f"t.{c} = s.{c}" for c in duty.DUTY_CACHE_KEY_COLS)
+    spark.sql(f"""
+      MERGE INTO {duty_cache_table} t
+      USING _p9b_cache_updates s
+        ON {on_clause}
+      WHEN MATCHED THEN UPDATE SET
+        t.hts_code = s.hts_code, t.duty_rate = s.duty_rate,
+        t.tariff_rate = s.tariff_rate, t.classification_name = s.classification_name,
+        t.looked_up_at = s.looked_up_at
+      WHEN NOT MATCHED THEN INSERT *
+    """)
+    print(f"✅ Cache now has {spark.table(duty_cache_table).count()} entrie(s)")
+elif newly_fetched:
+    print(f"\nStep 2c: DRY RUN — would write {len(newly_fetched)} new entrie(s) to {duty_cache_table}")
+else:
+    print("\nStep 2c: No new cache entries to write (everything was already cached).")
 
 # COMMAND ----------
 
@@ -371,9 +481,12 @@ orbit.close()
 print(f"\n{'='*72}")
 print("SUMMARY")
 print(f"{'='*72}")
-print(f"  Costing chart rows scanned : {len(chart_rows)}")
-print(f"  Rows needing lookup        : {len(needing)}")
-print(f"  Unique NT Orbit calls made : {len(cache)}  (failed: {len(errors)})")
-print(f"  Rows with filled fields    : {len(row_updates)}")
+print(f"  Costing chart rows scanned   : {len(chart_rows)}")
+print(f"  Rows needing lookup          : {len(needing)}")
+print(f"  Unique keys needed           : {len(unique_keys)}")
+print(f"    served from persistent cache : {len(keys_from_cache_hit)}  (no API call, no ~30s wait)")
+print(f"    fetched live from NT Orbit   : {len(newly_fetched)}  (failed: {len(errors)})")
+print(f"  Rows with filled fields      : {len(row_updates)}")
+print(f"  Cache TTL                    : {cache_ttl_days} day(s)  (table: {duty_cache_table})")
 print(f"  dry_run={dry_run}  push_to_wip={push_to_wip}")
 print("\n✅ Phase 9b duty-rate fill complete")

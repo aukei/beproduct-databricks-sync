@@ -13,7 +13,7 @@ This module holds only the deterministic, unit-testable decision logic:
   * ``build_product_description`` — Style Description + Content + Gender +
     Class + Sub Class concatenation (costing_chart columns: style_description,
     fabric_content, gender, class_name, sub_class).
-  * ``build_calc_request`` — the NT Orbit ``/calcuate/single/`` request body
+  * ``build_calc_request`` — the NT Orbit ``/calculate/single/`` request body
     for one costing_chart row x one target market (US/CA/MX).
   * ``markets_needing_lookup`` — decides which of the up-to-3 per-row API
     calls (US/CA/MX) are actually needed, so Phase 9b never re-calls NT Orbit
@@ -75,6 +75,26 @@ GENERAL_DUTY_LINE_NAME = "General Duty"
 
 DEFAULT_DE_MINIMIS = False
 DEFAULT_MODE_OF_TRANSPORT = "freight"
+
+# Persistent cross-run cache key columns (see docstring below / the
+# lft.beproduct.nt_orbit_duty_cache table used by
+# dtc/notebooks/p9b_fill_duty_rates.py). Each NT Orbit call is ~30s and
+# costing_chart is FULLY OVERWRITTEN by every Phase 9a run, so without a
+# cache that survives ACROSS runs (not just within one), every daily run
+# would re-look-up every row from scratch. Same (product_description,
+# origin_country, import_country) -> same duty/tariff/HTS result, so this is
+# cached indefinitely (subject to CACHE_TTL_DAYS below, since tariff policy
+# can genuinely change over time, e.g. Section 301/122 rate changes).
+DUTY_CACHE_KEY_COLS: Tuple[str, str, str] = (
+    "product_description", "origin_country_code", "import_country_code",
+)
+
+# How long a cached lookup is trusted before being treated as stale and
+# re-queried. Tariffs/duty rates DO change (trade policy shifts), so this is
+# not cached forever - but a several-month TTL avoids re-paying the ~30s/call
+# cost every single day for data that hasn't changed. Override via the
+# notebook's `cache_ttl_days` widget.
+DEFAULT_CACHE_TTL_DAYS = 180
 
 # WIP (DTC) column names per factory_slot ("Main" | "1" | "2" | "3"), confirmed
 # live 2026-07-17 (see AGENTS.md / docs/costing_interested_fields.txt). Tariff
@@ -157,7 +177,7 @@ def build_calc_request(
     mode_of_transport: str = DEFAULT_MODE_OF_TRANSPORT,
 ) -> Dict[str, Any]:
     """
-    Build the NT Orbit ``/calcuate/single/`` request body for one costing_chart
+    Build the NT Orbit ``/calculate/single/`` request body for one costing_chart
     row targeting one market.
 
     origin_country_code == export_country_code == costing_chart
@@ -177,14 +197,80 @@ def cache_key(row: Dict[str, Any], import_country_code: str) -> Tuple[str, Optio
     """
     Dedup key for caching NT Orbit calls across costing_chart rows that would
     produce an identical request (same product description + origin + target
-    market — e.g. multiple colors of the same style/slot). Callers should keep
-    an in-memory ``{cache_key(...): response}`` dict for the duration of one
-    Phase 9b run.
+    market — e.g. multiple colors of the same style/slot). This is the SAME
+    key used for both the in-run dict cache AND the persistent
+    ``nt_orbit_duty_cache`` Delta table (its 3-column primary key is
+    ``DUTY_CACHE_KEY_COLS``, in this same order) — the two are meant to be
+    used together: seed the in-run cache from the persistent table at the
+    start of a run, and write new/refreshed entries back to the persistent
+    table at the end, so a cost-visible NT Orbit call is only ever made once
+    per unique key, EVER (until it goes stale — see DEFAULT_CACHE_TTL_DAYS),
+    not once per run.
     """
     return (
         build_product_description(row),
         row.get("production_country"),
         import_country_code,
+    )
+
+
+def is_cache_entry_stale(
+    looked_up_at: Optional[Any],
+    now: Any,
+    ttl_days: int = DEFAULT_CACHE_TTL_DAYS,
+) -> bool:
+    """
+    True if a persistent cache entry is old enough to be re-queried rather
+    than trusted (tariff/duty rates can genuinely change over time).
+
+    Args:
+        looked_up_at: a datetime (or None — treated as stale so a corrupt/
+            missing timestamp always errs on the side of re-querying).
+        now: a datetime to compare against (pass the run's `now`, not
+            datetime.now(), so this is deterministic/testable).
+        ttl_days: cache lifetime in days.
+    """
+    if looked_up_at is None:
+        return True
+    age = now - looked_up_at
+    try:
+        age_days = age.total_seconds() / 86400.0
+    except AttributeError:
+        return True
+    return age_days > ttl_days
+
+
+def build_cache_row(
+    key: Tuple[str, Optional[str], str],
+    result: "DutyLookupResult",
+    looked_up_at: Any,
+) -> Dict[str, Any]:
+    """
+    Build one row for the persistent ``nt_orbit_duty_cache`` table from a
+    cache key + its NT Orbit lookup result, ready to write via a Spark
+    MERGE (see dtc/notebooks/p9b_fill_duty_rates.py).
+    """
+    description, origin_country_code, import_country_code = key
+    return {
+        "product_description": description,
+        "origin_country_code": origin_country_code,
+        "import_country_code": import_country_code,
+        "hts_code": result.hts_code,
+        "duty_rate": result.duty_rate,
+        "tariff_rate": result.tariff_rate,
+        "classification_name": result.classification_name,
+        "looked_up_at": looked_up_at,
+    }
+
+
+def cache_row_to_result(cache_row: Dict[str, Any]) -> "DutyLookupResult":
+    """Reconstruct a DutyLookupResult from a persistent-cache row (dict)."""
+    return DutyLookupResult(
+        hts_code=cache_row.get("hts_code"),
+        duty_rate=cache_row.get("duty_rate"),
+        tariff_rate=cache_row.get("tariff_rate"),
+        classification_name=cache_row.get("classification_name"),
+        raw={},
     )
 
 
@@ -238,7 +324,7 @@ class DutyLookupResult:
 
 def extract_duty_fields(response: Dict[str, Any]) -> DutyLookupResult:
     """
-    Parse one NT Orbit ``/calcuate/single/`` response into
+    Parse one NT Orbit ``/calculate/single/`` response into
     (hts_code, general_duty_rate, tariff_rate).
 
     See module docstring for why ``duty_rate`` is the "General Duty" line's
