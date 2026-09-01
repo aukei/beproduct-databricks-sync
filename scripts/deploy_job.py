@@ -214,7 +214,17 @@ def build_tasks():
     # (run_if=ALL_DONE, so a disabled run_phase0 doesn't deadlock them).
     tasks.append(gate_task("gate_phase0", "run_phase0", depends=[dep("wait_cluster")]))
     tasks.append(nb_task("phase0_pull", f"{NB_DTC}/p0_pull_xts_master_to_delta", {
-        "dtc_environment": ENV, "dtc_workspace": WS, "dtc_document": XTS_DOC,
+        # IMPORTANT: the notebook's widget is "xts_document", deliberately NOT
+        # aliased from "dtc_document" — Databricks auto-injects every
+        # job-level parameter into every task's widgets by name, and this job
+        # ALSO has an unrelated job-level "dtc_document" parameter (default
+        # "KTB WIP", used by the WIP-pulling tasks below). Aliasing this
+        # task's "dtc_document" widget to {{job.parameters.xts_document}}
+        # gets silently overridden by that auto-injection, so this task must
+        # use its own uniquely-named parameter instead. Live-debugged
+        # 2026-09-01: this collision caused EVERY Phase 0 run to search "KTB
+        # WIP" instead of "XTS Master" and pull 0 rows. See AGENTS.md decisions log.
+        "dtc_environment": ENV, "dtc_workspace": WS, "xts_document": XTS_DOC,
         "catalog": CAT, "schema": SCH,
     }, depends=[dep("gate_phase0", outcome="true")]))
     tasks.append(nb_task("phase0_upsert", f"{NB_BP}/p0_xts_master_to_directory_upsert", {
@@ -295,10 +305,18 @@ def build_tasks():
     tasks.append(gate_task("gate_phase9a", "run_phase9a",
                            depends=[dep("phase0_push")], run_if=jobs.RunIf.ALL_DONE))
     tasks.append(nb_task("pull_lineplan_dtc", f"{NB_DTC}/p9a_pull_lineplan_to_delta", {
+        # IMPORTANT: widget is "lineplan_document", NOT aliased from
+        # "dtc_document" -- same Databricks auto-injection collision as
+        # phase0_pull above (this job's job-level "dtc_document" parameter,
+        # default "KTB WIP", would silently win over a same-named task
+        # widget). Live-debugged 2026-09-01: this collision meant
+        # dtc_lineplan_ktb was ALWAYS 0 rows and costing_chart's LinePlan
+        # fields (order_quantity/target_ldp/target_fob/supplier_type) were
+        # ALWAYS null. See AGENTS.md decisions log.
         "dtc_environment": ENV,
         "customer":        CUST,
         "dtc_workspace":   WS,
-        "dtc_document":    LINEPLAN_DOC,
+        "lineplan_document": LINEPLAN_DOC,
         "catalog":         CAT,
         "schema":          SCH,
         "write_mode":      "overwrite",

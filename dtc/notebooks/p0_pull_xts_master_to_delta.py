@@ -32,7 +32,20 @@ Output (full overwrite every run — this document is small, ~40-60 rows total):
 Parameters:
   - dtc_environment (default: uat)
   - dtc_workspace (default: KTB)
-  - dtc_document (default: XTS Master)
+  - xts_document (default: XTS Master)
+
+IMPORTANT — widget name (live-debugged 2026-09-01): this widget is
+deliberately named "xts_document", NOT "dtc_document". Databricks Jobs
+auto-injects EVERY job-level parameter into EVERY task's widgets by name; the
+job also has an unrelated job-level parameter literally named "dtc_document"
+(default "KTB WIP", used by the WIP-pulling tasks). If this notebook's widget
+were also named "dtc_document", that auto-injection SILENTLY WINS OVER this
+task's own explicit base_parameters mapping in scripts/deploy_job.py, causing
+this notebook to search the wrong DTC document ("KTB WIP" instead of "XTS
+Master") on every scheduled run — confirmed live by decoding an actual run's
+notebook output, which printed "Document : KTB WIP" and "0/2 exact matches"
+despite the job's "xts_document" parameter correctly resolving to "XTS
+Master" the whole time. Do not rename this widget back to "dtc_document".
   - catalog / schema (default: lft / beproduct)
 """
 
@@ -93,13 +106,13 @@ REGISTRY_SCHEMA = StructType([
 
 dbutils.widgets.text("dtc_environment", "uat",         "DTC Environment")
 dbutils.widgets.text("dtc_workspace",   "KTB",         "DTC Workspace")
-dbutils.widgets.text("dtc_document",    "XTS Master",  "DTC Document name")
+dbutils.widgets.text("xts_document",    "XTS Master",  "DTC Document name (XTS Master, NOT dtc_document -- see module docstring)")
 dbutils.widgets.text("catalog",         "lft",         "Catalog")
 dbutils.widgets.text("schema",          "beproduct",   "Schema")
 
 environment = dbutils.widgets.get("dtc_environment").strip().lower()
 workspace   = dbutils.widgets.get("dtc_workspace").strip()
-document    = dbutils.widgets.get("dtc_document").strip()
+document    = dbutils.widgets.get("xts_document").strip()
 catalog     = dbutils.widgets.get("catalog").strip()
 schema      = dbutils.widgets.get("schema").strip()
 
@@ -274,7 +287,7 @@ if reg_rows:
       USING _xts_reg_src s
         ON t.environment = s.environment AND t.request_reference = s.request_reference
       WHEN MATCHED THEN UPDATE SET
-        t.request_id = s.request_id, t.sheet_id = s.sheet_id,
+        t.document = s.document, t.request_id = s.request_id, t.sheet_id = s.sheet_id,
         t.view_id = s.view_id, t.view_name = s.view_name,
         t.row_count = s.row_count, t.last_extracted = s.last_extracted,
         t.msgs = s.msgs, t.updated_at = s.updated_at

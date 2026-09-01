@@ -526,3 +526,5 @@ Design a persistent caching mechanism, e.g. cache API results in table with a co
 Confirm from project team Phase 8a (upload DTC Fabric sheets to databricks) and 8b are replaced by separate "MaterialLib" application. Can take out / disable from DAG.
 update diagram.md to reflect current repo.
 which tables under lft.beproduct can be dropped?
+(dropped ktb_style_push_log, dtc_fabric_ktb, dtc_fabric_registry)
+

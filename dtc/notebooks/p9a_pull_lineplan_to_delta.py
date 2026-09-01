@@ -106,7 +106,14 @@ REGISTRY_FIELDS = StructType([
 dbutils.widgets.text("dtc_environment",  "uat",          "DTC Environment")
 dbutils.widgets.text("customer",         "KTB",          "Customer code")
 dbutils.widgets.text("dtc_workspace",    "KTB",          "DTC Workspace")
-dbutils.widgets.text("dtc_document",     "KTB LinePlan", "DTC Document name")
+dbutils.widgets.text("lineplan_document", "KTB LinePlan", "DTC Document name "
+                     "(NOT dtc_document -- Databricks auto-injects every job-level "
+                     "parameter into every task's widgets by name; this job also has "
+                     "an unrelated job-level 'dtc_document' param used by the "
+                     "WIP-pulling tasks, which would silently win over a "
+                     "same-named widget here and make this notebook search 'KTB WIP' "
+                     "instead of 'KTB LinePlan' -- confirmed live 2026-09-01, see "
+                     "AGENTS.md decisions log)")
 dbutils.widgets.text("catalog",          "lft",          "Catalog")
 dbutils.widgets.text("schema",           "beproduct",    "Schema")
 dbutils.widgets.text("write_mode",       "overwrite",    "overwrite | append")
@@ -115,7 +122,7 @@ dbutils.widgets.text("max_workers",      "4",            "Parallel get_sheet() t
 environment  = dbutils.widgets.get("dtc_environment").strip().lower()
 customer     = dbutils.widgets.get("customer").strip().upper()
 workspace    = dbutils.widgets.get("dtc_workspace").strip()
-document     = dbutils.widgets.get("dtc_document").strip()
+document     = dbutils.widgets.get("lineplan_document").strip()
 catalog      = dbutils.widgets.get("catalog")
 schema       = dbutils.widgets.get("schema")
 write_mode   = dbutils.widgets.get("write_mode").strip().lower()
