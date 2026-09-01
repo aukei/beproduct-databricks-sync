@@ -16,6 +16,16 @@ Request naming for "KTB LinePlan" follows the pattern used by the
 customer's planning team (not the same as WIP).  All active in-scope
 requests are pulled regardless of naming.
 
+DECISION (project team, 2026-09-01): the project team will maintain MULTIPLE
+LinePlan requests with NO specific naming convention for now (this includes
+"(BACKUP)"-named requests, unlike Phase 0/XTS Master which explicitly
+excludes those). This is intentional -- do NOT add name-pattern filtering
+here. Uniqueness of "Lineplan Ref #" ACROSS ALL requests is a HUMAN-enforced
+invariant (human-in-the-loop), not something this pipeline validates or
+enforces itself. See p9a_build_costing_chart.py's LinePlan aggregation step
+for a best-effort conflict DETECTOR (warns, does not block) that surfaces
+refs whose plan values actually disagree across requests.
+
 View selection (preferred → fallback):
   1. "LINEPLAN_ITS_USE"   — canonical sync view (if added by DTC admin)
   2. "Full"               — current UAT view (30 fields; confirmed 2026-07-17)
@@ -154,6 +164,20 @@ print("✅ DTCConnector ready")
 # ── Discover LinePlan requests + resolve view ─────────────────────────────────
 # LinePlan does not use the same view-resolution as WIP (no WIP_ITS_USE).
 # We discover directly via search_requests + per-request view listing.
+#
+# BUG FIX (live-debugged 2026-09-01): this loop previously called
+# connector.get_request(req_id) and looked for a `sheets` array on the
+# response (detail.get("sheets") / detail.get("data", {}).get("sheets", [])).
+# That field does NOT exist in DTC's actual /v1/requests/{id} response shape
+# -- every other working puller in this codebase (Phase 0/XTS Master, WIP)
+# instead reads the request's own flat `sheetId` field and gets views via the
+# SEPARATE, dedicated `GET /v1/requests/{id}/views` endpoint
+# (connector.get_views()). The old code therefore marked EVERY request as
+# "no sheets" and skipped it unconditionally, regardless of whether it
+# actually had data -- confirmed live: a request the user manually verified
+# has 8 real rows (Lineplan Ref# WC-S8001..WC-S8008) was still skipped with
+# "no sheets". Fixed to use the same proven get_views() pattern as
+# p0_pull_xts_master_to_delta.py. See AGENTS.md decisions log.
 print(f"\nDiscovering active requests in '{document}' …")
 raw_reqs = connector.search_requests(workspace, document,
                                      filters={"requestIsActive": "Y"})
@@ -163,17 +187,11 @@ eligible   = []   # list of (request_ref, request_id, sheet_id, view_id, view_na
 skipped    = []
 
 for req in raw_reqs:
-    req_id = req.get("requestId") or req.get("id", "")
-    ref    = req.get("requestReference", "?")
+    req_id   = req.get("requestId") or req.get("id", "")
+    ref      = req.get("requestReference", "?")
+    sheet_id = req.get("sheetId") or req.get("id", "")
     try:
-        detail = connector.get_request(req_id)
-        sheets = detail.get("sheets") or detail.get("data", {}).get("sheets", [])
-        if not sheets:
-            skipped.append((ref, "no sheets"))
-            continue
-        sheet   = sheets[0]
-        sheet_id = sheet.get("sheetId") or sheet.get("id", "")
-        views    = sheet.get("views") or []
+        views = connector.get_views(req_id)
 
         # Pick preferred view, then fallback
         chosen_view = None
@@ -186,7 +204,8 @@ for req in raw_reqs:
                 break
 
         if not chosen_view:
-            skipped.append((ref, f"no {PREFERRED_VIEW!r} or {FALLBACK_VIEW!r} view"))
+            found = [v.get("viewName") or v.get("name") for v in views]
+            skipped.append((ref, f"no {PREFERRED_VIEW!r} or {FALLBACK_VIEW!r} view (have {found})"))
             continue
 
         view_id   = chosen_view.get("viewId") or chosen_view.get("id", "")

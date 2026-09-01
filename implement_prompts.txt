@@ -525,6 +525,11 @@ Design a persistent caching mechanism, e.g. cache API results in table with a co
 ## checkpoint 2026/09/01
 Confirm from project team Phase 8a (upload DTC Fabric sheets to databricks) and 8b are replaced by separate "MaterialLib" application. Can take out / disable from DAG.
 update diagram.md to reflect current repo.
-which tables under lft.beproduct can be dropped?
-(dropped ktb_style_push_log, dtc_fabric_ktb, dtc_fabric_registry)
+- which tables under lft.beproduct can be dropped? (dropped ktb_style_push_log, dtc_fabric_ktb, dtc_fabric_registry)
+- project team will maintain multiple lineplan DTC requestion without specific naming convention for now (2026/9/1). Human in the loop to ensure each lineplan ref# is unique amonng all lineplan requests.
+- lft.beproduct.costing_chart, found that factory-slot duplicates functions of supplier_type - use supplier_type and remove factory_slot.
+    factory_slot/supplier_type: for the purpose of transpose between WIP & Costing chart, (Main Supplier, Main Factory), (Supplier 1, Factory 1), (Supplier 2, Factory 2), (Supplier 3, Factory 3) are 4 pairs of values each WIP row contains - total 8 fields. These split in to 4 rows in costing_chart, each row 2 fields. 
+So we should only need 1 flag - i.e. Supplier_type to indicate whether it is (Main | 1| 2|3) for both supplier and factory.
+- when run first time only main factory assigned, factory 2/3 not assigned; 2nd time factory 2/3 also assigned, will 2nd run duplicate main factory records or upsert costing_chart?
+i will truncate costing_chart now so all get fresh populated.
 

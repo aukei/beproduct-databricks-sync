@@ -25,8 +25,9 @@ This module holds only the deterministic, unit-testable decision logic:
     duty+tariff+fee total — see module docstring section below for why).
   * ``merge_lookup_into_row`` — applies one market's extracted fields onto a
     costing_chart row dict, producing only the changed columns.
-  * ``build_wip_patch_fields`` — maps a costing_chart row's factory_slot +
-    filled fields to the corresponding DTC WIP per-slot column names, for the
+  * ``build_wip_patch_fields`` — maps a costing_chart row's supplier_type
+    (the "Main"|"1"|"2"|"3" slot flag, renamed from factory_slot 2026-09-01)
+    + filled fields to the corresponding DTC WIP per-slot column names, for the
     Phase 1-style PATCH push. Tariff Rate columns do not exist in the WIP view
     yet (AGENTS.md verified-discoveries log, 2026-07-17) so they are reported
     as skipped rather than silently dropped.
@@ -426,16 +427,20 @@ def build_wip_patch_fields(
     filled_fields: Dict[str, Any],
 ) -> WipPatchPlan:
     """
-    Map a costing_chart row's factory_slot ("Main" | "1" | "2" | "3") plus its
-    NEWLY-filled fields (hts_code / duty_rate_us / duty_rate_ca / duty_rate_mx
-    / tariff_rate — as produced by merge_lookup_into_row, across one or more
-    market lookups) to the corresponding DTC WIP column names, ready to become
-    one row object in a ``DTCConnector.patch_rows()`` UPDATE call (the WIP row
-    already exists, so this is always an UPDATE keyed by rowId, never an
-    INSERT).
+    Map a costing_chart row's slot value ("Main" | "1" | "2" | "3" — the
+    costing_chart column is named ``supplier_type``, renamed from
+    ``factory_slot`` 2026-09-01 per the original spec's "Supplier Type -
+    Generated from Master Chart data"; this function's own parameter name is
+    unaffected, it's purely an internal detail) plus its NEWLY-filled fields
+    (hts_code / duty_rate_us / duty_rate_ca / duty_rate_mx / tariff_rate — as
+    produced by merge_lookup_into_row, across one or more market lookups) to
+    the corresponding DTC WIP column names, ready to become one row object in
+    a ``DTCConnector.patch_rows()`` UPDATE call (the WIP row already exists,
+    so this is always an UPDATE keyed by rowId, never an INSERT).
 
     Args:
-        factory_slot: "Main" | "1" | "2" | "3" (costing_chart column).
+        factory_slot: "Main" | "1" | "2" | "3" (from costing_chart's
+            ``supplier_type`` column).
         filled_fields: dict that may contain any of
             {hts_code, duty_rate_us, duty_rate_ca, duty_rate_mx, tariff_rate}.
 

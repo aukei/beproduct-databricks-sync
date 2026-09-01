@@ -528,6 +528,48 @@ kept below for historical reference only (see decisions log):**
 
 ## Decisions on record
 
+- **LinePlan request naming — no filter, human-enforced uniqueness (project
+  team decision, 2026-09-01).** The project team will maintain MULTIPLE DTC
+  LinePlan requests with NO specific naming convention for now (this
+  includes `(BACKUP)`-named requests — unlike Phase 0/XTS Master, which
+  explicitly excludes those). `p9a_pull_lineplan_to_delta.py` therefore has
+  and keeps NO name-pattern filter; it pulls every active request in the
+  document regardless of name. Uniqueness of `"Lineplan Ref #"` ACROSS ALL
+  requests is a HUMAN-enforced invariant (human-in-the-loop), not something
+  this pipeline validates or enforces. `p9a_build_costing_chart.py`'s
+  LinePlan aggregation step (`F.first(ignorenulls=True)` per ref) adds a
+  best-effort conflict DETECTOR that prints a warning (does not block) when
+  a ref's `order_quantity`/`target_ldp`/`target_fob` actually disagree
+  across rows/requests, so violations of the human-enforced invariant are at
+  least surfaced rather than silently resolved to an arbitrary value.
+- **`costing_chart` is a FULL OVERWRITE every `build_costing_chart` run, not
+  an upsert (clarified 2026-09-01).** If a style initially has only "Main"
+  factory assigned and a later run adds Factory 2/3, the later run does NOT
+  duplicate the Main row — the entire table is rebuilt from current WIP +
+  LinePlan state on every run via `.mode("overwrite")`. Manually truncating
+  `costing_chart` before a run is therefore redundant (the overwrite already
+  clears prior content) but harmless. This is also why Phase 9b's
+  `nt_orbit_duty_cache` must be a SEPARATE, never-overwritten table (see
+  Phase 9b entry above) — any HTS/Duty/Tariff values Phase 9b fills into
+  `costing_chart` itself are wiped by the next Phase 9a rebuild.
+- **`factory_slot` renamed to `supplier_type` in `costing_chart` — RESOLVED
+  (2026-09-01), traced back to the original spec.** Initial implementation
+  wrongly mapped `costing_chart.supplier_type` to LinePlan's
+  `"INTERNAL/ SOURCED"` field. Checking `implement_prompts.txt`'s original
+  Phase 9a spec: `"Supplier Type - Generated from Master Chart data"` — i.e.
+  ONE flag, GENERATED from WIP structure (which of the 4 vendor/factory
+  column-pairs a row came from — `"Main"|"1"|"2"|"3"`), NOT the LinePlan
+  business classification. Fixed: `p9a_build_costing_chart.py`'s `factory_slot`
+  column is renamed to `supplier_type` (same values, same derivation — no
+  functional change to Phase 9b's WIP-push routing, which still keys on this
+  same value, just reads it from the renamed column); LinePlan's
+  `"INTERNAL/ SOURCED"` is still captured into `dtc_lineplan_ktb.internal_sourced`
+  (harmless raw data) but is no longer joined into `costing_chart` at all.
+  `dtc/python/sync/duty.py`'s `build_wip_patch_fields()` / `WIP_HTS_COL` /
+  `WIP_DUTY_COL` are UNCHANGED (they only ever took a slot-value string
+  positionally, independent of the caller's column name) — only the caller
+  in `p9b_fill_duty_rates.py` and `COSTING_KEY` were updated to read
+  `supplier_type` instead of `factory_slot`.
 - **Phase 8a/8b retired (2026-09-01), confirmed by the project team.** DTC
   FABRIC → Delta → BeProduct Material Master is superseded by a separate
   "MaterialLib" application. Removed from `scripts/deploy_job.py`'s DAG

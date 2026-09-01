@@ -23,15 +23,24 @@ Vendor / Factory slot structure
 --------------------------------
 Each WIP row (style × color) produces up to 4 costing rows by transposing:
 
-  factory_slot | vendor_col (WIP)           | factory_col (WIP)
-  ─────────────┼────────────────────────────┼────────────────────────────────
-  Main         | Main Vendor (Sampling)      | Main Factory (Sampling)
-  1            | Vendor 1                   | Factory 1
-  2            | Vendor 2                   | Factory 2
-  3            | Vendor 3                   | Factory 3
+  supplier_type | vendor_col (WIP)           | factory_col (WIP)
+  ──────────────┼────────────────────────────┼────────────────────────────────
+  Main          | Main Vendor (Sampling)      | Main Factory (Sampling)
+  1             | Vendor 1                   | Factory 1
+  2             | Vendor 2                   | Factory 2
+  3             | Vendor 3                   | Factory 3
 
 Rows where the vendor column is blank are dropped.
 A style × color may produce 1–4 costing rows.
+
+CORRECTED 2026-09-01: the column carrying "Main"|"1"|"2"|"3" is named
+`supplier_type` (was implemented as a separate `factory_slot` column,
+initially confused with LinePlan's "INTERNAL/ SOURCED" field mapped to a
+*different* `supplier_type` column — that was wrong). The original spec is
+"Supplier Type - Generated from Master Chart data": ONE flag, generated from
+WIP structure (which of the 4 vendor/factory column-pairs a row came from),
+NOT LinePlan's "INTERNAL/ SOURCED" business classification. That LinePlan
+value does not flow into costing_chart at all now.
 
 Costing chart columns
 ----------------------
@@ -50,8 +59,8 @@ fabric_content         | WIP JSON     | "Fabric Group"                (WIP "Cont
 gender                 | WIP JSON     | "Gender"                      (may be blank)
 class_name             | WIP JSON     | "Class"
 sub_class              | WIP JSON     | "Sub Class"
-factory_slot           | derived      | "Main" | "1" | "2" | "3"
-supplier_type          | LinePlan JSON| "INTERNAL/ SOURCED"           (→ Supplier Type)
+supplier_type          | derived      | "Main" | "1" | "2" | "3"  (which vendor/factory
+                       |              |   column-pair; NOT LinePlan "INTERNAL/ SOURCED")
 supplier               | WIP JSON     | vendor column for the slot
 factory                | WIP JSON     | factory column for the slot
 production_country     | WIP JSON     | "Factory Production Country for [Main Factory | Factory 1-3]"
@@ -81,7 +90,9 @@ LinePlan field names (exact DTC column names — all UPPERCASE, confirmed 2026-0
   "PROJECTED VOLUME (season)"     → order_quantity
   "TARGET SAP w/ Tariff impact"   → target_ldp     (lowercase 'i' in "impact")
   "TARGET FOB"                    → target_fob
-  "INTERNAL/ SOURCED"             → supplier_type   (slash-space in name)
+  "INTERNAL/ SOURCED"             pulled into dtc_lineplan_ktb.internal_sourced but
+                                   NOT joined into costing_chart (corrected 2026-09-01
+                                   -- see "Vendor / Factory slot structure" above)
 
   View: "Full" (id 69f0788555010bb745140ac4, 30 fields).
   No "LINEPLAN_ITS_USE" view exists in UAT; p9a_pull_lineplan_to_delta tries it first
@@ -89,9 +100,14 @@ LinePlan field names (exact DTC column names — all UPPERCASE, confirmed 2026-0
 
 LinePlan grouping note
 -----------------------
-LinePlan may have multiple rows per "Lineplan Ref #" (different colors / regions).
-The join uses the FIRST non-null value per ref# for order_quantity / target_ldp /
-target_fob / supplier_type (Spark first() with ignorenulls=True).
+LinePlan may have multiple rows per "Lineplan Ref #" (different colors / regions,
+or -- per project team decision 2026-09-01 -- different requests, since LinePlan
+requests have no naming-convention filter and ref# uniqueness across all of them
+is a human-enforced invariant). The join uses the FIRST non-null value per ref#
+for order_quantity / target_ldp / target_fob (Spark first() with ignorenulls=True).
+p9a_build_costing_chart.py's LinePlan aggregation step also runs a best-effort
+conflict DETECTOR (warns, does not block) when a ref's plan values actually
+disagree across rows/requests.
 
 Phase 9b — implemented (dtc/notebooks/p9b_fill_duty_rates.py)
 ---------------------------------------------------------------
@@ -153,7 +169,7 @@ tested in dtc/tests/test_duty.py.
 Costing chart key
 -----------------
   [customer, season_code, brand, bp_style_no, lf_style_no, color_name,
-   lineplan_ref, factory_slot, supplier, factory]
+   lineplan_ref, supplier_type, supplier, factory]
 
 The table is FULLY OVERWRITTEN on every Phase 9a run (no incremental).
 All prior Phase 9b-filled values are also overwritten; Phase 9b must re-run

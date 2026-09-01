@@ -53,8 +53,12 @@ Costing chart schema (field → source):
   gender              from WIP data_json "Gender"
   class               from WIP data_json "Class"
   sub_class           from WIP data_json "Sub Class"
-  factory_slot        derived  "Main" | "1" | "2" | "3"
-  supplier_type       from LinePlan "INTERNAL/ SOURCED"   (→ Costing Supplier Type)
+  supplier_type       GENERATED from WIP structure: "Main" | "1" | "2" | "3"
+                       (which of the 4 vendor/factory column-pairs this row
+                       came from -- per original spec "Generated from Master
+                       Chart data"; corrected 2026-09-01: this is NOT the
+                       LinePlan "INTERNAL/ SOURCED" field -- that value does
+                       not flow into costing_chart at all)
   supplier            vendor column for the slot
   factory             factory column for the slot
   production_country  from WIP per-slot production country field
@@ -189,22 +193,55 @@ print("\nStep 2: Extracting LinePlan fields …")
 lp_raw = spark.table(lineplan_table)
 print(f"  LinePlan rows: {lp_raw.count()}")
 
+# Per project team decision (2026-09-01): the project team maintains MULTIPLE
+# DTC LinePlan requests with NO naming convention (e.g. season/backup naming
+# is not a reliable filter) — this pull deliberately has NO name-pattern
+# filter and pulls every active request. Uniqueness of "Lineplan Ref #" ACROSS
+# ALL requests is a HUMAN-enforced invariant, not a code-enforced one. Since
+# F.first(ignorenulls=True) below would otherwise silently pick an arbitrary
+# winner on a conflict, detect and loudly warn on any ref whose plan values
+# actually disagree across rows/requests, so a human can catch and fix it.
+conflict_check = (lp_raw
+    .groupBy("lineplan_ref")
+    .agg(
+        F.collect_set("request_reference").alias("requests"),
+        F.countDistinct(F.coalesce(F.col("projected_volume"), F.lit("~null~"))).alias("n_qty"),
+        F.countDistinct(F.coalesce(F.col("target_ldp"),       F.lit("~null~"))).alias("n_ldp"),
+        F.countDistinct(F.coalesce(F.col("target_fob"),       F.lit("~null~"))).alias("n_fob"),
+    )
+    .filter((F.col("n_qty") > 1) | (F.col("n_ldp") > 1) | (F.col("n_fob") > 1))
+)
+conflicts = conflict_check.collect()
+if conflicts:
+    print(f"\n⚠️  WARNING: {len(conflicts)} 'Lineplan Ref #' value(s) have CONFLICTING "
+          f"order_quantity/target_ldp/target_fob across rows/requests — human-in-the-loop "
+          f"uniqueness appears to be violated. An arbitrary non-null value is being used "
+          f"below; please ask the DTC LinePlan owner(s) to reconcile these refs:")
+    for c in conflicts:
+        print(f"     {c['lineplan_ref']}  (found in requests: {c['requests']})")
+
 lp = (lp_raw
     .select(
         F.col("lineplan_ref"),                        # already a fixed column
         F.col("projected_volume").alias("order_quantity"),
         F.col("target_ldp"),
         F.col("target_fob"),
-        F.col("internal_sourced").alias("supplier_type"),  # "INTERNAL/ SOURCED"
+        # NOTE (corrected 2026-09-01): LinePlan's "INTERNAL/ SOURCED" field is
+        # intentionally NOT selected here. The original spec's "Supplier Type"
+        # is "Generated from Master Chart [WIP] data" -- i.e. which of the 4
+        # vendor/factory column-pairs a row came from -- NOT this LinePlan
+        # business classification, which does not flow into costing_chart at
+        # all. See the "supplier_type" column built in Step 4 below.
     )
-    # LinePlan may have multiple rows per lineplan_ref (different colors/regions);
-    # for the join, use the first non-null aggregate per ref as the plan values.
+    # LinePlan may have multiple rows per lineplan_ref (different colors/regions,
+    # or -- per the human-in-the-loop policy above -- different requests); use
+    # the first non-null aggregate per ref as the plan values. See the conflict
+    # check above for cases where this arbitrary pick actually matters.
     .groupBy("lineplan_ref")
     .agg(
         F.first("order_quantity", ignorenulls=True).alias("order_quantity"),
         F.first("target_ldp",     ignorenulls=True).alias("target_ldp"),
         F.first("target_fob",     ignorenulls=True).alias("target_fob"),
-        F.first("supplier_type",  ignorenulls=True).alias("supplier_type"),
     )
 )
 print(f"  LinePlan distinct refs: {lp.count()}")
@@ -229,7 +266,7 @@ COMMON_COLS = [
     "customer", "season_code", "brand", "bp_style_no", "lf_style_no",
     "legacy_code", "style_description", "color_name", "lineplan_ref",
     "fabric_content", "gender", "class_", "sub_class",
-    "order_quantity", "target_ldp", "target_fob", "supplier_type",
+    "order_quantity", "target_ldp", "target_fob",
 ]
 
 def _slot_df(
@@ -238,9 +275,18 @@ def _slot_df(
     vendor_col: str, factory_col: str, country_col: str,
     hts_col: str, du_col: str, dc_col: str, dm_col: str,
 ) -> DataFrame:
-    """Build a single-slot DataFrame and rename to canonical column names."""
+    """Build a single-slot DataFrame and rename to canonical column names.
+
+    "supplier_type" here IS the single flag distinguishing the 4 transposed
+    rows of a style: "Main" | "1" | "2" | "3", GENERATED from which
+    vendor/factory column-pair this row came from in WIP (Master Chart) --
+    matches the original spec's "Supplier Type - Generated from Master Chart
+    data" (corrected 2026-09-01; this is NOT LinePlan's "INTERNAL/ SOURCED",
+    which is a different, per-style-only business classification that does
+    not flow into costing_chart -- see Step 2 above).
+    """
     return (df
-        .withColumn("factory_slot",      F.lit(slot_name))
+        .withColumn("supplier_type",     F.lit(slot_name))
         .withColumn("supplier",          F.col(vendor_col))
         .withColumn("factory",           F.col(factory_col))
         .withColumn("production_country", F.col(country_col))
@@ -254,7 +300,7 @@ def _slot_df(
         .filter(F.col("supplier").isNotNull() & (F.trim(F.col("supplier")) != ""))
         .select(
             *COMMON_COLS,
-            "factory_slot", "supplier", "factory", "production_country",
+            "supplier_type", "supplier", "factory", "production_country",
             "hts_code", "duty_rate_us", "duty_rate_ca", "duty_rate_mx",
             "tariff_rate", "updated_at",
         )
@@ -283,7 +329,7 @@ costing_chart = costing_chart.withColumnRenamed("class_", "class_name")
 total_costing = costing_chart.count()
 print(f"  Costing chart rows after transpose: {total_costing}")
 print(f"  Breakdown by slot:")
-costing_chart.groupBy("factory_slot").count().orderBy("factory_slot").show()
+costing_chart.groupBy("supplier_type").count().orderBy("supplier_type").show()
 
 # COMMAND ----------
 
@@ -311,7 +357,7 @@ print(f"  Output table          : {output_table}")
 print()
 print("  Sample output (first 5 rows):")
 spark.table(output_table).select(
-    "bp_style_no", "color_name", "factory_slot", "supplier", "factory",
+    "bp_style_no", "color_name", "supplier_type", "supplier", "factory",
     "production_country", "hts_code", "duty_rate_us", "order_quantity", "target_ldp"
 ).show(5, truncate=40)
 print()

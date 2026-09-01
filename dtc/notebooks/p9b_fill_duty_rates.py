@@ -205,9 +205,12 @@ chart_rows = [r.asDict() for r in chart_df.collect()]
 print(f"  Total costing_chart rows: {len(chart_rows)}")
 
 # COSTING_KEY mirrors docs/costing_interested_fields.txt "Costing chart key".
+# "supplier_type" (renamed from "factory_slot" 2026-09-01) is the single
+# "Main"|"1"|"2"|"3" flag generated from WIP structure -- see
+# p9a_build_costing_chart.py's module docstring.
 COSTING_KEY = [
     "customer", "season_code", "brand", "bp_style_no", "lf_style_no",
-    "color_name", "lineplan_ref", "factory_slot", "supplier", "factory",
+    "color_name", "lineplan_ref", "supplier_type", "supplier", "factory",
 ]
 
 needing = [r for r in chart_rows if duty.row_needs_any_lookup(r)]
@@ -442,7 +445,7 @@ if push_to_wip and row_updates:
         if not target or not target.get("row_id"):
             push_no_match += 1
             continue
-        plan = duty.build_wip_patch_fields(row.get("factory_slot"), fields)
+        plan = duty.build_wip_patch_fields(row.get("supplier_type"), fields)
         for reason in plan.skipped:
             push_skipped_reasons.add(reason)
         if not plan.fields:
