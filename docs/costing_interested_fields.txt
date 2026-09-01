@@ -125,9 +125,15 @@ For costing rows where hts_code IS NULL or duty_rate_* IS NULL or tariff_rate IS
      Only a miss/stale entry calls the NT Orbit Duty Tools 3rd-party API
      (https://orbitduty.neotangent.com/API-DOCS/, POST /api/v1/calculate/single/,
      one call per market US/CA/MX still needed). This matters because each
-     call is ~30s and costing_chart is FULLY OVERWRITTEN by every Phase 9a
-     run (see below) — without a cache that survives ACROSS runs, every
-     daily run would re-look-up every row from scratch.
+     call is ~30s (sometimes longer — the connector's HTTP timeout is 60s,
+     raised from 30s 2026-09-01 after live timeouts were observed) and
+     costing_chart is FULLY OVERWRITTEN by every Phase 9a run (see below) —
+     without a cache that survives ACROSS runs, every daily run would
+     re-look-up every row from scratch. Calls are made SERIALLY by default
+     (`parallel_calls`/`orbit_parallel_calls` job param = false) rather than
+     via a thread pool, since NT Orbit's tolerance for concurrent calls under
+     real load is unconfirmed; set `parallel_calls=true` (+ `max_workers`) to
+     trade safety for throughput once that's validated.
   2. Fill in the values on costing_chart (write-once — never overwrites an
      already-populated cell). duty_rate_xx is taken from the response's
      "General Duty" detailed_line rate (NOT the combined data.duty_rate,

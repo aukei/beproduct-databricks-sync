@@ -97,7 +97,10 @@ dbutils.widgets.text("dtc_environment", "uat", "DTC Environment")
 dbutils.widgets.text("dtc_workspace", "KTB", "DTC Workspace")
 dbutils.widgets.text("dry_run", "true", "Dry run (true/false) — skip writes")
 dbutils.widgets.text("push_to_wip", "false", "Push filled values back to DTC WIP (true/false)")
-dbutils.widgets.text("max_workers", "4", "Parallel NT Orbit call threads")
+dbutils.widgets.text("parallel_calls", "false",
+                     "Call NT Orbit concurrently (true) or one-at-a-time (false, default/safer)")
+dbutils.widgets.text("max_workers", "4", "Parallel NT Orbit call threads (only used if parallel_calls=true)")
+dbutils.widgets.text("orbit_timeout_seconds", "60", "Per-call NT Orbit HTTP timeout (seconds)")
 dbutils.widgets.text("batch_size", "100", "Rows per WIP PATCH call")
 dbutils.widgets.text("duty_cache_table", "lft.beproduct.nt_orbit_duty_cache",
                      "Persistent cross-run NT Orbit result cache (fully-qualified)")
@@ -112,7 +115,9 @@ environment   = dbutils.widgets.get("dtc_environment").strip().lower()
 workspace     = dbutils.widgets.get("dtc_workspace").strip()
 dry_run       = dbutils.widgets.get("dry_run").strip().lower() == "true"
 push_to_wip   = dbutils.widgets.get("push_to_wip").strip().lower() == "true"
-max_workers   = int(dbutils.widgets.get("max_workers") or 4)
+parallel_calls = dbutils.widgets.get("parallel_calls").strip().lower() == "true"
+max_workers   = int(dbutils.widgets.get("max_workers") or 4) if parallel_calls else 1
+orbit_timeout_seconds = int(dbutils.widgets.get("orbit_timeout_seconds") or 60)
 batch_size    = int(dbutils.widgets.get("batch_size") or 100)
 duty_cache_table = dbutils.widgets.get("duty_cache_table").strip()
 cache_ttl_days   = int(dbutils.widgets.get("cache_ttl_days") or duty.DEFAULT_CACHE_TTL_DAYS)
@@ -128,7 +133,9 @@ print("=" * 72)
 print(f"  Costing chart : {costing_table}")
 print(f"  WIP table     : {wip_table}")
 print(f"  Duty cache    : {duty_cache_table}  (ttl={cache_ttl_days}d)")
-print(f"  dry_run={dry_run}  push_to_wip={push_to_wip}  max_workers={max_workers}")
+print(f"  dry_run={dry_run}  push_to_wip={push_to_wip}")
+print(f"  parallel_calls={parallel_calls}  max_workers={max_workers}  "
+      f"orbit_timeout_seconds={orbit_timeout_seconds}")
 
 # COMMAND ----------
 
@@ -186,7 +193,8 @@ token_provider = EntraTokenProvider(
     on_token_refreshed=_persist_rotated_refresh_token,
 )
 
-orbit = NTOrbitConnector(bearer_token_provider=token_provider.get_access_token)
+orbit = NTOrbitConnector(bearer_token_provider=token_provider.get_access_token,
+                         timeout=orbit_timeout_seconds)
 
 if not orbit.is_healthy():
     raise RuntimeError(
@@ -267,8 +275,13 @@ print(f"  Lookups needed: {len(unique_keys)} unique  "
 # COMMAND ----------
 
 # ── Step 2b: Call NT Orbit ONLY for keys not served by the persistent cache ──
-print(f"\nStep 2b: Calling NT Orbit for {len(keys_to_call)} uncached key(s) "
-      f"with {max_workers} worker(s) …")
+# Serial by default (parallel_calls=false) -- NT Orbit calls are ~30s each and
+# occasionally time out; running them one at a time keeps failures isolated
+# and easy to reason about. Set parallel_calls=true (+ max_workers) to trade
+# safety for throughput once the API's concurrency tolerance is confirmed.
+mode_desc = f"{max_workers} worker(s) in parallel" if parallel_calls else "serially (one at a time)"
+print(f"\nStep 2b: Calling NT Orbit for {len(keys_to_call)} uncached key(s) {mode_desc} "
+      f"(timeout={orbit_timeout_seconds}s/call) …")
 
 
 def _call(key):
@@ -285,14 +298,25 @@ def _call(key):
 errors = {}
 newly_fetched: dict = {}   # duty.cache_key(...) -> DutyLookupResult (to persist below)
 if keys_to_call:
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {pool.submit(_call, k): k for k in keys_to_call}
-        for future in as_completed(futures):
-            key = futures[future]
+    if parallel_calls:
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {pool.submit(_call, k): k for k in keys_to_call}
+            for future in as_completed(futures):
+                key = futures[future]
+                try:
+                    _, result = future.result()
+                    cache[key] = result
+                    newly_fetched[key] = result
+                except Exception as e:
+                    errors[key] = str(e)
+                    print(f"  ❌ {key}: {e}")
+    else:
+        for key in keys_to_call:
             try:
-                _, result = future.result()
+                _, result = _call(key)
                 cache[key] = result
                 newly_fetched[key] = result
+                print(f"  ✅ {key}")
             except Exception as e:
                 errors[key] = str(e)
                 print(f"  ❌ {key}: {e}")

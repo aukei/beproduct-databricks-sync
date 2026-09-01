@@ -148,6 +148,8 @@ JOB_PARAMS = {
     "costing_chart_table": "lft.beproduct.costing_chart",  # test override: lft.beproduct.costing_chart_kei
     "duty_cache_table": "lft.beproduct.nt_orbit_duty_cache",  # Phase 9b: persistent cross-run NT Orbit result cache
     "duty_cache_ttl_days": "180",     # Phase 9b: re-query a cached lookup after this many days
+    "orbit_parallel_calls": "false",  # Phase 9b: call NT Orbit serially by default (safer; set true + tune max_workers for throughput)
+    "orbit_timeout_seconds": "60",    # Phase 9b: per-call NT Orbit HTTP timeout (live-validated 2026-09-01: 30s was too short)
     "push_duty_to_wip": "true",      # Phase 9b: also PATCH filled values back to DTC WIP
     "push_blanks": "false",
     "img_http_timeout": "30",
@@ -343,7 +345,13 @@ def build_tasks():
         "dtc_workspace":       WS,
         "dry_run":             DRY,
         "push_to_wip":         P("push_duty_to_wip"),
+        # Serial by default (2026-09-01, live-validated) -- NT Orbit calls are
+        # ~30s each and occasionally exceed a 30s timeout; serial + 60s
+        # timeout is the safer default. Flip parallel_calls=true to trade
+        # safety for throughput once the API's concurrency tolerance is known.
+        "parallel_calls":      P("orbit_parallel_calls"),
         "max_workers":         "4",
+        "orbit_timeout_seconds": P("orbit_timeout_seconds"),
     }, depends=[dep("gate_phase9b", outcome="true")]))
 
     return tasks

@@ -64,7 +64,14 @@ sheets), staged through **Databricks/Delta**.
   calls the NT Orbit Duty Tools 3rd-party API
   (https://orbitduty.neotangent.com/API-DOCS/, `POST /api/v1/calculate/single/`)
   — up to one call per row per still-blank market (US/CA/MX). Each call is
-  ~30s and `costing_chart` is FULLY OVERWRITTEN by every Phase 9a run, so
+  ~30s (sometimes exceeds it — the connector's default HTTP timeout was
+  raised 30s→60s 2026-09-01 after live timeouts were observed) and calls
+  are made SERIALLY by default (`orbit_parallel_calls=false`) rather than
+  via a thread pool, since the API's concurrency tolerance under real load
+  is unconfirmed and serial failures are easier to diagnose; set
+  `orbit_parallel_calls=true` (+ tune `max_workers`, still hardcoded to 4 in
+  the deployed job) to trade safety for throughput once that's validated.
+  `costing_chart` is FULLY OVERWRITTEN by every Phase 9a run, so
   in-run dedup alone isn't enough — a PERSISTENT cross-run cache table
   (`duty_cache_table`, default `lft.beproduct.nt_orbit_duty_cache`, never
   wiped) keyed on `(product_description, origin_country, import_country)` is
