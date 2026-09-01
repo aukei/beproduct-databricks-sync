@@ -53,6 +53,7 @@ the examples given); CA/MX lookups therefore never touch the shared
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
@@ -215,6 +216,24 @@ def cache_key(row: Dict[str, Any], import_country_code: str) -> Tuple[str, Optio
     )
 
 
+def _as_naive_utc(dt: Any) -> Any:
+    """
+    Normalize a datetime to naive UTC (strip tzinfo, converting first if it
+    was aware). Both call sites here are conceptually always UTC (the
+    notebook's `now = datetime.now(timezone.utc)`, and `looked_up_at` was
+    written from that same `now`) — but Spark's TIMESTAMP columns come back
+    as NAIVE datetimes via `.asDict()`/`collect()` (no tzinfo at all), while
+    a fresh `datetime.now(timezone.utc)` is AWARE. Subtracting one aware and
+    one naive datetime raises `TypeError: can't subtract offset-naive and
+    offset-aware datetimes` (confirmed live 2026-09-01) — normalize both to
+    naive UTC before comparing so it works regardless of which side (if
+    either) happens to carry tzinfo.
+    """
+    if getattr(dt, "tzinfo", None) is not None:
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
 def is_cache_entry_stale(
     looked_up_at: Optional[Any],
     now: Any,
@@ -227,13 +246,15 @@ def is_cache_entry_stale(
     Args:
         looked_up_at: a datetime (or None — treated as stale so a corrupt/
             missing timestamp always errs on the side of re-querying).
+            May be naive or aware; normalized internally (see _as_naive_utc).
         now: a datetime to compare against (pass the run's `now`, not
-            datetime.now(), so this is deterministic/testable).
+            datetime.now(), so this is deterministic/testable). May be
+            naive or aware.
         ttl_days: cache lifetime in days.
     """
     if looked_up_at is None:
         return True
-    age = now - looked_up_at
+    age = _as_naive_utc(now) - _as_naive_utc(looked_up_at)
     try:
         age_days = age.total_seconds() / 86400.0
     except AttributeError:

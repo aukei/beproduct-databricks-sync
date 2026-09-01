@@ -535,6 +535,17 @@ kept below for historical reference only (see decisions log):**
 
 ## Decisions on record
 
+- **Phase 9b cache staleness check: naive-vs-aware datetime crash (live-fixed
+  2026-09-01).** `duty.is_cache_entry_stale()` did `now - looked_up_at`
+  directly; Spark's TIMESTAMP columns come back as NAIVE `datetime` objects
+  via `.asDict()`/`collect()`, while the notebook's `now =
+  datetime.now(timezone.utc)` is AWARE — mixing the two raises `TypeError:
+  can't subtract offset-naive and offset-aware datetimes`. Fixed with a
+  `_as_naive_utc()` normalization helper (strips tzinfo, converting to UTC
+  first if aware) applied to both sides before subtracting, so the
+  comparison works regardless of which side (if either) happens to carry
+  tzinfo. Unit-tested in `dtc/tests/test_duty.py` with the exact
+  naive/aware combinations that crashed in production.
 - **WIP↔LinePlan join changed to INNER (2026-09-01), owner decision.**
   `p9a_build_costing_chart.py` previously used a LEFT JOIN on "Lineplan Ref
   #", so a WIP row with a blank/unmatched ref# still surfaced in

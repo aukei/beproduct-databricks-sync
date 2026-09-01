@@ -204,6 +204,27 @@ check(is_cache_entry_stale(boundary, now, ttl_days=30) is False,
 check(is_cache_entry_stale(boundary, now, ttl_days=10) is True,
       "a shorter custom ttl_days is respected")
 
+print("\n[7b] is_cache_entry_stale() — naive vs. aware datetime mix (live bug, 2026-09-01)")
+# Spark's TIMESTAMP columns come back as NAIVE datetimes via .asDict(), while
+# the notebook's `now = datetime.now(timezone.utc)` is AWARE. This combo
+# raised "TypeError: can't subtract offset-naive and offset-aware datetimes"
+# in production before the fix (_as_naive_utc normalization).
+aware_now = datetime(2026, 9, 1, tzinfo=timezone.utc)
+naive_now = datetime(2026, 9, 1)
+naive_fresh = datetime(2026, 8, 31)   # naive, 1 day before aware_now
+naive_old = datetime(2026, 1, 1)      # naive, well past the default TTL
+aware_fresh = datetime(2026, 8, 31, tzinfo=timezone.utc)
+
+try:
+    r1 = is_cache_entry_stale(naive_fresh, aware_now)  # naive looked_up_at, aware now
+    r2 = is_cache_entry_stale(aware_fresh, naive_now)  # aware looked_up_at, naive now
+    r3 = is_cache_entry_stale(naive_old, aware_now)
+    check(r1 is False, "naive looked_up_at + aware now: 1-day-old is not stale, no crash")
+    check(r2 is False, "aware looked_up_at + naive now: 1-day-old is not stale, no crash")
+    check(r3 is True, "naive looked_up_at + aware now: old entry correctly detected as stale")
+except TypeError as e:
+    check(False, f"naive/aware datetime mix raised TypeError (the live bug): {e}")
+
 key_us = cache_key(row2, "US")
 cache_row = build_cache_row(key_us, result, looked_up_at=now)
 check(cache_row == {
