@@ -114,8 +114,14 @@ not a Phase 3 code defect, and is logged as `download_failed`.
 | `http_timeout` | `30` | CDN download timeout (s) |
 | `max_uploads` | `0` | per-run upload cap (0 = no cap) |
 
-In the orchestrator (`beproduct/orchestrate_sync.py`) Phase 3 is **Step 8**, gated
-by `run_phase3`, preceded by **Step 7** (a `dtc_wip` re-pull).
+In the live daily pipeline (the multi-task job `BeProduct_DTC_sync_dag`,
+`scripts/deploy_job.py`) Phase 3 is task `phase3_images`, gated by
+`gate_phase3` (condition on `run_phase3`), preceded by `repull_dtc` (a
+targeted `dtc_wip` re-pull) — and, since 2026-08-31, the whole WIP chain
+(including Phase 3) only runs after `phase0_push` (`run_if=ALL_DONE`, so
+disabling `run_phase0` doesn't deadlock it). The old single-notebook
+orchestrator `beproduct/orchestrate_sync.py` (Step 8/Step 7 numbering) is
+retired and kept only as a manual fallback.
 
 ---
 

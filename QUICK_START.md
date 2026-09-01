@@ -125,13 +125,13 @@ Run these in order if you prefer step-by-step control (params shown are the key 
 | DAG task | Notebook | Purpose | Output |
 |----------|----------|---------|--------|
 | `pull_lineplan_dtc` | `dtc/notebooks/p9a_pull_lineplan_to_delta` | Pull KTB LinePlan (Full view) | `dtc_lineplan_ktb` |
-| `p9a_build_costing_chart` | `dtc/notebooks/p9a_build_costing_chart` | Join WIP × LinePlan; transpose 4 vendor/factory slots | `costing_chart` |
+| `p9a_build_costing_chart` | `dtc/notebooks/p9a_build_costing_chart` | INNER JOIN WIP × LinePlan on "Lineplan Ref #" (unmatched WIP rows dropped); transpose 4 vendor/factory slots into `supplier_type` "Main"\|"1"\|"2"\|"3" | `costing_chart` |
 
 **Duty/Tariff chain (Phase 9b — after `build_costing_chart`):**
 
 | DAG task | Notebook | Purpose | Output |
 |----------|----------|---------|--------|
-| `fill_duty_rates` | `dtc/notebooks/p9b_fill_duty_rates` | NT Orbit Duty Tools HTS/Duty/Tariff fill, persistent cross-run cache (`gate_phase9b`, `run_phase9b=true` live) | `costing_chart`, `nt_orbit_duty_cache` (+ optional DTC WIP push) |
+| `fill_duty_rates` | `dtc/notebooks/p9b_fill_duty_rates` | NT Orbit Duty Tools HTS/Duty/Tariff fill, persistent cross-run cache. Calls are SERIAL by default (`orbit_parallel_calls=false`), 60s/call timeout (`gate_phase9b`, `run_phase9b=true` live) | `costing_chart`, `nt_orbit_duty_cache` (+ optional DTC WIP push) |
 
 **Other notebooks (on-demand, not in DAG):**
 
@@ -159,7 +159,7 @@ SELECT request_reference, COUNT(*) FROM lft.beproduct.dtc_wip_ktb GROUP BY reque
 -- Costing chart summary (costing_chart has real downstream readers — for
 -- Phase 9b testing use lft.beproduct.costing_chart_kei instead, never write
 -- test data into costing_chart directly)
-SELECT factory_slot, COUNT(*) rows, COUNT(hts_code) with_hts FROM lft.beproduct.costing_chart GROUP BY factory_slot;
+SELECT supplier_type, COUNT(*) rows, COUNT(hts_code) with_hts FROM lft.beproduct.costing_chart GROUP BY supplier_type;
 
 -- Duty/tariff persistent cache size (Phase 9b — avoids re-paying the ~30s/call
 -- NT Orbit cost every daily run; costing_chart itself is fully overwritten

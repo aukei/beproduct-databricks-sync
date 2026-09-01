@@ -115,19 +115,23 @@ After a successful push: `extracted_at ← modified_at ← now()` (row is "in sy
 ### External-upsert MERGE template
 
 The notebook (Cell 5b) contains a ready-to-use MERGE SQL template for
-admin-supplied data. **Match key is `name`** (clarified 2026-08-28 — BeProduct
-treats `name` as the Directory's real key, not `id`/`directory_id`, despite
-those columns existing), and every field uses `COALESCE(src.field, tgt.field)`
-so a source that only supplies SOME fields never NULLs out real data already
+admin-supplied data. **Match key is `name` + `partner_type` TOGETHER**
+(corrected 2026-08-28 — BeProduct treats this pair as the Directory's real
+key, not `id`/`directory_id`/`name` alone, despite those columns existing;
+this template originally matched on `name` alone, which predates the
+clarification and has since been corrected here and in Phase 0's concrete
+implementation), and every field uses `COALESCE(src.field, tgt.field)` so a
+source that only supplies SOME fields never NULLs out real data already
 in `beproduct_directory`:
 
 ```sql
 MERGE INTO lft.beproduct.beproduct_directory AS tgt
 USING (<your_source>) AS src
-ON tgt.name = src.name
+ON tgt.name = src.name AND tgt.partner_type = src.partner_type
 WHEN MATCHED AND (<COALESCE(src.field, tgt.field) IS DISTINCT FROM tgt.field>)
   THEN UPDATE SET field = COALESCE(src.field, tgt.field), …,
        tgt.modified_at = current_timestamp()   -- flags for push
+       -- partner_type is part of the join key and can never change on a matched row
 WHEN NOT MATCHED BY TARGET
   THEN INSERT (id=NULL, …, modified_at=current_timestamp())  -- NULL id → Add on push
 ```

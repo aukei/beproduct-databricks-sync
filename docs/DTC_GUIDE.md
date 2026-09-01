@@ -157,8 +157,13 @@ View: "Full" (id `69f0788555010bb745140ac4`, 30 fields). Exact DTC field names
 
 ### `costing_chart` — Phase 9a Style × Color × Vendor/Factory
 
-Key: `[customer, bp_style_no, color_name, lineplan_ref, factory_slot, supplier, factory]`.
-Slots: Main / 1 / 2 / 3. HTS/Duty columns per slot; `tariff_rate = NULL` (Phase 9b).
+Key: `[customer, bp_style_no, color_name, lineplan_ref, supplier_type, supplier, factory]`.
+`supplier_type` = `"Main"|"1"|"2"|"3"`, GENERATED from WIP structure (which
+vendor/factory column-pair — renamed from `factory_slot` 2026-09-01; this is
+NOT LinePlan's "INTERNAL/ SOURCED" field, which does not flow into this
+table). HTS/Duty columns per slot; `tariff_rate` filled by Phase 9b (NT
+Orbit). WIP↔LinePlan join is INNER (changed from LEFT 2026-09-01) — a WIP
+row with no matching `Lineplan Ref#` is dropped, not surfaced with nulls.
 Full overwrite each run.
 
 ### `dtc_request_mapping` — resolved requests (overwritten each run)

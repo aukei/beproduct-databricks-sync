@@ -133,8 +133,15 @@ SSOT for the title→prefix map: the `SAMPLE_APPS` dict, defined identically in
 |----------|------|--------|
 | `beproduct/00_init_style_app_registry.py` | Cache a folder's application IDs (run on-demand when app setup changes). | `beproduct_style_app_registry` |
 | `beproduct/p1p7_beproduct_style_sync.py` | Pull styles for a folder (FULL/INCREMENTAL); extract header fields, colorways, front image; enrich with 6 sample-app submit arrays. | `ktb_styles` |
-| `beproduct/p5utl_beproduct_master_data_sync.py` | **Admin-only (not in DAG).** Pull or push-back MasterData dropdown choices and Directory records/contacts. Four modes: `PULL_ONLY` (default), `PUSH_MASTER_DATA`, `PUSH_DIRECTORY`, `PUSH_ALL`. `dry_run=true` previews push changes without writing. | `beproduct_master_*` (11 tables), `beproduct_directory`, `beproduct_directory_contacts` |
+| `beproduct/p0_xts_master_to_directory_upsert.py` | **Phase 0** (live in the daily DAG as the first step, 2026-08-31). Reads `dtc_xts_master_ktb` (DTC "XTS Master" pull), dedupes by `(name, partner_type)`, MERGEs into `beproduct_directory` (`COALESCE` on every field so a NULL from XTS never destroys real data). See `PHASE0_WORKFLOW.md`. | `beproduct_directory` |
+| `beproduct/p5utl_beproduct_master_data_sync.py` | Pull or push-back MasterData dropdown choices and Directory records/contacts. Four modes: `PULL_ONLY` (default), `PUSH_MASTER_DATA`, `PUSH_DIRECTORY`, `PUSH_ALL`. `dry_run=true` previews push changes without writing. **`PUSH_DIRECTORY` mode is the live daily `phase0_push` task** (Phase 0's 3rd step); other modes remain admin-only/not in the DAG. | `beproduct_master_*` (11 tables), `beproduct_directory`, `beproduct_directory_contacts` |
 | `standalone/beproduct_style_push.py` | Generic Delta → BeProduct push-back of locally edited rows (`modified_at > synced_at`), type-aware. | BeProduct |
+
+`beproduct_directory` now has TWO populators: `p0_xts_master_to_directory_upsert.py`
+(Phase 0, DTC-sourced, `(name, partner_type)` match key) and
+`p5utl_beproduct_master_data_sync.py` (`PULL_ONLY`, the original full
+BeProduct-side pull). Both write the same table; Phase 0's upsert never
+deactivates rows absent from its (much smaller) XTS Master source.
 
 `standalone/beproduct_style_push.py` is a standalone bi-directional helper (not
 part of the DTC daily pipeline; see `standalone/README.md`). The DTC-driven
@@ -207,6 +214,15 @@ Columns: `id` (BeProduct UUID — null = new record to add on next push),
 `directory_id` (human-readable code), `name`, `partner_type` (VENDOR/FACTORY/…;
 **cannot be changed after creation**), `address`, `country`, `state`, `zip`, `city`,
 `phone`, `fax`, `website`, `notes`, `active`, `data_json`, `synced_at`.
+
+**Match key is `name` + `partner_type` TOGETHER** (confirmed by the project
+team, corrected 2026-08-28) — NOT `id`/`directory_id` alone and NOT `name`
+alone; the same `name` legitimately recurs under a different `partner_type`
+(e.g. the same company as both a Supplier and a Factory) as two separate,
+valid records. Populated by both `p5utl_beproduct_master_data_sync.py`
+(`PULL_ONLY`, full BeProduct-side pull) and Phase 0's
+`p0_xts_master_to_directory_upsert.py` (DTC "XTS Master"-sourced, upsert
+only — never deactivates rows the smaller XTS source doesn't cover).
 
 ### `beproduct_directory_contacts` — 1 row per contact
 

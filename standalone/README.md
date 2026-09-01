@@ -1,9 +1,12 @@
 # Standalone utilities
 
 Notebooks here are **not part of the daily BeProduct ⇄ DTC pipeline**
-(`beproduct/orchestrate_sync.py`) and are **not auto-deployed** by
-`scripts/upload_notebooks.py` (which only scans `beproduct/` and `dtc/notebooks/`).
-Deploy them manually when needed (see below).
+(the multi-task Databricks job `BeProduct_DTC_sync_dag`, defined in
+`scripts/deploy_job.py` — the old single-notebook orchestrator
+`beproduct/orchestrate_sync.py` is retired, kept only as a manual fallback)
+and are **not auto-deployed** by `scripts/upload_notebooks.py` (which only
+scans `beproduct/` and `dtc/notebooks/`). Deploy them manually when needed
+(see below).
 
 ---
 

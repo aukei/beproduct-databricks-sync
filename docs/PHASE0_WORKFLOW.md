@@ -51,8 +51,8 @@ Partner type itself comes from which request/view a row was read from,
 
 ## Step 1 — Pull (`p0_pull_xts_master_to_delta.py`)
 
-- Discovers the 3 exact requests via `search_requests`, resolves each
-  request's partner-type view (`Supplier`/`Factory`/`Mill`), and reads its
+- Discovers the 2 exact requests via `search_requests`, resolves each
+  request's partner-type view (`Supplier`/`Factory`), and reads its
   sheet via `get_sheet`.
 - Extracts rows via `xts_master.extract_directory_row()`, which:
   - Drops brand-config rows (`xts_master.is_brand_row()`).
@@ -62,6 +62,17 @@ Partner type itself comes from which request/view a row was read from,
 - Writes (full overwrite, small dataset):
   - `lft.beproduct.dtc_xts_master_ktb` — one row per kept (partner_type, sheet row)
   - `lft.beproduct.dtc_xts_master_registry` — row_count/last_extracted per request, plus skip reasons for any request/view not found
+
+**Widget naming (live-debugged 2026-09-01):** the notebook's document-name
+widget is deliberately named `xts_document`, NOT `dtc_document`. Databricks
+Jobs auto-injects every job-level parameter into every task's widgets by
+name; this job also has an unrelated job-level `dtc_document` parameter
+(default `"KTB WIP"`, used by the WIP-pulling tasks) which silently overrode
+a same-named task-level `base_parameters` alias, causing Phase 0 to search
+`"KTB WIP"` instead of `"XTS Master"` and pull 0 rows on every run until
+fixed. `scripts/deploy_job.py`'s `phase0_pull` task passes
+`xts_document: {{job.parameters.xts_document}}`, with no aliasing through
+`dtc_document`.
 
 ## Step 2 — Upsert (`p0_xts_master_to_directory_upsert.py`)
 

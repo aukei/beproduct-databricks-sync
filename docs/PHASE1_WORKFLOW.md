@@ -65,6 +65,14 @@ here — they flow the other way in Phase 2. Authoritative mapping:
 
 ## Flow
 
+In the live daily pipeline (`BeProduct_DTC_sync_dag`, `scripts/deploy_job.py`),
+Phase 1's tasks (`bp_style_sync`, `transform`, `pull_master_dtc`,
+`request_manager`, `phase1_push`) run AFTER **Phase 0** (`phase0_push`,
+`run_if=ALL_DONE` so disabling `run_phase0` doesn't deadlock them) —
+Phase 0 pulls DTC's "XTS Master" document into `beproduct_directory` and is
+logically a prerequisite step, not a Phase 1 dependency in the field-mapping
+sense. See `docs/PHASE0_WORKFLOW.md`.
+
 ```
 0. Build/refresh request registry        dtc/notebooks/00_init_request_registry.py
                                          → lft.beproduct.dtc_request_registry
@@ -175,9 +183,10 @@ explicit `request_ids` (partial) and for empty listings (treated as a failed sca
 
 ## Match key, rowIndex & upsert
 
-- **In-request key**: `(LF Style#, Color / Wash)`. Season & brand are fixed per
-  request, so they don't vary within it; the denormalized colorway is what
-  distinguishes rows.
+- **In-request key**: `(BP Style#, Color / Wash)` (Phase 6 match key; was
+  `(LF Style#, Color / Wash)` — matches the table above). Season & brand are
+  fixed per request, so they don't vary within it; the denormalized colorway
+  is what distinguishes rows.
 - **UPDATE**: matched row → PATCH changed non-key fields by `rowId`; original
   `rowIndex` preserved.
 - **INSERT**: new row → key + mapped fields, `rowIndex = max(rowIndex)+1` within the
