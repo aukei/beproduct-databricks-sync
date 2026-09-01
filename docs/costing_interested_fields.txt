@@ -18,6 +18,11 @@ Join key
   WIP  "Lineplan Ref #"  =  LinePlan  "Lineplan Ref #"
   NOTE: WIP column is plain "Lineplan Ref #" (no "(GC)" suffix — the spec
   annotation "(GC)" is not the literal DTC column name).
+  INNER JOIN (changed from LEFT 2026-09-01, owner decision): a WIP row with
+  a blank/unmatched "Lineplan Ref #" is dropped entirely, not surfaced with
+  null LinePlan fields. The per-slot vendor-presence filter (below) still
+  applies independently — a WIP row can match LinePlan and still produce
+  zero costing rows if no vendor is assigned yet.
 
 Vendor / Factory slot structure
 --------------------------------

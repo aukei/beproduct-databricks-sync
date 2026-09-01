@@ -533,3 +533,5 @@ So we should only need 1 flag - i.e. Supplier_type to indicate whether it is (Ma
 - when run first time only main factory assigned, factory 2/3 not assigned; 2nd time factory 2/3 also assigned, will 2nd run duplicate main factory records or upsert costing_chart?
 i will truncate costing_chart now so all get fresh populated.
 
+- debug Lineplan: all rows in costing_chart should have lineplan_ref populated. It should be a WIP inner join Lineplan rather than left join.
+- there are 8 rows in WIP known to have lineplan ref#, and there are also 8 corresponding rows in dtc_lineplan. So costing chart should contains exactly 8 rows at this moment.

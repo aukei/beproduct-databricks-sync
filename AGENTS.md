@@ -528,6 +528,28 @@ kept below for historical reference only (see decisions log):**
 
 ## Decisions on record
 
+- **WIP↔LinePlan join changed to INNER (2026-09-01), owner decision.**
+  `p9a_build_costing_chart.py` previously used a LEFT JOIN on "Lineplan Ref
+  #", so a WIP row with a blank/unmatched ref# still surfaced in
+  `costing_chart` with null `order_quantity`/`target_ldp`/`target_fob`.
+  Owner confirmed all live WIP styles now have `BP Style#` populated
+  (verified: 100% for every non-`(BACKUP)`-named WIP request; the
+  `(BACKUP)`-named requests are a separate, pre-existing pollution source —
+  199 of 227 `dtc_wip_ktb` rows with null `bp_style_number` all trace to
+  legacy `(BACKUP)` requests, not real production data) and that
+  `costing_chart` should only ever contain rows with a REAL LinePlan match —
+  changed to an INNER JOIN; unmatched WIP rows are now dropped entirely
+  rather than surfacing with null LinePlan fields.
+  **Live-verified same day**: of the 8 WIP rows with a real Lineplan Ref#
+  (`WC-S8001`..`WC-S8008`, all in the non-backup `"KTB SS28 Wrangler
+  Collaborations"` request, all matching 1:1 to `dtc_lineplan_ktb`), only 2
+  (`WC-S8001` with 4 populated vendor slots, `WC-S8002` with 1) have ANY
+  vendor assigned yet — the pre-existing, independent per-slot
+  vendor-presence filter (spec: "transpose ... into 4 rows", blank-vendor
+  slots dropped) still applies after the join and correctly produces
+  **5 rows total** (4 + 1), not 8 — confirmed by the owner as correct,
+  not a bug. `WC-S8003`..`WC-S8008` have zero vendor slots assigned in
+  WIP/BeProduct and correctly produce zero costing rows each.
 - **LinePlan request naming — no filter, human-enforced uniqueness (project
   team decision, 2026-09-01).** The project team will maintain MULTIPLE DTC
   LinePlan requests with NO specific naming convention for now (this

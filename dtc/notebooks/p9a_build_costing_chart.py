@@ -17,17 +17,27 @@ Join key
   (note: WIP column is plain "Lineplan Ref #"; spec said "(GC)" but actual
    DTC column name has no suffix — confirmed live 2026-07-17)
 
+  INNER JOIN (changed from LEFT 2026-09-01, owner decision): a WIP row with
+  a blank "Lineplan Ref #", or one that doesn't match any LinePlan row, is
+  DROPPED entirely rather than surfacing in costing_chart with null
+  order_quantity/target_ldp/target_fob. costing_chart should only ever
+  contain rows with real, matched LinePlan data.
+
 Transpose
 ---------
-  Each WIP row (style × color) is expanded into up to 4 costing rows by
-  exploding the four vendor/factory pairs:
+  Each WIP row (style × color) that survives the INNER JOIN above is
+  expanded into up to 4 costing rows by exploding the four vendor/factory
+  pairs:
     slot  vendor_col                factory_col
     ────  ──────────────────────    ──────────────────────────
     Main  "Main Vendor (Sampling)"  "Main Factory (Sampling)"
     1     "Vendor 1"                "Factory 1"
     2     "Vendor 2"                "Factory 2"
     3     "Vendor 3"                "Factory 3"
-  Slots where vendor is blank are dropped.  A style may produce 1–4 rows.
+  Slots where vendor is blank are STILL dropped independently of the join
+  above (a style can have a matched Lineplan Ref# but zero vendors assigned
+  yet, producing zero costing rows for that style — this is expected, not a
+  join bug). A style may produce 0–4 rows.
 
 HTS / Duty / Tariff
 -------------------
@@ -249,12 +259,23 @@ print(f"  LinePlan distinct refs: {lp.count()}")
 # COMMAND ----------
 
 # ── Step 3: Join WIP + LinePlan on Lineplan Ref # ─────────────────────────────
-print("\nStep 3: Joining WIP + LinePlan on 'Lineplan Ref #' …")
-joined = wip.join(lp, on="lineplan_ref", how="left")
+# INNER JOIN (changed from LEFT 2026-09-01, owner decision): costing_chart
+# should ONLY contain WIP rows that actually have a matching LinePlan row --
+# a WIP row with a blank/unmatched "Lineplan Ref #" is dropped entirely
+# rather than surfacing with null order_quantity/target_ldp/target_fob.
+print("\nStep 3: Joining WIP + LinePlan on 'Lineplan Ref #' (INNER) …")
+wip_with_ref = wip.filter(F.col("lineplan_ref").isNotNull() & (F.trim(F.col("lineplan_ref")) != ""))
+dropped_no_ref = wip.count() - wip_with_ref.count()
+joined = wip_with_ref.join(lp, on="lineplan_ref", how="inner")
 joined_count = joined.count()
-print(f"  Joined rows: {joined_count}")
-matched = joined.filter(F.col("order_quantity").isNotNull()).count()
-print(f"  Rows with LinePlan match: {matched}  ({joined_count - matched} unmatched)")
+print(f"  WIP rows dropped (blank Lineplan Ref #): {dropped_no_ref}")
+print(f"  WIP rows with a Lineplan Ref #          : {wip_with_ref.count()}")
+print(f"  Joined rows (matched to LinePlan)        : {joined_count}")
+unmatched_ref = wip_with_ref.count() - joined_count
+if unmatched_ref:
+    print(f"  ⚠️  {unmatched_ref} WIP row(s) have a Lineplan Ref # that does NOT "
+          f"exist in {lineplan_table} — dropped by the inner join. Check for typos "
+          f"or a ref# not yet entered in the LinePlan sheet.")
 
 # COMMAND ----------
 
@@ -350,8 +371,8 @@ print("SUMMARY")
 print(f"{'='*72}")
 print(f"  WIP input rows        : {wip_raw.count()}")
 print(f"  LinePlan input rows   : {lp_raw.count()}")
-print(f"  After join            : {joined_count}")
-print(f"  LinePlan matched      : {matched}")
+print(f"  WIP rows w/o Lineplan Ref # (dropped) : {dropped_no_ref}")
+print(f"  WIP rows matched to LinePlan (INNER)  : {joined_count}")
 print(f"  Costing chart rows    : {total_costing}")
 print(f"  Output table          : {output_table}")
 print()
