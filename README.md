@@ -10,10 +10,9 @@ schema `lft.beproduct`. Each field syncs **one way only** (no loops).
 | **2** | DTC → BeProduct | Push DTC-owned fields back into the BeProduct style |
 | **3** | BeProduct → DTC | Upload front image into the DTC "Style Image" cell (binary, separate endpoint) |
 | **7** | BeProduct → DTC | Push sample-app submit history (all 6 apps: Proto/PreLine/SMS/Fit/PP/TOP) into DTC status columns |
-| **8a** | DTC → Delta | Pull KTB FABRIC sheets (Adoption=Y rows) into `dtc_fabric_ktb` for Phase 8b |
-| **8b** | Delta → BeProduct | *(planned)* Upsert adopted fabric rows into BeProduct Material Master |
+| **8a/8b** | *(RETIRED 2026-09-01)* | DTC FABRIC → Delta → BeProduct Material Master — superseded by a separate "MaterialLib" application; removed from the deployed DAG |
 | **9a** | DTC → Delta → Delta | Pull KTB LinePlan; join with WIP; build `costing_chart` (Style × Color × Vendor/Factory) |
-| **9b** | API → Delta → DTC | *(planned)* NT Orbit Duty Tools API fill for HTS/Duty/Tariff fields; push changes back to WIP |
+| **9b** | API → Delta → DTC | NT Orbit Duty Tools API fill for HTS/Duty/Tariff fields (persistent cross-run cache); push changes back to WIP |
 
 The whole pipeline runs as a **multi-task Databricks job** (`BeProduct_DTC_sync_dag`,
 job 294837488757511), defined in `scripts/deploy_job.py`.
@@ -35,7 +34,7 @@ job 294837488757511), defined in `scripts/deploy_job.py`.
 | [docs/DTC_GUIDE.md](docs/DTC_GUIDE.md) | DTC API + DTC tables on ADB |
 | [docs/DIAGRAM.md](docs/DIAGRAM.md) | Pipeline data-flow Mermaid diagram (render locally — PNG/SVG not committed) |
 | [docs/beproduct_style_interested_fields.txt](docs/beproduct_style_interested_fields.txt) | **Style field-mapping SSOT** (DTC column ⇄ BeProduct fieldId ⇄ direction) |
-| [docs/beproduct_material_interested_fields.txt](docs/beproduct_material_interested_fields.txt) | **Material field-mapping SSOT** (DTC FABRIC ⇄ BeProduct Material Master) |
+| [docs/beproduct_material_interested_fields.txt](docs/beproduct_material_interested_fields.txt) | **SUPERSEDED (Phase 8a/8b retired 2026-09-01)** — Material field-mapping (DTC FABRIC ⇄ BeProduct Material Master); replaced by the "MaterialLib" application |
 | [docs/costing_interested_fields.txt](docs/costing_interested_fields.txt) | **Costing chart field-mapping SSOT** (WIP × LinePlan → costing_chart) |
 | [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | Pipeline performance history and optimisations |
 | [AGENTS.md](AGENTS.md) | Durable log of verified API behaviour, field directions & project invariants |
@@ -61,9 +60,10 @@ dtc/
 │   ├── 00_init_request_registry.py     # Standalone WIP registry build/refresh
 │   ├── 00_init_season_mapping.py       # Seed dtc_seasoncode_mapping
 │   ├── p1_pull_masters_to_delta.py        # Pull KTB WIP sheets → dtc_wip_ktb + registry (Step 3 / Step 7)
-│   ├── p8a_pull_fabric_to_delta.py         # Phase 8a: pull KTB FABRIC sheets → dtc_fabric_ktb
+│   ├── p8a_pull_fabric_to_delta.py         # RETIRED 2026-09-01 (superseded by MaterialLib) — kept as manual fallback only
 │   ├── p9a_pull_lineplan_to_delta.py       # Phase 9a: pull KTB LinePlan → dtc_lineplan_ktb
 │   ├── p9a_build_costing_chart.py          # Phase 9a: WIP × LinePlan join → costing_chart
+│   ├── p9b_fill_duty_rates.py              # Phase 9b: NT Orbit Duty Tools HTS/Duty/Tariff fill
 │   └── p2_push_dtc_to_beproduct.py     # Phase 2: DTC → BeProduct pushback
 ├── python/                             # Importable modules (deployed as Workspace files)
 │   ├── client/rest_client.py           # Generic REST client (retry, multipart)

@@ -112,11 +112,13 @@ Run these in order if you prefer step-by-step control (params shown are the key 
 | 7 | `repull_dtc` | `dtc/notebooks/p1_pull_masters_to_delta` | Targeted re-pull after Phase 1 inserts | `dtc_wip_ktb` |
 | 8 | `phase3_images` | `beproduct/p3_beproduct_to_dtc_images` | **Phase 3** image upload (`dry_run`, `max_uploads`) | DTC "Style Image" |
 
-**FABRIC chain (Phase 8a — parallel, independent):**
-
-| DAG task | Notebook | Purpose | Output |
-|----------|----------|---------|--------|
-| `pull_fabric_dtc` | `dtc/notebooks/p8a_pull_fabric_to_delta` | Pull KTB FABRIC sheets, Adoption=Y, `include_test_sheets=false` | `dtc_fabric_ktb` |
+> ⚠️ **Phase 8a/8b (FABRIC → Delta → BeProduct Material Master) are RETIRED
+> (2026-09-01)** — confirmed by the project team to be replaced by a separate
+> "MaterialLib" application, and removed from the DAG entirely (`gate_phase8a`
+> / `pull_fabric_dtc` no longer exist as job tasks). `dtc/notebooks/
+> p8a_pull_fabric_to_delta.py` remains in the repo as a historical/manual-
+> fallback artifact only; the `dtc_fabric_ktb` / `dtc_fabric_registry` tables
+> were DROPPED from Delta the same day (owner-confirmed, zero downstream readers).
 
 **LinePlan + Costing chain (Phase 9a — parallel, independent):**
 
@@ -124,6 +126,12 @@ Run these in order if you prefer step-by-step control (params shown are the key 
 |----------|----------|---------|--------|
 | `pull_lineplan_dtc` | `dtc/notebooks/p9a_pull_lineplan_to_delta` | Pull KTB LinePlan (Full view) | `dtc_lineplan_ktb` |
 | `p9a_build_costing_chart` | `dtc/notebooks/p9a_build_costing_chart` | Join WIP × LinePlan; transpose 4 vendor/factory slots | `costing_chart` |
+
+**Duty/Tariff chain (Phase 9b — after `build_costing_chart`):**
+
+| DAG task | Notebook | Purpose | Output |
+|----------|----------|---------|--------|
+| `fill_duty_rates` | `dtc/notebooks/p9b_fill_duty_rates` | NT Orbit Duty Tools HTS/Duty/Tariff fill, persistent cross-run cache (`gate_phase9b`, `run_phase9b=true` live) | `costing_chart`, `nt_orbit_duty_cache` (+ optional DTC WIP push) |
 
 **Other notebooks (on-demand, not in DAG):**
 
@@ -148,11 +156,18 @@ SELECT sync_status, COUNT(*) FROM lft.beproduct.beproduct_to_dtc_staging GROUP B
 -- Pulled DTC WIP rows
 SELECT request_reference, COUNT(*) FROM lft.beproduct.dtc_wip_ktb GROUP BY request_reference;
 
--- Costing chart summary
+-- Costing chart summary (costing_chart has real downstream readers — for
+-- Phase 9b testing use lft.beproduct.costing_chart_kei instead, never write
+-- test data into costing_chart directly)
 SELECT factory_slot, COUNT(*) rows, COUNT(hts_code) with_hts FROM lft.beproduct.costing_chart GROUP BY factory_slot;
 
--- Fabric adoption rows
-SELECT season_code, brand, sheet_type, COUNT(*) FROM lft.beproduct.dtc_fabric_ktb GROUP BY 1,2,3;
+-- Duty/tariff persistent cache size (Phase 9b — avoids re-paying the ~30s/call
+-- NT Orbit cost every daily run; costing_chart itself is fully overwritten
+-- by Phase 9a each run, this cache table is not)
+SELECT COUNT(*) FROM lft.beproduct.nt_orbit_duty_cache;
+
+-- (Phase 8a/8b RETIRED 2026-09-01 — dtc_fabric_ktb / dtc_fabric_registry were
+-- DROPPED from Delta the same day; superseded by "MaterialLib".)
 
 -- Sync log (WIP push)
 SELECT stage, operation, status, COUNT(*) FROM lft.beproduct.beproduct_to_dtc_sync_log

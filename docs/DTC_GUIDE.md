@@ -73,9 +73,10 @@ Connector methods: `search_requests`, `get_request`, `get_views`,
 | `dtc/notebooks/00_init_request_registry.py` | Standalone WIP registry build/refresh (first build or targeted `request_ids`). | `dtc_request_registry` |
 | `dtc/notebooks/00_init_season_mapping.py` | Seed the season-code prefix table. | `dtc_seasoncode_mapping` |
 | `dtc/notebooks/p1_pull_masters_to_delta.py` | Refresh WIP registry; pull each in-scope active request's `WIP_ITS_USE` view (Steps 3 + 7). | `dtc_wip_<customer>` |
-| `dtc/notebooks/p8a_pull_fabric_to_delta.py` | Phase 8a: pull KTB FABRIC sheets (`include_test_sheets` switch, Adoption=Y filter). | `dtc_fabric_<customer>`, `dtc_fabric_registry` |
+| `dtc/notebooks/p8a_pull_fabric_to_delta.py` | ⚠️ **RETIRED 2026-09-01** (superseded by MaterialLib) — kept as manual-fallback only, no longer scheduled. | `dtc_fabric_<customer>`, `dtc_fabric_registry` |
 | `dtc/notebooks/p9a_pull_lineplan_to_delta.py` | Phase 9a: pull KTB LinePlan (LINEPLAN_ITS_USE → Full fallback). | `dtc_lineplan_<customer>`, `dtc_lineplan_registry` |
 | `dtc/notebooks/p9a_build_costing_chart.py` | Phase 9a: join WIP × LinePlan on "Lineplan Ref #"; transpose 4 vendor/factory slots. | `costing_chart` (full overwrite) |
+| `dtc/notebooks/p9b_fill_duty_rates.py` | Phase 9b: NT Orbit Duty Tools HTS/Duty/Tariff fill, with a persistent cross-run cache. | `costing_chart`, `nt_orbit_duty_cache`, `nt_orbit_oauth_state` (+ optional DTC WIP push) |
 | `dtc/notebooks/p2_push_dtc_to_beproduct.py` | Phase 2 pushback of DTC-owned fields (Vendor, Factory, Lot#). | BeProduct (+ `dtc_to_beproduct_sync_log`) |
 
 `beproduct/p1_dtc_request_manager.py` (BeProduct-side, but DTC-writing) resolves /
@@ -135,12 +136,17 @@ Built from an **explicit schema** (so all-NULL columns don't trip
 - **In-request match key:** `(BP Style#, Color / Wash)` (Phase 6; was `LF Style#`).
 - **Cross-request identity:** `(customer, season_code, brand, bp_style_number, color_wash)`.
 
-### `dtc_fabric_<customer>` — Phase 8a fabric rows (Adoption=Y)
+### `dtc_fabric_<customer>` — ⚠️ RETIRED and DROPPED (Phase 8a, 2026-09-01)
 
-`lf_material_id`, `its_key`, `mill_fabric_code`, `mill_name`, `material_class`,
-`fabric_type`, `fabric_content` (→ BP Material Description), `kb_fabric_code`,
-`adoption`, `season_code`, `brand`, `sheet_type` (PROD/DEV/MILL), `mill_code`,
-`data_json`. View: FABRIC `WIP_ITS_USE` (id `6a0ac943fedfa0ca7ff2bf48`, 120 fields).
+Superseded by a separate "MaterialLib" application, per project team
+confirmation. No longer pulled/written, and `dtc_fabric_ktb` /
+`dtc_fabric_registry` were DROPPED from Delta the same day (owner-confirmed
+— zero downstream readers). Kept below for historical reference only. Prior
+shape: `lf_material_id`, `its_key`, `mill_fabric_code`,
+`mill_name`, `material_class`, `fabric_type`, `fabric_content` (→ BP Material
+Description), `kb_fabric_code`, `adoption`, `season_code`, `brand`,
+`sheet_type` (PROD/DEV/MILL), `mill_code`, `data_json`. View: FABRIC
+`WIP_ITS_USE` (id `6a0ac943fedfa0ca7ff2bf48`, 120 fields).
 
 ### `dtc_lineplan_<customer>` — Phase 9a LinePlan rows
 

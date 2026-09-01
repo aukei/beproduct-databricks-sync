@@ -1,4 +1,17 @@
-DTC FABRIC → BeProduct Material Master field mapping (Phase 8)
+*** SUPERSEDED / RETIRED 2026-09-01 ***
+========================================
+Phase 8a/8b (this entire document's premise) are RETIRED, confirmed by the
+project team to be replaced by a separate "MaterialLib" application.
+`gate_phase8a` / `pull_fabric_dtc` have been removed from the deployed
+`BeProduct_DTC_sync_dag` job entirely (not just gated off), and the output
+tables `dtc_fabric_ktb` / `dtc_fabric_registry` were DROPPED from Delta the
+same day (owner-confirmed, zero downstream readers). This file is kept
+below ONLY as a historical record of the field mapping that was designed
+(and never fully implemented — Phase 8b was still "planned" at retirement);
+do not use it to guide new work. See AGENTS.md's decisions log for detail.
+========================================
+
+DTC FABRIC → BeProduct Material Master field mapping (Phase 8) — HISTORICAL
 ==============================================================
 Confirmed live against the DTC "KTB FABRIC" document WIP_ITS_USE view
 (view id 6a0ac943fedfa0ca7ff2bf48, 120 dynamicFields, 2026-07-17).

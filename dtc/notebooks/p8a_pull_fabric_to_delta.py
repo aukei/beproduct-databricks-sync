@@ -1,5 +1,18 @@
 # Databricks notebook source
 """
+⚠️ RETIRED 2026-09-01 — NOT part of the deployed DAG anymore. ⚠️
+==================================================================
+Confirmed by the project team: Phase 8a/8b (DTC FABRIC → Delta → BeProduct
+Material Master) are superseded by a separate "MaterialLib" application.
+`gate_phase8a` / `pull_fabric_dtc` have been removed entirely from
+`scripts/deploy_job.py`'s DAG (not just gated off) — this notebook is no
+longer invoked by the scheduled `BeProduct_DTC_sync_dag` job. It is kept in
+the repo, and its output tables (`dtc_fabric_<customer>` / `dtc_fabric_registry`)
+are kept in Delta, purely as historical/manual-fallback artifacts. See
+AGENTS.md's decisions log for detail. The original docstring below describes
+what this notebook did while it was live.
+==================================================================
+
 Phase 8a — Pull DTC FABRIC sheets → Delta
 ==========================================
 

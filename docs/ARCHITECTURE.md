@@ -56,9 +56,10 @@ dtc/
 │   ├── 00_init_request_registry.py  # Standalone WIP registry build/refresh
 │   ├── 00_init_season_mapping.py    # Seed dtc_seasoncode_mapping
 │   ├── p1_pull_masters_to_delta.py     # Pull KTB WIP sheets → dtc_wip_ktb + registry (Steps 3 + 7)
-│   ├── p8a_pull_fabric_to_delta.py      # Phase 8a: pull KTB FABRIC → dtc_fabric_ktb (Adoption=Y)
+│   ├── p8a_pull_fabric_to_delta.py      # ⚠️ RETIRED 2026-09-01 (superseded by MaterialLib) — manual fallback only
 │   ├── p9a_pull_lineplan_to_delta.py    # Phase 9a: pull KTB LinePlan → dtc_lineplan_ktb
 │   ├── p9a_build_costing_chart.py       # Phase 9a: WIP × LinePlan → costing_chart (transpose 4 slots)
+│   ├── p9b_fill_duty_rates.py           # Phase 9b: NT Orbit Duty Tools HTS/Duty/Tariff fill (persistent cache)
 │   └── p2_push_dtc_to_beproduct.py  # Phase 2: DTC → BeProduct pushback
 ├── python/                          # Importable modules (deployed as Workspace files)
 │   ├── client/rest_client.py        # Generic REST client (retry, multipart)
@@ -108,9 +109,6 @@ gate_phase3        (condition: run_phase3)        after request_manager
 repull_dtc         p1_pull_masters_to_delta         targeted re-pull (inserts)    after gate3+phase1 ALL_DONE
 phase3_images      p3_beproduct_to_dtc_images       staging+wip → DTC image       after repull
 
-gate_phase8a       (condition: run_phase8a)       after wait_cluster            ┐ parallel,
-pull_fabric_dtc    p8a_pull_fabric_to_delta           DTC FABRIC → dtc_fabric_ktb  ┘ independent
-
 gate_phase9a       (condition: run_phase9a)       after wait_cluster            ┐ parallel,
 pull_lineplan_dtc  p9a_pull_lineplan_to_delta         DTC LinePlan → lineplan_ktb  │ independent
 p9a_build_costing_chart p9a_build_costing_chart           wip+lineplan → costing_chart ┘ after pull_lineplan+pull_master
@@ -118,7 +116,14 @@ p9a_build_costing_chart p9a_build_costing_chart           wip+lineplan → costi
 
 Condition tasks (`gate_phase*`) evaluate `run_phase*` job parameters; their `true`
 edge gates the respective push/pull tasks. `dry_run` (steps 4/5/6/8) computes +
-logs without writing. Phase 8a and 9a run fully in parallel with the WIP chain.
+logs without writing. Phase 9a runs fully in parallel with the WIP chain.
+
+Phase 8a/8b (DTC FABRIC → Delta → BeProduct Material Master) are RETIRED
+(2026-09-01), confirmed by the project team to be replaced by a separate
+"MaterialLib" application, and have been removed from the DAG entirely.
+`p8a_pull_fabric_to_delta.py` remains in the repo as a historical/manual-
+fallback artifact only; its output tables `dtc_fabric_<customer>` /
+`dtc_fabric_registry` were DROPPED from Delta (2026-09-01, owner-confirmed).
 
 ```
    BeProduct (PLM)               Databricks (lft.beproduct)              DTC (sheets)
@@ -134,13 +139,22 @@ logs without writing. Phase 8a and 9a run fully in parallel with the WIP chain.
    │ attributes │◀───────────────── │ + registry   │ mapping │ (KTB WIP document)    │
    │ _update    │                   └──────────────┘         └────────────────────────┘
 
-   DTC FABRIC  ──────────────────▶  dtc_fabric_ktb   (Phase 8a, Adoption=Y)
    DTC LinePlan ─────────────────▶  dtc_lineplan_ktb  (Phase 9a)
                                     dtc_wip_ktb       (Phase 9a join)
                                           │ join + transpose
                                           ▼
                                     costing_chart      (Style × Color × Vendor/Factory)
+                                          │
+                                          ▼
+                              NT Orbit Duty Tools API  (Phase 9b, persistent cache)
+                                          │
+                                          ▼
+                          hts_code / duty_rate_* / tariff_rate filled in-place
 ```
+
+   (DTC FABRIC → dtc_fabric_ktb, Phase 8a, is RETIRED 2026-09-01 — superseded by
+   a separate "MaterialLib" application; no longer part of this data flow.
+   dtc_fabric_ktb / dtc_fabric_registry were DROPPED from Delta 2026-09-01.)
 
 ### Field-ownership partition (one field, one direction)
 
@@ -235,13 +249,16 @@ Details + BeProduct API/SDK usage: `BEPRODUCT_GUIDE.md`.
 |-------|-------|-----------------------|
 | `dtc_request_registry` | 1 row / request | WIP request control table. `environment`, `request_id`, `view_id`, `customer`, `season_code`, `brands`, `sheet_id`, `request_reference`, `document_name`, `in_scope`, `request_is_active`, `row_count`, `last_extracted`, `last_pushed`, `msgs`. Upserted (`mode=merge`); absent-from-scan in-scope rows are **marked** inactive, not deleted. |
 | `dtc_wip_<customer>` | 1 row / DTC sheet row | Pulled `WIP_ITS_USE` data (e.g. `dtc_wip_ktb`). Fixed columns: `bp_style_number` (Phase 6 match key), `lf_style_number`, `color_wash`, `row_id`, `row_index`, `extracted_at`, `data_json` (full row JSON). |
-| `dtc_fabric_<customer>` | 1 row / Adoption=Y fabric row | Phase 8a. `lf_material_id`, `its_key`, `mill_fabric_code`, `mill_name`, `material_class`, `fabric_type`, `fabric_content`, `kb_fabric_code`, `adoption`, `season_code`, `brand`, `sheet_type` (PROD/DEV/MILL), `mill_code`, `data_json`. Filter: Adoption=Y only. |
-| `dtc_fabric_registry` | 1 row / FABRIC request | Phase 8a registry, same shape as `dtc_request_registry`. |
+| `dtc_fabric_<customer>` | *(DROPPED 2026-09-01)* | **RETIRED (Phase 8a, superseded by MaterialLib) and DROPPED from Delta**, owner-confirmed. Historical shape: `lf_material_id`, `its_key`, `mill_fabric_code`, `mill_name`, `material_class`, `fabric_type`, `fabric_content`, `kb_fabric_code`, `adoption`, `season_code`, `brand`, `sheet_type` (PROD/DEV/MILL), `mill_code`, `data_json`. Filter: Adoption=Y only. |
+| `dtc_fabric_registry` | *(DROPPED 2026-09-01)* | **RETIRED (Phase 8a) and DROPPED from Delta**, owner-confirmed. Historical registry, same shape as `dtc_request_registry`. |
 | `dtc_lineplan_<customer>` | 1 row / LinePlan row | Phase 9a. `lineplan_ref`, `projected_volume`, `target_ldp`, `target_fob`, `internal_sourced` (Supplier Type), `gender`, `category`, `product_line`, `region`, `season_launched`, `data_json`. |
 | `dtc_lineplan_registry` | 1 row / LinePlan request | Phase 9a registry. |
 | `dtc_xts_master_ktb` | 1 row / kept XTS sheet row | Phase 0. `partner_type` (SUPPLIER/FACTORY/MILL), `name`, `directory_id`, `country`, always-NULL optional cols (no address/phone/etc. exist in XTS Master), `request_id`, `request_reference`, `view_name`, `data_json`. Brand-config rows (`Type="Brand"`/`"Fabric Brand"`) already filtered out at pull time. |
 | `dtc_xts_master_registry` | 1 row / XTS Master request | Phase 0 registry: `partner_type`, `request_id`, `request_reference`, `sheet_id`, `view_id`, `view_name`, `row_count`, `last_extracted`, `msgs`. |
-| `costing_chart` | 1 row / (style × color × vendor slot) | Phase 9a output. Key: `[customer, bp_style_no, color_name, lineplan_ref, factory_slot, supplier, factory]`. Includes HTS/Duty fields per slot (null = Phase 9b NT Orbit pending). Full overwrite each run. |
+| `costing_chart` | 1 row / (style × color × vendor slot) | Phase 9a output. Key: `[customer, bp_style_no, color_name, lineplan_ref, factory_slot, supplier, factory]`. `hts_code`/`duty_rate_*`/`tariff_rate` filled by Phase 9b (NT Orbit). Full overwrite each Phase 9a run — Phase 9b re-fills from `nt_orbit_duty_cache` after each rebuild. **Has real downstream readers — must stay stable; use `costing_chart_kei` for testing instead of writing here directly.** |
+| `costing_chart_kei` | same shape as `costing_chart` | Owner's dedicated Phase 9b DAG-testing table (`costing_chart_table` job param override). Intentionally kept alongside the real table — never used by the default/production job run. |
+| `nt_orbit_duty_cache` | 1 row / (product_description, origin_country, import_country) | Phase 9b PERSISTENT cross-run cache (never wiped by Phase 9a) — avoids re-paying the ~30s/call NT Orbit cost every daily run. Stale after `cache_ttl_days` (default 180). |
+| `nt_orbit_oauth_state` | 1 row (latest) | Phase 9b — persisted rotated Entra `refresh_token` (`dbutils.secrets` is read-only, so this table is the actual live credential store after the first seed). |
 
 - **DTC operation keys:** `row_id` → UPDATE; `row_index` → INSERT/DELETE.
 - **In-request match key (WIP):** `(BP Style#, Color / Wash)` (Phase 6; was `(LF Style#, Color / Wash)`).

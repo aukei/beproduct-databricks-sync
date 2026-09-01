@@ -24,8 +24,15 @@ DAG
                                                                                 │       │                             └─► gate_phase3 ──────────────┐          │
                                                                                 │       └─► gate_phase2 ─► phase2_push                                  ├─► repull_dtc ─► phase3_images
                                                                                 │                                                                      (run_if=ALL_DONE)
-                                                                                ├─► gate_phase8a ─► pull_fabric_dtc   (parallel, independent of WIP chain)
                                                                                 └─► gate_phase9a ─► pull_lineplan_dtc ─► build_costing_chart ─► gate_phase9b ─► fill_duty_rates
+
+Phase 8a/8b (DTC FABRIC → Delta → BeProduct Material Master) are RETIRED
+(2026-09-01): confirmed by the project team to be replaced by a separate
+"MaterialLib" application, so they are removed from this DAG entirely (not
+just gated off). The notebook `dtc/notebooks/p8a_pull_fabric_to_delta.py` and
+tables `dtc_fabric_<customer>` / `dtc_fabric_registry` are left in place as
+historical/manual-fallback artifacts but are no longer scheduled. See
+AGENTS.md's decisions log for detail.
 
 Phase 0 (DTC XTS Master → BeProduct Directory) runs FIRST: pull → upsert →
 PUSH_DIRECTORY, then every Style/Material/Costing step proceeds. All downstream
@@ -131,8 +138,10 @@ JOB_PARAMS = {
     "run_phase1": "true",
     "run_phase2": "true",
     "run_phase3": "true",
-    "run_phase8a": "true",           # Phase 8a: pull DTC FABRIC sheets
-    "include_test_sheets": "false",  # false=PROD sheets only; true=include DEV+MILL (for UAT)
+    # Phase 8a/8b RETIRED (2026-09-01): confirmed by the project team to be
+    # replaced by a separate "MaterialLib" application. run_phase8a /
+    # include_test_sheets / fabric_document removed from the DAG entirely
+    # (not just gated off) — see AGENTS.md decisions log.
     "run_phase9a": "true",           # Phase 9a: pull LinePlan + build costing chart
     "lineplan_document": "KTB LinePlan",  # DTC document name for Phase 9a
     "run_phase9b": "true",           # Phase 9b: NT Orbit duty/HTS/tariff fill (live in the DAG 2026-09-01)
@@ -143,7 +152,6 @@ JOB_PARAMS = {
     "push_blanks": "false",
     "img_http_timeout": "30",
     "img_max_uploads": "0",
-    "fabric_document": "KTB FABRIC", # DTC document name for Phase 8a
 }
 
 
@@ -156,7 +164,6 @@ def P(name: str) -> str:
 CAT, SCH = P("catalog"), P("schema")
 CUST, WS, DOC, ENV = P("customer"), P("dtc_workspace"), P("dtc_document"), P("dtc_environment")
 XTS_DOC      = P("xts_document")
-FABRIC_DOC   = P("fabric_document")
 LINEPLAN_DOC = P("lineplan_document")
 COSTING_TABLE = P("costing_chart_table")
 DRY = P("dry_run")
@@ -278,21 +285,11 @@ def build_tasks():
         "http_timeout": P("img_http_timeout"), "max_uploads": P("img_max_uploads"),
     }, depends=[dep("repull_dtc")]))
 
-    # ── Phase 8a — Pull DTC FABRIC sheets → dtc_fabric_<customer> ──────────────
-    tasks.append(gate_task("gate_phase8a", "run_phase8a",
-                           depends=[dep("phase0_push")], run_if=jobs.RunIf.ALL_DONE))
-    tasks.append(nb_task("pull_fabric_dtc", f"{NB_DTC}/p8a_pull_fabric_to_delta", {
-        "dtc_environment":     ENV,
-        "customer":            CUST,
-        "dtc_workspace":       WS,
-        "dtc_document":        FABRIC_DOC,
-        "catalog":             CAT,
-        "schema":              SCH,
-        "write_mode":          "overwrite",
-        "refresh_registry":    "true",
-        "include_test_sheets": P("include_test_sheets"),
-        "max_workers":         "4",
-    }, depends=[dep("gate_phase8a", outcome="true")]))
+    # Phase 8a/8b (DTC FABRIC → Delta → BeProduct Material Master) RETIRED
+    # 2026-09-01 — confirmed by the project team to be replaced by a separate
+    # "MaterialLib" application. Removed from the DAG entirely (not gated
+    # off) — see AGENTS.md decisions log. dtc/notebooks/p8a_pull_fabric_to_delta.py
+    # is left in place as a manual-fallback artifact but is no longer scheduled.
 
     # ── Phase 9a — Pull LinePlan + Build Costing Chart ─────────────────────────
     tasks.append(gate_task("gate_phase9a", "run_phase9a",

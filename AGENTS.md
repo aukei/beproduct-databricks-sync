@@ -43,10 +43,17 @@ sheets), staged through **Databricks/Delta**.
   All 6 DTC columns confirmed in the 204-field view
   (2026-08-28; Fit/PP destinations changed from the original 2026-07-07 mapping
   after a DTC WIP doc restructure — see Verified discoveries log).
-- **Phase 8a — DTC FABRIC → Delta**: pull `"KTB FABRIC"` document sheets (Adoption=Y
-  rows only) into `lft.beproduct.dtc_fabric_ktb` + `dtc_fabric_registry`. Runs as an
-  independent parallel task in the DAG (`pull_fabric_dtc`, gated by `run_phase8a`).
-- **Phase 8b** (planned): upsert adopted fabric rows into BeProduct Material Master.
+- **Phase 8a/8b — RETIRED (2026-09-01).** DTC FABRIC → Delta → BeProduct
+  Material Master (`pull_fabric_dtc` / planned Material Master upsert) is
+  confirmed by the project team to be replaced by a separate "MaterialLib"
+  application. Removed entirely from the deployed DAG (`gate_phase8a` +
+  `pull_fabric_dtc` tasks, `run_phase8a`/`include_test_sheets`/
+  `fabric_document` job parameters — not just gated off). The notebook
+  `dtc/notebooks/p8a_pull_fabric_to_delta.py` is left in the repo as a
+  historical/manual-fallback artifact; its output tables
+  `dtc_fabric_<customer>` / `dtc_fabric_registry` were DROPPED from Delta
+  (2026-09-01, owner-confirmed) rather than left empty/stale. See
+  decisions log.
 - **Phase 9a — DTC LinePlan + Costing Chart**: pull `"KTB LinePlan"` document into
   `dtc_lineplan_ktb`; join WIP × LinePlan on `"Lineplan Ref #"`; transpose 4
   vendor/factory slots → `lft.beproduct.costing_chart`. Runs as two parallel tasks
@@ -446,7 +453,8 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
   whitespace EXCEPT newlines). No other current field legitimately contains embedded
   newlines, so this is a no-op for every other column.
 
-**DTC FABRIC document (KTB, validated 2026-07-16):**
+**DTC FABRIC document (KTB, validated 2026-07-16) — Phase 8a/8b RETIRED 2026-09-01,
+kept below for historical reference only (see decisions log):**
 - Document "KTB FABRIC", Workspace "KTB". **39 active requests** in two patterns:
   - DEV sheets:  `"KTB <season> <brand> - DEV"` — master development sheet per brand
   - Mill sheets: `"KTB <season> <brand>-<MILLCODE>"` — mill-specific allocation sheets
@@ -520,6 +528,42 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
 
 ## Decisions on record
 
+- **Phase 8a/8b retired (2026-09-01), confirmed by the project team.** DTC
+  FABRIC → Delta → BeProduct Material Master is superseded by a separate
+  "MaterialLib" application. Removed from `scripts/deploy_job.py`'s DAG
+  entirely — the `gate_phase8a` condition task, the `pull_fabric_dtc` task,
+  and the `run_phase8a` / `include_test_sheets` / `fabric_document` job
+  parameters are all gone from the deployed job (`BeProduct_DTC_sync_dag`,
+  reset 2026-09-01: task count 23 → 21). Verified nothing else in the DAG
+  depended on `pull_fabric_dtc`/`gate_phase8a`, so removal was a clean,
+  self-contained deletion — Phase 9a/9b and the WIP chain were unaffected.
+  Left in place (NOT deleted) as historical/manual-fallback artifacts:
+  `dtc/notebooks/p8a_pull_fabric_to_delta.py`, and the SSOT doc
+  `docs/beproduct_material_interested_fields.txt` (marked superseded).
+  Docs updated: `README.md`, `docs/ARCHITECTURE.md`, `docs/DTC_GUIDE.md`,
+  `docs/DIAGRAM.md`, `QUICK_START.md`.
+- **`lft.beproduct` table cleanup (2026-09-01), owner-confirmed.** Live-schema
+  audit (via `databricks-sql-connector`, not just code grep) found 6 drop
+  candidates beyond the already-known Phase 8a tables; owner triaged each:
+  - **Dropped**: `dtc_fabric_ktb` (0 rows), `dtc_fabric_registry` (81 rows —
+    Phase 8a outputs, retired same day, see above), `ktb_styles_push_log`
+    (5 rows, last written 2026-05-26, zero code references anywhere —
+    superseded by `beproduct_to_dtc_sync_log`, which is what's actually
+    written today).
+  - **Kept, NOT dropped**: `wmt_styles` / `wmt_styles_sync_meta` (75 + 21
+    rows, last written 2026-06-17, zero current code references) — owner
+    confirmed these are an intentional artifact demonstrating the pipeline
+    generalizes beyond `KTB` to another customer folder (`WMT`); leave as-is,
+    do not treat as orphaned/stale in future audits. `costing_chart_kei`
+    (job param `costing_chart_table` test override) — owner's own active
+    Phase 9b DAG-testing table; **`costing_chart` itself must stay stable**
+    since it has real downstream readers, which is exactly why the test
+    override table exists — keep both.
+  - Already gone before this audit (per the 2026-06-17 decision above,
+    confirmed still absent): `dtc_master_chart_uat`,
+    `dtc_master_chart_uat_change_log`. Confirmed never created:
+    `beproduct_directory_contacts` (0 contacts org-wide, `fetch_contacts`
+    defaults `false`).
 - **NT Orbit / Entra token endpoint AADSTS700025 (live-validated 2026-08-31).**
   Registering `http://localhost:8765/callback` under the app's "Mobile and
   desktop applications" platform in the Entra portal makes Entra treat EVERY
