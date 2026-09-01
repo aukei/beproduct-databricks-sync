@@ -535,6 +535,18 @@ kept below for historical reference only (see decisions log):**
 
 ## Decisions on record
 
+- **Phase 9b WIP push: "Duplicate rowId found" 400 (live-fixed 2026-09-01).**
+  `costing_chart` transposes ONE WIP row into up to 4 rows (Main/1/2/3 vendor
+  slots) — all 4 map to the SAME underlying WIP `rowId`, differing only in
+  which columns they target (e.g. `"Main Factory HTS Code"` vs `"Factory 1 -
+  HTS code"`). Step 5's push previously appended one `sheetData` object PER
+  costing_chart row, so a style with multiple filled slots produced multiple
+  objects sharing the same `rowId` in one PATCH call — DTC's API rejects
+  this outright (`400 "Duplicate rowId found."`). Fixed by merging all
+  slots' patch fields into a single dict PER ACTUAL WIP ROW (keyed on
+  `(sheet_id, view_id, row_id)`) before batching into `sheetData` — safe
+  because each slot's `build_wip_patch_fields()` output always targets
+  disjoint column names, so `dict.update()` across slots never collides.
 - **Phase 9b cache staleness check: naive-vs-aware datetime crash (live-fixed
   2026-09-01).** `duty.is_cache_entry_stale()` did `now - looked_up_at`
   directly; Spark's TIMESTAMP columns come back as NAIVE `datetime` objects

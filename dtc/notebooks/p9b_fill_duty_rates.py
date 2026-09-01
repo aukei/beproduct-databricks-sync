@@ -456,9 +456,15 @@ if push_to_wip and row_updates:
             "view_id": reg_entry.get("view_id"),
         }
 
-    # Group patch fields by (sheet_id, view_id) so each target sheet gets one
-    # batched PATCH call (UPDATE-only: all WIP rows here already exist).
-    by_sheet: dict = {}
+    # Merge patch fields per ACTUAL WIP row before batching. Multiple
+    # costing_chart rows (one per vendor/factory slot: Main/1/2/3) map to the
+    # SAME underlying WIP row -- they only differ in which columns they
+    # target (e.g. "Main Factory HTS Code" vs "Factory 1 - HTS code"), never
+    # in rowId. Sending them as separate sheetData objects with the same
+    # rowId in one PATCH call is rejected by DTC with 400 "Duplicate rowId
+    # found." (confirmed live 2026-09-01) -- merge is safe since each slot's
+    # fields target disjoint column names.
+    merged_by_rowid: dict = {}   # (sheet_id, view_id, row_id) -> merged fields dict
     push_skipped_reasons: set = set()
     push_no_match = 0
 
@@ -474,8 +480,16 @@ if push_to_wip and row_updates:
             push_skipped_reasons.add(reason)
         if not plan.fields:
             continue
-        sheet_key = (target["sheet_id"], target["view_id"])
-        by_sheet.setdefault(sheet_key, []).append({**plan.fields, "rowId": target["row_id"]})
+        merge_key = (target["sheet_id"], target["view_id"], target["row_id"])
+        merged_by_rowid.setdefault(merge_key, {}).update(plan.fields)
+
+    # Group the (now rowId-unique) merged rows by (sheet_id, view_id) so each
+    # target sheet gets one batched PATCH call (UPDATE-only: all WIP rows
+    # here already exist).
+    by_sheet: dict = {}
+    for (sheet_id, view_id, row_id), fields in merged_by_rowid.items():
+        sheet_key = (sheet_id, view_id)
+        by_sheet.setdefault(sheet_key, []).append({**fields, "rowId": row_id})
 
     pushed, push_errors = 0, 0
     for (sheet_id, view_id), sheet_data in by_sheet.items():
