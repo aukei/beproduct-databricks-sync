@@ -117,6 +117,18 @@ dbutils.widgets.text("bom_customer_name", "KONTOOR",
                      "Pre-filter customer_name (scoping/perf only -- the join keys alone are already correct without it)")
 dbutils.widgets.text("dry_run", "true", "Dry run (true/false) -- compute + log, skip the live DTC push")
 dbutils.widgets.text("batch_size", "100", "Rows per PATCH call")
+# Checked INSIDE the notebook (like dry_run), NOT via a DAG-level condition
+# task -- live-discovered 2026-09-02: gating this task's SCHEDULING via a
+# gate_phase10 condition made it become EXCLUDED (not just skipped) whenever
+# run_phase10=false, and Databricks propagates EXCLUDED to every downstream
+# dependent UNCONDITIONALLY (ignoring run_if entirely). Since
+# repull_dtc_bom -> build_costing_chart -> gate_phase9b -> fill_duty_rates
+# all transitively depend on this task, that silently excluded the ENTIRE
+# Phase 9a/9b chain on every run while run_phase10 defaulted to false. Fixed
+# by always scheduling this task and no-op'ing internally instead -- see
+# AGENTS.md decisions log.
+dbutils.widgets.text("run_phase10", "true",
+                     "Enable Phase 10 (true/false) -- checked HERE, not via a DAG gate; see comment above")
 
 catalog       = dbutils.widgets.get("catalog")
 schema        = dbutils.widgets.get("schema")
@@ -130,6 +142,7 @@ bom_table     = dbutils.widgets.get("bom_table").strip()
 bom_customer_name = dbutils.widgets.get("bom_customer_name").strip()
 dry_run       = dbutils.widgets.get("dry_run").strip().lower() == "true"
 batch_size    = int(dbutils.widgets.get("batch_size") or 100)
+run_phase10   = dbutils.widgets.get("run_phase10").strip().lower() == "true"
 
 styles_table    = f"{catalog}.{schema}.ktb_styles"
 wip_table       = f"{catalog}.{schema}.dtc_wip_{customer.lower()}"
@@ -140,6 +153,11 @@ now = datetime.now(timezone.utc)
 print("=" * 72)
 print("PHASE 10 — BOM enrichment from techpack extraction")
 print("=" * 72)
+
+if not run_phase10:
+    print("run_phase10=false — skipping entirely (no Lakebase/DTC access made).")
+    dbutils.notebook.exit("SKIPPED_run_phase10_false")
+
 print(f"  BeProduct styles : {styles_table}  (folder_name={folder_name!r})")
 print(f"  WIP table        : {wip_table}")
 print(f"  BOM source       : {bom_source}  (customer_name={bom_customer_name!r})")

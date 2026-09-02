@@ -109,8 +109,7 @@ flowchart TB
 
             subgraph DAG_10 ["Phase 10 (BEFORE costing chart)"]
                 direction TB
-                G10{{"gate_phase10\nrun_phase10"}}
-                S10A["fill_bom_data\nSERVERLESS compute\n(Lakebase source)"]
+                S10A["fill_bom_data\nSERVERLESS compute (Lakebase)\nrun_phase10 checked INSIDE\n(no gate task -- see note)"]
                 S10B["repull_dtc_bom\nunconditional re-pull"]
             end
 
@@ -187,11 +186,15 @@ flowchart TB
 %% the same day (owner-confirmed, zero downstream readers).
 
 %% ─── Phase 10 — BOM enrichment (runs BEFORE costing chart) ─────────────────
-    P0X       -.->|"run_if=ALL_DONE"| G10
-    G10       ==>|"true"| S10A
+%% NOTE: deliberately NO gate_phase10 condition task, unlike every other
+%% phase -- a condition-gated fill_bom_data became EXCLUDED (not skipped)
+%% when run_phase10=false, and Databricks propagates EXCLUDED downstream
+%% UNCONDITIONALLY, breaking the whole Phase 9a/9b chain. run_phase10 is
+%% checked INSIDE the notebook instead (dbutils.notebook.exit as a no-op).
+    S3        ==> S10A
     T_WIP     --> S10A
     BOM_SRC   ==>|"INNER JOIN\nstyle_no + style_season"| S10A
-    S10A      ==>|"PATCH update / INSERT new row"| DTC_WIP
+    S10A      ==>|"PATCH update / INSERT new row\n(no-op + exit if run_phase10=false)"| DTC_WIP
     S10A      -.->|"run_if=ALL_DONE"| S10B
     S10B      ==> T_WIP
 
@@ -230,7 +233,7 @@ flowchart TB
     class BP,DTC,ORBIT,LAKEBASE ext
     class T_XTS,T_XTSREG,T_DIR,T_STYLES,T_APPREG,T_SEASON,T_STAGING,T_WIP,T_REG,T_LOG1,T_LOG2,T_LP,T_LPREG,T_CC,T_CACHE,T_OAUTH table
     class SW,P0P,P0U,P0X,S1,S2,S3,S4,S5,S6,S7,S8,S9A1,S9A2,S9B,S10A,S10B step
-    class G0,G1,G2,G3,G9A,G9B,G10 gate
+    class G0,G1,G2,G3,G9A,G9B gate
     class P0X_DONE done
 ```
 

@@ -124,7 +124,7 @@ Run these in order if you prefer step-by-step control (params shown are the key 
 
 | DAG task | Notebook | Purpose | Output |
 |----------|----------|---------|--------|
-| `fill_bom_data` | `dtc/notebooks/p10_pull_bom_and_enrich` | Enrich WIP `Fabric Group`/`Placement`/`Mill Fabric Article #` from `alb_tpm_<env>.public.customer_teckpack_style_log` (**runs on serverless compute** — Lakebase source). `gate_phase10`, `run_phase10=false` default. | live DTC push only (no Delta write) |
+| `fill_bom_data` | `dtc/notebooks/p10_pull_bom_and_enrich` | Enrich WIP `Fabric Group`/`Placement`/`Mill Fabric Article #` from `alb_tpm_<env>.public.customer_teckpack_style_log` (**runs on serverless compute** — Lakebase source). `run_phase10=false` default, checked **inside the notebook** (not a DAG gate — a gate here previously caused an `EXCLUDED`-cascade bug that broke Phase 9a/9b; fixed 2026-09-02). | live DTC push only (no Delta write) |
 | `repull_dtc_bom` | `dtc/notebooks/p1_pull_masters_to_delta` | Re-pull WIP so `build_costing_chart` sees the enrichment; runs unconditionally (`run_if=ALL_DONE`) | `dtc_wip_ktb` |
 
 **LinePlan + Costing chain (Phase 9a — parallel, independent):**

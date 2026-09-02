@@ -536,7 +536,7 @@ i will truncate costing_chart now so all get fresh populated.
 - debug Lineplan: all rows in costing_chart should have lineplan_ref populated. It should be a WIP inner join Lineplan rather than left join.
 - there are 8 rows in WIP known to have lineplan ref#, and there are also 8 corresponding rows in dtc_lineplan. So costing chart should contains exactly 8 rows at this moment.
 
-# Phase 10 reading BOM 
+# Phase 10 reading BOM $56
 This is fulfilling phase 1 left over: BOM data is missing from BeProduct API and rely on Techpack extraction.
 - BOM data is externally processed and stores at 
     - alb_tpm_uat.public.customer_teckpack_style_log (UAT)

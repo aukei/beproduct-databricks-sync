@@ -9,10 +9,26 @@ point is to get up-to-date material names into `costing_chart`'s
 Orbit for duty classification:
 
 ```
-                    ┌─► gate_phase10 ─► fill_bom_data ─► repull_dtc_bom ─┐
-phase0_push ────────┤     (run_if=ALL_DONE)                              ├─► build_costing_chart ─► gate_phase9b ─► fill_duty_rates
-                    └─► gate_phase9a ─► pull_lineplan_dtc ───────────────┘
+                    ┌─► fill_bom_data ─► repull_dtc_bom ─┐
+pull_master_dtc ────┤                                    ├─► build_costing_chart ─► gate_phase9b ─► fill_duty_rates
+                    └─► gate_phase9a ─► pull_lineplan_dtc ┘
 ```
+
+**IMPORTANT — `run_phase10` is checked INSIDE the notebook, NOT via a
+DAG-level `gate_phase10` condition task** (unlike every other phase).
+Live-discovered 2026-09-02: gating `fill_bom_data`'s *scheduling* via a
+condition task made it become `EXCLUDED` (not merely `SKIPPED`) whenever
+`run_phase10=false` — and Databricks propagates `EXCLUDED` to every
+downstream dependent UNCONDITIONALLY, ignoring `run_if` entirely. Since
+`repull_dtc_bom` → `build_costing_chart` → `gate_phase9b` → `fill_duty_rates`
+all transitively depend on `fill_bom_data`, this silently excluded the
+ENTIRE Phase 9a/9b chain on every scheduled run while `run_phase10` defaulted
+to `false` (confirmed live, 2026-09-02 15:57 HKT). Fixed: `fill_bom_data`
+always runs (`depends=[dep("pull_master_dtc")]`, no condition) and reads
+`run_phase10` as a plain widget, calling `dbutils.notebook.exit(...)`
+immediately as a genuine SUCCESS no-op when disabled (matching the `dry_run`
+pattern used everywhere else in this repo) — so nothing downstream is ever
+excluded.
 
 Notebook: `dtc/notebooks/p10_pull_bom_and_enrich.py` (runs on **serverless
 compute** — see "Critical constraint" below). Pure logic + tests:
@@ -154,7 +170,7 @@ enrichment; it executes unconditionally so a disabled/skipped/failed Phase
 
 | Widget / job param | Default | Notes |
 |---|---|---|
-| `run_phase10` | `false` | Job-level gate; default off until fully UAT-validated live end-to-end. |
+| `run_phase10` | `false` | Checked INSIDE the notebook (NOT a DAG-level gate — see above); default off until fully UAT-validated live end-to-end. |
 | `bom_catalog` | `alb_tpm_uat` | **NOT** derived from `dtc_environment` — the PRD suffix is `_prd`, not `_prod`. |
 | `bom_customer_name` | `KONTOOR` | Scoping/perf pre-filter only; the join keys alone are already customer-correct. |
 | `folder_name` | `TEST KTB` | Shared with `bp_style_sync`; scopes which BeProduct styles to consider. |

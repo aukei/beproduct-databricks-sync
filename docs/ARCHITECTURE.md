@@ -110,8 +110,10 @@ gate_phase3        (condition: run_phase3)        after request_manager
 repull_dtc         p1_pull_masters_to_delta         targeted re-pull (inserts)    after gate3+phase1 ALL_DONE
 phase3_images      p3_beproduct_to_dtc_images       staging+wip → DTC image       after repull
 
-gate_phase10       (condition: run_phase10)       after phase0_push ALL_DONE    ┐ parallel,
-fill_bom_data      p10_pull_bom_and_enrich          BOM(Lakebase)+wip → DTC push │ SERVERLESS compute
+fill_bom_data      p10_pull_bom_and_enrich          BOM(Lakebase)+wip → DTC push ┐ SERVERLESS compute;
+                                                                                  │ run_phase10 checked
+                                                                                  │ INSIDE notebook, NOT
+                                                                                  │ a DAG gate (see below)
 repull_dtc_bom     p1_pull_masters_to_delta         full re-pull (reflect BOM)   ┘ after fill_bom_data ALL_DONE
 
 gate_phase9a       (condition: run_phase9a)       after wait_cluster            ┐ parallel,
@@ -130,6 +132,16 @@ dedicated re-pull (`repull_dtc_bom`) makes the enrichment visible first.
 `fill_bom_data` runs on SERVERLESS compute (not the shared classic cluster)
 because its BOM source (`alb_tpm_<env>`) is a Lakebase database — see
 `docs/PHASE10_WORKFLOW.md`.
+
+**`fill_bom_data` is deliberately NOT gated by a `gate_phase*` condition
+task**, unlike every other phase — `run_phase10` is checked INSIDE the
+notebook instead (same pattern as `dry_run`). Live-discovered 2026-09-02: a
+`gate_phase10` condition task made `fill_bom_data` become `EXCLUDED` (not
+merely skipped) whenever `run_phase10=false`, and Databricks propagates
+`EXCLUDED` to every downstream dependent unconditionally — silently
+excluding the entire `repull_dtc_bom` → `build_costing_chart` →
+`gate_phase9b` → `fill_duty_rates` chain on every scheduled run. See
+`AGENTS.md`'s decisions log.
 
 Phase 8a/8b (DTC FABRIC → Delta → BeProduct Material Master) are RETIRED
 (2026-09-01), confirmed by the project team to be replaced by a separate

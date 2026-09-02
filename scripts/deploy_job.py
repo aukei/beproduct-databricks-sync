@@ -400,8 +400,23 @@ def build_tasks():
     # snapshot to know current rowId/sheet_id/view_id per style) and
     # phase0_push (same run_if=ALL_DONE convention as the other WIP-chain
     # branches, so disabling run_phase0 doesn't deadlock it).
-    tasks.append(gate_task("gate_phase10", "run_phase10",
-                           depends=[dep("phase0_push")], run_if=jobs.RunIf.ALL_DONE))
+    # NO gate_task here (unlike every other phase) -- DELIBERATE, see below.
+    # `fill_bom_data` always runs and checks `run_phase10` INSIDE the
+    # notebook (like `dry_run` elsewhere), no-op'ing immediately when false
+    # instead of being excluded at the DAG level.
+    #
+    # Live-discovered 2026-09-02: a condition-task gate here (gate_phase10 ->
+    # fill_bom_data[outcome=true]) causes fill_bom_data to become EXCLUDED
+    # (not just skipped) whenever run_phase10=false -- and Databricks
+    # propagates EXCLUDED status to EVERY downstream dependent UNCONDITIONALLY,
+    # ignoring run_if entirely (run_if only tolerates a dependency that
+    # actually ran and skipped/failed, not one EXCLUDED via an untaken
+    # condition branch). Since repull_dtc_bom -> build_costing_chart ->
+    # gate_phase9b -> fill_duty_rates all transitively depended on
+    # fill_bom_data, this silently excluded the ENTIRE Phase 9a/9b chain on
+    # every scheduled run while run_phase10 defaulted to false (confirmed
+    # live: 2026-09-02 15:57 HKT scheduled run). Fixed by removing the gate
+    # entirely for this one phase -- see AGENTS.md decisions log.
     tasks.append(nb_task("fill_bom_data", f"{NB_DTC}/p10_pull_bom_and_enrich", {
         "catalog":     CAT,
         "schema":      SCH,
@@ -411,21 +426,22 @@ def build_tasks():
         "dtc_workspace":   WS,
         "bom_catalog": P("bom_catalog"),
         "bom_customer_name": P("bom_customer_name"),
+        "run_phase10": P("run_phase10"),
         "dry_run":     DRY,
         "batch_size":  "100",
-    }, depends=[dep("gate_phase10", outcome="true"), dep("pull_master_dtc")], serverless=True))
+    }, depends=[dep("pull_master_dtc")], serverless=True))
 
     # Re-pull WIP after BOM enrichment so build_costing_chart (Phase 9a) sees
     # the enriched Fabric Group/Placement/Mill Fabric Article # data -- Phase
     # 10 only pushes to the LIVE DTC sheet, never mutates Delta directly (see
     # p10_pull_bom_and_enrich.py's module docstring). A FULL re-pull (not
-    # targeted by request_ids) is used deliberately: fill_bom_data can be
-    # entirely SKIPPED (gate_phase10=false), and referencing a skipped task's
-    # {{tasks.X.values...}} output is fragile/untested, unlike repull_dtc's
-    # existing targeted pattern where its upstream (phase1_push) always runs.
-    # run_if=ALL_DONE so this still executes (as a normal fresh pull) even
-    # when Phase 10 is disabled or fill_bom_data fails/is skipped -- it must
-    # never itself block build_costing_chart.
+    # targeted by request_ids) is used deliberately: referencing
+    # {{tasks.X.values...}} output adds fragility for no real benefit here.
+    # fill_bom_data always actually runs now (see its own comment above for
+    # why it's not gated at the DAG level) and no-ops internally when
+    # run_phase10=false, so this dependency is never EXCLUDED. run_if=ALL_DONE
+    # is kept only as a genuine-failure safety net (fill_bom_data erroring for
+    # some real reason must still not block build_costing_chart).
     tasks.append(nb_task("repull_dtc_bom", f"{NB_DTC}/p1_pull_masters_to_delta", {
         "dtc_environment": ENV, "customer": CUST, "dtc_workspace": WS, "dtc_document": DOC,
         "catalog": CAT, "schema": SCH, "write_mode": "overwrite", "refresh_registry": "false",

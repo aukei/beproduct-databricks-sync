@@ -127,8 +127,12 @@ sheets), staged through **Databricks/Delta**.
   dedicated `repull_dtc_bom` task (full `p1_pull_masters_to_delta`
   re-pull, `run_if=ALL_DONE`) runs immediately after so `build_costing_chart`
   sees the enrichment. Gated by `run_phase10` (default `false` until
-  UAT-validated — **live-validated dry-run 2026-09-02**: 8 matched styles,
-  17 updates + 4 inserts planned, 0 errors). Notebook:
+  UAT-validated live), checked INSIDE the notebook itself (NOT via a
+  DAG-level condition task, unlike every other phase — a `gate_phase10`
+  condition task caused a Databricks `EXCLUDED`-status cascade that broke
+  Phase 9a/9b whenever it evaluated false; see decisions log) —
+  **live-validated dry-run 2026-09-02**: 8 matched styles, 17 updates + 4
+  inserts planned, 0 errors. Notebook:
   `dtc/notebooks/p10_pull_bom_and_enrich.py`; pure logic + tests:
   `dtc/python/sync/bom.py` / `dtc/tests/test_bom.py`.
 
@@ -563,6 +567,29 @@ kept below for historical reference only (see decisions log):**
 
 ## Decisions on record
 
+- **Phase 10 DAG-level EXCLUDED cascade broke Phase 9a/9b on every scheduled
+  run (live-discovered and fixed 2026-09-02).** `fill_bom_data` was
+  originally gated by a `gate_phase10` condition task
+  (`dep("gate_phase10", outcome="true")`), mirroring every other phase's
+  pattern. But with `run_phase10` defaulting to `false`, this made
+  `fill_bom_data` become `EXCLUDED` (not merely `SKIPPED`) — and Databricks
+  propagates `EXCLUDED` to every downstream dependent UNCONDITIONALLY,
+  ignoring `run_if` entirely (`run_if=ALL_DONE` only tolerates a dependency
+  that actually ran and then skipped/failed, NOT one excluded via an
+  untaken condition branch). Since `repull_dtc_bom` → `build_costing_chart`
+  → `gate_phase9b` → `fill_duty_rates` all transitively depended on
+  `fill_bom_data`, this silently excluded the ENTIRE Phase 9a/9b chain on
+  every scheduled run (confirmed live: the 2026-09-02 15:57 HKT periodic
+  run showed `build_costing_chart`/`fill_duty_rates` etc. all `EXCLUDED`).
+  **Fixed** by removing `gate_phase10` from the DAG entirely — `fill_bom_data`
+  now always runs (`depends=[dep("pull_master_dtc")]`, no condition), and
+  checks `run_phase10` INSIDE the notebook instead (matching the existing
+  `dry_run` pattern elsewhere), calling `dbutils.notebook.exit(...)`
+  immediately as a genuine SUCCESS no-op when disabled — so nothing
+  downstream is ever excluded. Live-reverified after the fix: `fill_bom_data`
+  → `repull_dtc_bom` → `build_costing_chart` all completed `SUCCESS` with
+  `run_phase10=false` (the exit value confirms the no-op path was taken:
+  `"SKIPPED_run_phase10_false"`).
 - **Phase 10 BOM enrichment: "Body" → "Fabric" and `material_name` →
   `bom_detail_name` correction (owner amendment, 2026-09-02).** Initial spec
   used `bom_detail_name` values "Main Fabric"/"Body" and read `Fabric Group`
