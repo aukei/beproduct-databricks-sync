@@ -83,6 +83,16 @@ dbutils.widgets.text("dtc_workspace", "KTB", "DTC Workspace Name")
 dbutils.widgets.text("dry_run", "true", "Dry Run (true/false)")
 dbutils.widgets.text("delta_only", "true", "Only push rows modified since last push")
 dbutils.widgets.text("batch_size", "100", "Rows per PATCH call")
+# Hardened 2026-09-02 (same pattern as Phase 10's run_phase10, see AGENTS.md
+# decisions log): checked INSIDE the notebook, NOT via a DAG-level
+# gate_phase1[outcome=true] condition task. A condition-task gate would make
+# this task EXCLUDED (not merely skipped) whenever run_phase1=false, and
+# Databricks propagates EXCLUDED to every downstream dependent
+# UNCONDITIONALLY (ignoring run_if). repull_dtc/phase3_images AND (now that
+# fill_bom_data depends on repull_dtc too) the entire Phase 9/10 chain
+# transitively depend on this task, so an EXCLUDED phase1_push would have
+# silently excluded all of them. Default "true" preserves today's behavior.
+dbutils.widgets.text("run_phase1", "true", "Run Phase 1 (true/false) -- checked internally, not gated")
 
 catalog = dbutils.widgets.get("catalog")
 schema = dbutils.widgets.get("schema")
@@ -92,6 +102,18 @@ workspace = dbutils.widgets.get("dtc_workspace").strip()
 dry_run = dbutils.widgets.get("dry_run").strip().lower() == "true"
 delta_only = dbutils.widgets.get("delta_only").strip().lower() == "true"
 batch_size = int(dbutils.widgets.get("batch_size"))
+run_phase1 = dbutils.widgets.get("run_phase1").strip().lower() == "true"
+
+if not run_phase1:
+    print("run_phase1=false -- skipping entirely (no BeProduct/DTC access made).")
+    try:
+        # Downstream repull_dtc reads {{tasks.phase1_push.values.inserted_ids}};
+        # set it explicitly to empty so that reference still resolves cleanly.
+        dbutils.jobs.taskValues.set(key="inserted_ids", value="")
+        dbutils.jobs.taskValues.set(key="inserts", value=0)
+    except Exception as _e:
+        print(f"(taskValues.set skipped: {_e})")
+    dbutils.notebook.exit("SKIPPED_run_phase1_false")
 
 staging_full = f"{catalog}.{schema}.{staging_table}"
 mapping_full = f"{catalog}.{schema}.dtc_request_mapping"

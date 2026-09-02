@@ -102,15 +102,18 @@ bp_style_sync      p1p7_beproduct_style_sync          BP API → ktb_styles     
 transform          p1p7_beproduct_to_dtc_transform    ktb_styles → staging          after 1    │ WIP chain
 pull_master_dtc    p1_pull_masters_to_delta         DTC API → dtc_wip + registry  after wait ┘ parallel
 request_manager    p1_dtc_request_manager           staging+registry → mapping    after 2+3
-gate_phase1        (condition: run_phase1)        after request_manager
-phase1_push        p1p7_beproduct_to_dtc_push         staging → DTC upsert+orphans  after gate1
+phase1_push        p1p7_beproduct_to_dtc_push         staging → DTC upsert+orphans  after request_manager;
+                                                                                  run_phase1 checked INSIDE
+                                                                                  notebook, NOT a DAG gate
 gate_phase2        (condition: run_phase2)        after transform+pull_master
 phase2_push        p2_push_dtc_to_beproduct      dtc_wip → BP pushback         after gate2
+repull_dtc         p1_pull_masters_to_delta         targeted re-pull (inserts)    after phase1_push ALL_DONE;
+                                                                                  SHARED prereq for Phase 3+10
 gate_phase3        (condition: run_phase3)        after request_manager
-repull_dtc         p1_pull_masters_to_delta         targeted re-pull (inserts)    after gate3+phase1 ALL_DONE
-phase3_images      p3_beproduct_to_dtc_images       staging+wip → DTC image       after repull
+phase3_images      p3_beproduct_to_dtc_images       staging+wip → DTC image       after gate3+repull_dtc
 
 fill_bom_data      p10_pull_bom_and_enrich          BOM(Lakebase)+wip → DTC push ┐ SERVERLESS compute;
+                                                                                  │ after repull_dtc ALL_DONE;
                                                                                   │ run_phase10 checked
                                                                                   │ INSIDE notebook, NOT
                                                                                   │ a DAG gate (see below)
@@ -133,15 +136,34 @@ dedicated re-pull (`repull_dtc_bom`) makes the enrichment visible first.
 because its BOM source (`alb_tpm_<env>`) is a Lakebase database — see
 `docs/PHASE10_WORKFLOW.md`.
 
-**`fill_bom_data` is deliberately NOT gated by a `gate_phase*` condition
-task**, unlike every other phase — `run_phase10` is checked INSIDE the
-notebook instead (same pattern as `dry_run`). Live-discovered 2026-09-02: a
-`gate_phase10` condition task made `fill_bom_data` become `EXCLUDED` (not
-merely skipped) whenever `run_phase10=false`, and Databricks propagates
-`EXCLUDED` to every downstream dependent unconditionally — silently
-excluding the entire `repull_dtc_bom` → `build_costing_chart` →
-`gate_phase9b` → `fill_duty_rates` chain on every scheduled run. See
+**Neither `phase1_push` nor `fill_bom_data` is gated by a `gate_phase*`
+condition task** (hardened 2026-09-02), unlike every other phase —
+`run_phase1`/`run_phase10` are each checked INSIDE their own notebook instead
+(same pattern as `dry_run`). Live-discovered 2026-09-02: a `gate_phase10`
+condition task made `fill_bom_data` become `EXCLUDED` (not merely skipped)
+whenever `run_phase10=false`, and Databricks propagates `EXCLUDED` to every
+downstream dependent unconditionally — silently excluding the entire
+`repull_dtc_bom` → `build_costing_chart` → `gate_phase9b` → `fill_duty_rates`
+chain on every scheduled run. Since `repull_dtc`/`phase3_images` (and now, via
+`repull_dtc`, the entire Phase 9/10 chain behind `fill_bom_data`) transitively
+depend on `phase1_push` too, `gate_phase1` was removed the same way to close
+off the identical risk if `run_phase1` were ever set `false`. See
 `AGENTS.md`'s decisions log.
+
+**`repull_dtc` is a SHARED, unconditional prerequisite** for both
+`phase3_images` and `fill_bom_data` (changed 2026-09-02, no longer gated by
+`gate_phase3`): it makes `phase1_push`'s newly-created style×color rows
+visible in `dtc_wip_<customer>`/`dtc_request_registry`, which Phase 10 needs
+to enrich the COMPLETE post-Phase-1 state — `pull_master_dtc`'s snapshot
+(taken before `phase1_push` runs) can be missing rows Phase 1 just created
+this same run. Only `phase3_images` itself is gated by `run_phase3`
+(`gate_phase3[true]`), so Phase 10 is never held hostage to whether images
+are wanted. `phase3_images` and `fill_duty_rates` are then the two parallel,
+optional, WIP-mutating leaf branches; they're safe to run concurrently since
+they write through disjoint DTC surfaces (binary `/images` endpoint keyed by
+`rowindex` vs. JSON `sheetData` PATCH keyed by `rowId`, touching disjoint
+columns) and `phase3_images` re-reads the live sheet itself immediately before
+writing.
 
 Phase 8a/8b (DTC FABRIC → Delta → BeProduct Material Master) are RETIRED
 (2026-09-01), confirmed by the project team to be replaced by a separate

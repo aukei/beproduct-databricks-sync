@@ -19,14 +19,32 @@ now retired) with one job whose pipeline steps are first-class tasks. Benefits:
 DAG
 ---
     wait_cluster ─► gate_phase0 ─► phase0_pull ─► phase0_upsert ─► phase0_push ─┬─► bp_style_sync ─► transform ─┐
-                                                                                │                                ├─► request_manager ─► gate_phase1 ─► phase1_push ─┐
-                                                                                ├─► pull_master_dtc ───────────────┘         │                                         │
-                                                                                │       │                             └─► gate_phase3 ──────────────┐          │
-                                                                                │       └─► gate_phase2 ─► phase2_push                                  ├─► repull_dtc ─► phase3_images
-                                                                                │                                                                      (run_if=ALL_DONE)
-                                                                                ├─► gate_phase10 ─► fill_bom_data ─► repull_dtc_bom ─┐
-                                                                                │                    (run_if=ALL_DONE)              │
-                                                                                └─► gate_phase9a ─► pull_lineplan_dtc ───────────────┴─► build_costing_chart ─► gate_phase9b ─► fill_duty_rates
+                                                                                │                                └─► request_manager ─► phase1_push ─► repull_dtc ─┬─► gate_phase3 ─► phase3_images
+                                                                                ├─► pull_master_dtc ─┬─────────────────────────────────────────────────────────┘   │
+                                                                                │                    └─► gate_phase2 ─► phase2_push                                  └─► fill_bom_data ─► repull_dtc_bom ─┐
+                                                                                │                                                                                       (run_if=ALL_DONE)                  │
+                                                                                └─► gate_phase9a ─► pull_lineplan_dtc ─────────────────────────────────────────────────────────────────────────────────────┴─► build_costing_chart ─► gate_phase9b ─► fill_duty_rates
+
+Neither `phase1_push` nor `fill_bom_data` sit behind a `gate_phase1`/
+`gate_phase10` condition task (unlike `gate_phase0/2/3/9a/9b`) — DELIBERATE,
+see AGENTS.md decisions log. Databricks propagates a condition-task's
+EXCLUDED outcome to EVERY downstream dependent UNCONDITIONALLY, ignoring
+run_if entirely; since the ENTIRE Phase 3/9/10 chain now transitively depends
+on `phase1_push`, and the entire Phase 9 chain transitively depends on
+`fill_bom_data`, gating either one at the DAG level would silently exclude
+everything behind it whenever its `run_phase*` flag defaults/is set to
+false. Both tasks instead always run and check their own `run_phase1`/
+`run_phase10` widget INSIDE the notebook, `dbutils.notebook.exit(...)`-ing as
+a genuine no-op SUCCESS when disabled.
+
+`repull_dtc` (changed 2026-09-02) is a SHARED, unconditional prerequisite for
+both `phase3_images` and `fill_bom_data` — it makes `phase1_push`'s
+newly-created style x color rows visible in `dtc_wip_<customer>` /
+`dtc_request_registry`, which Phase 10 needs to enrich the COMPLETE
+post-Phase-1 state (not `pull_master_dtc`'s pre-Phase-1 snapshot). Only
+`phase3_images` itself is gated by `run_phase3` (via `gate_phase3[true]`);
+`repull_dtc` runs regardless so Phase 10 is never held hostage to whether
+images are wanted.
 
 Phase 10 (BOM enrichment from externally-processed techpack extraction, see
 `docs/PHASE10_WORKFLOW.md`) is placed BEFORE `build_costing_chart` (owner
@@ -41,6 +59,16 @@ directly), `repull_dtc_bom` re-pulls `dtc_wip_<customer>` afterward so
 unconditionally (`run_if=ALL_DONE` on `fill_bom_data`, no gate of its own) so
 a disabled/skipped/failed Phase 10 never blocks Phase 9a — it just becomes an
 extra, harmless full re-pull in that case.
+
+`phase3_images` (image upload) and `fill_duty_rates` (Phase 9b HTS/Duty WIP
+PATCH) are the two parallel, optional, WIP-mutating leaf branches off this
+shared prerequisite chain. They write through disjoint DTC surfaces —
+`phase3_images` uses the binary multipart `/images` endpoint (keyed by
+`rowindex`, touches only the image cell, re-reads the live sheet itself right
+before writing); `fill_duty_rates` uses the JSON `sheetData` PATCH (keyed by
+`rowId`, touches only HTS/Duty/Tariff columns, sourced from Delta as of
+`repull_dtc_bom`) — so running them concurrently is safe without either
+needing to repull immediately before its own write.
 
 Phase 8a/8b (DTC FABRIC → Delta → BeProduct Material Master) are RETIRED
 (2026-09-01): confirmed by the project team to be replaced by a separate
@@ -297,12 +325,19 @@ def build_tasks():
     }, depends=[dep("transform"), dep("pull_master_dtc")]))
 
     # Phase 1+7 gate + push (Step 5)
-    tasks.append(gate_task("gate_phase1", "run_phase1", depends=[dep("request_manager")]))
+    # Hardened 2026-09-02 (same pattern as fill_bom_data/run_phase10): no
+    # gate_phase1 condition task here -- phase1_push always runs and checks
+    # run_phase1 INSIDE the notebook (no-op exit when false). A condition-task
+    # gate would make phase1_push EXCLUDED whenever run_phase1=false, and
+    # EXCLUDED propagates unconditionally to every downstream dependent
+    # (repull_dtc, phase3_images, and now the whole Phase 9/10 chain via
+    # fill_bom_data -> repull_dtc). See AGENTS.md decisions log.
     tasks.append(nb_task("phase1_push", f"{NB_BP}/p1p7_beproduct_to_dtc_push", {
         "catalog": CAT, "schema": SCH, "staging_table": "beproduct_to_dtc_staging",
         "dtc_environment": ENV, "dtc_workspace": WS, "dry_run": DRY,
         "delta_only": P("delta_only"), "batch_size": "100",
-    }, depends=[dep("gate_phase1", outcome="true")]))
+        "run_phase1": P("run_phase1"),
+    }, depends=[dep("request_manager")]))
 
     # Phase 2 gate + push (Step 6) — DTC-owned fields back to BeProduct
     tasks.append(gate_task("gate_phase2", "run_phase2", depends=[dep("transform"), dep("pull_master_dtc")]))
@@ -313,20 +348,30 @@ def build_tasks():
     }, depends=[dep("gate_phase2", outcome="true")]))
 
     # Phase 3 gate (after Step 4) + targeted re-pull (Step 7) + images (Step 8)
+    #
+    # repull_dtc is now a SHARED prerequisite (2026-09-02): it makes
+    # phase1_push's newly-created style x color rows visible in Delta, which
+    # both phase3_images AND fill_bom_data (Phase 10, below) need -- Phase 10
+    # must enrich the COMPLETE post-Phase-1 style x color state, not the
+    # pre-Phase-1 snapshot from pull_master_dtc. It therefore no longer
+    # depends on gate_phase3[true] (that would make it -- and everything
+    # transitively behind it, now including the whole Phase 9/10 chain --
+    # EXCLUDED whenever run_phase3=false, the same EXCLUDED-cascade class
+    # already fixed for gate_phase10). The run_phase3 check moves to
+    # phase3_images itself, the only task that's actually optional here.
+    # run_if=ALL_DONE so a skipped/failed phase1_push doesn't block Phase 3.
     tasks.append(gate_task("gate_phase3", "run_phase3", depends=[dep("request_manager")]))
-    # Step 7: run_if=ALL_DONE so a skipped/failed phase1_push doesn't block Phase 3.
     tasks.append(nb_task("repull_dtc", f"{NB_DTC}/p1_pull_masters_to_delta", {
         "dtc_environment": ENV, "customer": CUST, "dtc_workspace": WS, "dtc_document": DOC,
         "catalog": CAT, "schema": SCH, "write_mode": "overwrite", "refresh_registry": "false",
         "request_ids": "{{tasks.phase1_push.values.inserted_ids}}", "max_workers": "4",
-    }, depends=[dep("gate_phase3", outcome="true"), dep("phase1_push")],
-       run_if=jobs.RunIf.ALL_DONE))
+    }, depends=[dep("phase1_push")], run_if=jobs.RunIf.ALL_DONE))
 
     tasks.append(nb_task("phase3_images", f"{NB_BP}/p3_beproduct_to_dtc_images", {
         "catalog": CAT, "schema": SCH, "staging_table": "beproduct_to_dtc_staging",
         "dtc_environment": ENV, "dtc_workspace": WS, "dry_run": DRY,
         "http_timeout": P("img_http_timeout"), "max_uploads": P("img_max_uploads"),
-    }, depends=[dep("repull_dtc")]))
+    }, depends=[dep("gate_phase3", outcome="true"), dep("repull_dtc")]))
 
     # Phase 8a/8b (DTC FABRIC → Delta → BeProduct Material Master) RETIRED
     # 2026-09-01 — confirmed by the project team to be replaced by a separate
@@ -396,10 +441,16 @@ def build_tasks():
     # so it's sourced from a separate techpack-extraction pipeline
     # (alb_tpm_<env>.public.customer_teckpack_style_log) and joined onto
     # ktb_styles by (bp_style_number=style_no, season||' - '||year=style_season).
-    # Depends on pull_master_dtc (needs a fresh dtc_wip_<customer> + registry
-    # snapshot to know current rowId/sheet_id/view_id per style) and
-    # phase0_push (same run_if=ALL_DONE convention as the other WIP-chain
-    # branches, so disabling run_phase0 doesn't deadlock it).
+    #
+    # Depends on repull_dtc, NOT pull_master_dtc directly (changed 2026-09-02):
+    # Phase 10 must enrich the COMPLETE post-Phase-1 style x color state --
+    # pull_master_dtc's snapshot is taken BEFORE phase1_push runs, so it can be
+    # missing style x color rows phase1_push just created THIS run. repull_dtc
+    # (Step 7) is what makes those rows visible in dtc_wip_<customer> +
+    # dtc_request_registry (current rowId/sheet_id/view_id per style), and it's
+    # now an unconditional (non-gated) prerequisite shared with phase3_images
+    # for exactly this reason. run_if=ALL_DONE: a skipped/failed repull_dtc
+    # must not exclude the whole Phase 9/10 chain behind fill_bom_data.
     # NO gate_task here (unlike every other phase) -- DELIBERATE, see below.
     # `fill_bom_data` always runs and checks `run_phase10` INSIDE the
     # notebook (like `dry_run` elsewhere), no-op'ing immediately when false
@@ -429,7 +480,7 @@ def build_tasks():
         "run_phase10": P("run_phase10"),
         "dry_run":     DRY,
         "batch_size":  "100",
-    }, depends=[dep("pull_master_dtc")], serverless=True))
+    }, depends=[dep("repull_dtc")], run_if=jobs.RunIf.ALL_DONE, serverless=True))
 
     # Re-pull WIP after BOM enrichment so build_costing_chart (Phase 9a) sees
     # the enriched Fabric Group/Placement/Mill Fabric Article # data -- Phase

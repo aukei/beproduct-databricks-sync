@@ -98,12 +98,11 @@ flowchart TB
                 S2["transform\nbrand=brand_hk\nsample UDFs (Phase 7)"]
                 S3["pull_master_dtc\n+ registry refresh"]
                 S4["request_manager\ncreate + share"]
-                G1{{"gate_phase1\nrun_phase1"}}
-                S5["phase1_push\nBP→DTC Phases 1+7"]
+                S5["phase1_push\nBP→DTC Phases 1+7\nrun_phase1 checked INSIDE\n(no gate task -- see note)"]
                 G2{{"gate_phase2\nrun_phase2"}}
                 S6["phase2_push\nDTC→BP vendor/factory/lot"]
+                S7["repull_dtc\nSHARED prereq for Phase 3 + 10\nunconditional (no gate)"]
                 G3{{"gate_phase3\nrun_phase3"}}
-                S7["repull_dtc\ntargeted re-pull"]
                 S8["phase3_images\nfront image binary"]
             end
 
@@ -154,11 +153,10 @@ flowchart TB
     T_REG   --> S4
     S4      -->|"POST /sheets\nPOST /shares"| DTC_WIP
     S4      --> T_LOG1
-    S4      --> G1
-    G1      ==>|"true"| S5
+    S4      ==> S5
     T_STAGING --> S5
     T_REG   --> S5
-    S5      ==>|"PATCH  BP Style#/Color key\nPhase 1+7 fields\nSupplier default-fill"| DTC_WIP
+    S5      ==>|"PATCH  BP Style#/Color key\nPhase 1+7 fields\nSupplier default-fill\n(no-op + exit if run_phase1=false)"| DTC_WIP
     S5      --> T_LOG1
     S4      --> G2
     T_STAGING --> G2
@@ -168,11 +166,12 @@ flowchart TB
     T_STAGING --> S6
     S6      ==>|"attributes_update\nVendor/Factory/Lot#"| BP_API
     S6      --> T_LOG2
-    S4      --> G3
-    G3      ==>|"true"| S7
     S5      -.->|"run_if=ALL_DONE"| S7
-    DTC_WIP -->|"targeted re-pull"| S7
+    DTC_WIP -->|"targeted re-pull\ninserted_ids from phase1_push"| S7
     S7      --> T_WIP
+    S4      --> G3
+    G3      ==>|"true"| S8
+    S7      --> S8
     T_WIP   --> S8
     T_STAGING --> S8
     S8      ==>|"POST images\nmultipart  blank cells only"| DTC_WIP
@@ -186,13 +185,17 @@ flowchart TB
 %% the same day (owner-confirmed, zero downstream readers).
 
 %% ─── Phase 10 — BOM enrichment (runs BEFORE costing chart) ─────────────────
-%% NOTE: deliberately NO gate_phase10 condition task, unlike every other
-%% phase -- a condition-gated fill_bom_data became EXCLUDED (not skipped)
-%% when run_phase10=false, and Databricks propagates EXCLUDED downstream
-%% UNCONDITIONALLY, breaking the whole Phase 9a/9b chain. run_phase10 is
-%% checked INSIDE the notebook instead (dbutils.notebook.exit as a no-op).
-    S3        ==> S10A
-    T_WIP     --> S10A
+%% NOTE (2026-09-02): deliberately NO gate_phase1 / gate_phase10 condition
+%% task on phase1_push / fill_bom_data, unlike every other phase -- a
+%% condition-gated task becomes EXCLUDED (not skipped) when its run_phase*
+%% flag is false, and Databricks propagates EXCLUDED downstream
+%% UNCONDITIONALLY (ignoring run_if), breaking the whole Phase 3/9/10 chain
+%% behind it. Both flags are instead checked INSIDE their notebook
+%% (dbutils.notebook.exit as a no-op). fill_bom_data depends on repull_dtc
+%% (S7), NOT pull_master_dtc (S3) directly -- it must enrich the COMPLETE
+%% post-Phase-1 style x color state, which only repull_dtc makes visible in
+%% Delta (S3's snapshot predates phase1_push).
+    S7        ==> S10A
     BOM_SRC   ==>|"INNER JOIN\nstyle_no + style_season"| S10A
     S10A      ==>|"PATCH update / INSERT new row\n(no-op + exit if run_phase10=false)"| DTC_WIP
     S10A      -.->|"run_if=ALL_DONE"| S10B
@@ -233,7 +236,7 @@ flowchart TB
     class BP,DTC,ORBIT,LAKEBASE ext
     class T_XTS,T_XTSREG,T_DIR,T_STYLES,T_APPREG,T_SEASON,T_STAGING,T_WIP,T_REG,T_LOG1,T_LOG2,T_LP,T_LPREG,T_CC,T_CACHE,T_OAUTH table
     class SW,P0P,P0U,P0X,S1,S2,S3,S4,S5,S6,S7,S8,S9A1,S9A2,S9B,S10A,S10B step
-    class G0,G1,G2,G3,G9A,G9B gate
+    class G0,G2,G3,G9A,G9B gate
     class P0X_DONE done
 ```
 

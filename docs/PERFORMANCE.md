@@ -247,7 +247,7 @@ SUCCESS. Per-task exec:
 | `bp_style_sync` ∥ `pull_dtc` | 76 s ∥ 278 s | **started simultaneously** — parallelism confirmed |
 | `transform` | 37 s | after bp_style_sync |
 | `request_manager` | 13 s | |
-| `gate_phase1/2/3` | 0–1 s | condition tasks |
+| `gate_phase2/3` | 0–1 s | condition tasks (`gate_phase1`/`gate_phase10` removed 2026-09-02 — `run_phase1`/`run_phase10` checked inside `phase1_push`/`fill_bom_data` instead) |
 | `phase1_push` | 47 s | taskValues.set(inserted_ids) |
 | `phase2_push` | 21 s | |
 | `repull_dtc` | 197 s | dry-run → empty inserted_ids → full re-pull (real run = targeted, ~30 s) |

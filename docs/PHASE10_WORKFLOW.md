@@ -9,26 +9,41 @@ point is to get up-to-date material names into `costing_chart`'s
 Orbit for duty classification:
 
 ```
-                    ┌─► fill_bom_data ─► repull_dtc_bom ─┐
-pull_master_dtc ────┤                                    ├─► build_costing_chart ─► gate_phase9b ─► fill_duty_rates
-                    └─► gate_phase9a ─► pull_lineplan_dtc ┘
+phase1_push ─► repull_dtc ─┬─► fill_bom_data ─► repull_dtc_bom ─┐
+                           │                                    ├─► build_costing_chart ─► gate_phase9b ─► fill_duty_rates
+                           └─► gate_phase3[true] ─► phase3_images       gate_phase9a ─► pull_lineplan_dtc ┘
 ```
 
-**IMPORTANT — `run_phase10` is checked INSIDE the notebook, NOT via a
-DAG-level `gate_phase10` condition task** (unlike every other phase).
-Live-discovered 2026-09-02: gating `fill_bom_data`'s *scheduling* via a
-condition task made it become `EXCLUDED` (not merely `SKIPPED`) whenever
-`run_phase10=false` — and Databricks propagates `EXCLUDED` to every
-downstream dependent UNCONDITIONALLY, ignoring `run_if` entirely. Since
-`repull_dtc_bom` → `build_costing_chart` → `gate_phase9b` → `fill_duty_rates`
-all transitively depend on `fill_bom_data`, this silently excluded the
-ENTIRE Phase 9a/9b chain on every scheduled run while `run_phase10` defaulted
-to `false` (confirmed live, 2026-09-02 15:57 HKT). Fixed: `fill_bom_data`
-always runs (`depends=[dep("pull_master_dtc")]`, no condition) and reads
-`run_phase10` as a plain widget, calling `dbutils.notebook.exit(...)`
-immediately as a genuine SUCCESS no-op when disabled (matching the `dry_run`
-pattern used everywhere else in this repo) — so nothing downstream is ever
-excluded.
+**Depends on `repull_dtc`, NOT `pull_master_dtc` directly** (changed
+2026-09-02, owner clarification of intended lineage): Phase 1 completes the
+style×color WIP master chart first (Phase 3 image upload is optional, not a
+blocker); Phase 10 then needs to read that COMPLETE post-Phase-1 style×color
+state to fill in the material dimension. `pull_master_dtc`'s snapshot is
+taken BEFORE `phase1_push` runs, so it can be missing style×color rows
+`phase1_push` just created in DTC this same run. `repull_dtc` is what makes
+those rows visible in Delta, and is now a SHARED, unconditional prerequisite
+for both `phase3_images` and `fill_bom_data` — it no longer depends on
+`gate_phase3`, so Phase 10 is never held hostage to whether images (`run_phase3`)
+are wanted; only `phase3_images` itself still checks `run_phase3`.
+
+**IMPORTANT — `run_phase10` (and, as of 2026-09-02, `run_phase1`) is checked
+INSIDE the notebook, NOT via a DAG-level `gate_phase10`/`gate_phase1`
+condition task** (unlike most other phases). Live-discovered 2026-09-02:
+gating `fill_bom_data`'s *scheduling* via a condition task made it become
+`EXCLUDED` (not merely `SKIPPED`) whenever `run_phase10=false` — and
+Databricks propagates `EXCLUDED` to every downstream dependent
+UNCONDITIONALLY, ignoring `run_if` entirely. Since `repull_dtc_bom` →
+`build_costing_chart` → `gate_phase9b` → `fill_duty_rates` all transitively
+depend on `fill_bom_data`, this silently excluded the ENTIRE Phase 9a/9b
+chain on every scheduled run while `run_phase10` defaulted to `false`
+(confirmed live, 2026-09-02 15:57 HKT). Fixed: `fill_bom_data` always runs
+(`depends=[dep("repull_dtc")]`, no condition) and reads `run_phase10` as a
+plain widget, calling `dbutils.notebook.exit(...)` immediately as a genuine
+SUCCESS no-op when disabled (matching the `dry_run` pattern used everywhere
+else in this repo) — so nothing downstream is ever excluded. The same fix
+was applied to `phase1_push`/`gate_phase1` once `fill_bom_data` started
+depending (transitively, via `repull_dtc`) on `phase1_push` too — see
+`AGENTS.md`'s decisions log.
 
 Notebook: `dtc/notebooks/p10_pull_bom_and_enrich.py` (runs on **serverless
 compute** — see "Critical constraint" below). Pure logic + tests:

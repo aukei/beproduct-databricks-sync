@@ -126,12 +126,21 @@ sheets), staged through **Databricks/Delta**.
   calls; since it never mutates Delta directly (DTC push only), a
   dedicated `repull_dtc_bom` task (full `p1_pull_masters_to_delta`
   re-pull, `run_if=ALL_DONE`) runs immediately after so `build_costing_chart`
-  sees the enrichment. Gated by `run_phase10` (default `false` until
-  UAT-validated live), checked INSIDE the notebook itself (NOT via a
-  DAG-level condition task, unlike every other phase — a `gate_phase10`
+  sees the enrichment. **Depends on `repull_dtc`, NOT `pull_master_dtc`
+  directly** (changed 2026-09-02) — Phase 10 must enrich the COMPLETE
+  post-`phase1_push` style×color state (`pull_master_dtc`'s snapshot
+  predates `phase1_push` and can be missing rows it just created this same
+  run); `repull_dtc` is what makes those rows visible in Delta, and is now
+  a SHARED, unconditional prerequisite for both `phase3_images` and
+  `fill_bom_data` (no longer gated by `gate_phase3` — only `phase3_images`
+  itself still checks `run_phase3`). Gated by `run_phase10` (default `false`
+  until UAT-validated live), checked INSIDE the notebook itself (NOT via a
+  DAG-level condition task, unlike most other phases — a `gate_phase10`
   condition task caused a Databricks `EXCLUDED`-status cascade that broke
-  Phase 9a/9b whenever it evaluated false; see decisions log) —
-  **live-validated dry-run 2026-09-02**: 8 matched styles, 17 updates + 4
+  Phase 9a/9b whenever it evaluated false; see decisions log). `gate_phase1`
+  was removed the same way (2026-09-02) for the identical reason, now that
+  the whole Phase 3/9/10 chain transitively depends on `phase1_push` via
+  `repull_dtc` — **live-validated dry-run 2026-09-02**: 8 matched styles, 17 updates + 4
   inserts planned, 0 errors. Notebook:
   `dtc/notebooks/p10_pull_bom_and_enrich.py`; pure logic + tests:
   `dtc/python/sync/bom.py` / `dtc/tests/test_bom.py`.
@@ -582,14 +591,56 @@ kept below for historical reference only (see decisions log):**
   every scheduled run (confirmed live: the 2026-09-02 15:57 HKT periodic
   run showed `build_costing_chart`/`fill_duty_rates` etc. all `EXCLUDED`).
   **Fixed** by removing `gate_phase10` from the DAG entirely — `fill_bom_data`
-  now always runs (`depends=[dep("pull_master_dtc")]`, no condition), and
-  checks `run_phase10` INSIDE the notebook instead (matching the existing
+  now always runs (originally `depends=[dep("pull_master_dtc")]`, no
+  condition; changed again 2026-09-02, see next entry), and checks
+  `run_phase10` INSIDE the notebook instead (matching the existing
   `dry_run` pattern elsewhere), calling `dbutils.notebook.exit(...)`
   immediately as a genuine SUCCESS no-op when disabled — so nothing
   downstream is ever excluded. Live-reverified after the fix: `fill_bom_data`
   → `repull_dtc_bom` → `build_costing_chart` all completed `SUCCESS` with
   `run_phase10=false` (the exit value confirms the no-op path was taken:
   `"SKIPPED_run_phase10_false"`).
+- **`fill_bom_data` re-pointed from `pull_master_dtc` to `repull_dtc`, and
+  `gate_phase1` removed the same way as `gate_phase10` (2026-09-02, owner
+  clarification of intended lineage).** Owner clarified the intended data
+  flow: Phase 1 completes the style×color WIP master chart first (image
+  upload, Phase 3, is optional and not a blocker); Phase 10 then reads that
+  COMPLETE style×color state to fill in the material dimension
+  (style×color×material); Phase 9 then builds `costing_chart` from that.
+  `fill_bom_data` previously depended on `pull_master_dtc` — the WIP
+  snapshot taken BEFORE `phase1_push` runs — so it could enrich a style×
+  color state missing rows `phase1_push` had just created in DTC this same
+  run. Fixed: `fill_bom_data` now depends on `repull_dtc` instead (still
+  `run_if=ALL_DONE`), the task that already exists specifically to reflect
+  `phase1_push`'s newly-created rows back into Delta. This exposed a second,
+  identical-class landmine: `repull_dtc` was gated by
+  `dep("gate_phase3", outcome="true")`, so `run_phase3=false` would have
+  `EXCLUDED`-cascaded through `repull_dtc` into `fill_bom_data` and the
+  entire Phase 9/10 chain behind it — the same bug as the `gate_phase10`
+  entry above, reintroduced through `gate_phase3`. Fixed by making
+  `repull_dtc` an unconditional prerequisite (`depends=[dep("phase1_push")],
+  run_if=ALL_DONE`, no gate) shared by both `phase3_images` and
+  `fill_bom_data`; the `run_phase3` check moved onto `phase3_images` itself
+  (`depends=[dep("gate_phase3", outcome="true"), dep("repull_dtc")]`). This
+  in turn exposed a THIRD instance of the same class: `phase1_push` itself
+  was gated by `gate_phase1`, and with the whole Phase 3/9/10 chain now
+  transitively depending on it via `repull_dtc`, `run_phase1=false` would
+  have `EXCLUDED`-cascaded the same way. Fixed identically — `gate_phase1`
+  removed from the DAG, `phase1_push` (`beproduct/p1p7_beproduct_to_dtc_push.py`)
+  now takes a `run_phase1` widget (default `"true"`) checked INSIDE the
+  notebook, `dbutils.notebook.exit("SKIPPED_run_phase1_false")` as a no-op
+  (also explicitly zeroing its `taskValues` `inserted_ids`/`inserts` outputs
+  so `repull_dtc`'s `{{tasks.phase1_push.values.inserted_ids}}` reference
+  still resolves cleanly). `phase3_images` and `fill_duty_rates` (Phase 9b's
+  WIP PATCH) remain safe to run in parallel off this shared prerequisite:
+  they write through disjoint DTC surfaces (binary `/images` endpoint keyed
+  by `rowindex` vs. JSON `sheetData` PATCH keyed by `rowId`, disjoint
+  columns), and `phase3_images` re-reads the live sheet itself immediately
+  before writing rather than trusting a Delta snapshot. `python
+  scripts/deploy_job.py --dry-run` re-verified after the fix: 22 tasks, no
+  `gate_phase1`/`gate_phase10`, `phase1_push <- request_manager`,
+  `repull_dtc <- phase1_push`, `phase3_images <- gate_phase3[true],
+  repull_dtc`, `fill_bom_data <- repull_dtc`.
 - **Phase 10 BOM enrichment: "Body" → "Fabric" and `material_name` →
   `bom_detail_name` correction (owner amendment, 2026-09-02).** Initial spec
   used `bom_detail_name` values "Main Fabric"/"Body" and read `Fabric Group`
