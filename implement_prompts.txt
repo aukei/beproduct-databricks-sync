@@ -388,7 +388,7 @@ Temporarily change the default Databricks job parameters to sync again "TEST KTB
 
 
 
-# Phase 9B the NT Orbit Duty Tools for filling in missing HTS Code / Duty Rates / Tariff rates.
+# Phase 9B the NT Orbit Duty Tools for filling in missing HTS Code / Duty Rates / Tariff rates. $135.7
 1. How to call NT Tools - it is an API.
 - API Doc: https://orbitduty.neotangent.com/API-DOCS/#
 - Entra OAuth2
@@ -535,3 +535,23 @@ i will truncate costing_chart now so all get fresh populated.
 
 - debug Lineplan: all rows in costing_chart should have lineplan_ref populated. It should be a WIP inner join Lineplan rather than left join.
 - there are 8 rows in WIP known to have lineplan ref#, and there are also 8 corresponding rows in dtc_lineplan. So costing chart should contains exactly 8 rows at this moment.
+
+# Phase 10 reading BOM 
+This is fulfilling phase 1 left over: BOM data is missing from BeProduct API and rely on Techpack extraction.
+- BOM data is externally processed and stores at 
+    - alb_tpm_uat.public.customer_teckpack_style_log (UAT)
+    - alb_tpm_prd.public.customer_teckpack_style_log (PRD)
+- Each BeProduct Style join to BOM table by BP.bp_style_no = BOM.style_no & (BP.Season || " - " || BP.year) = BOM.style_season (inner join only)
+    - BOM.style_season in the format of "Spring - 2028"
+- At each DAG job run, if a BP style finds corresponding BOM records, extract inline JSON BOM i.e. customer_teckpack_style_log.bom_unified:
+    - validate json contains $.details.bom_detail_name["Main Fabric"] and/or $.details.bom_detail_name["Fabric"]. Only interested in these 2 segment types.
+        - there should only be 1 "Main Fabric", and 0 or more "Fabric" segments.
+    - If that style is already in DTC but without BOM, i.e. col_Fabric_Group = "MAIN MATERIAL CONTENT", 
+         - assign dtc_wip_ktb.col_Fabric_Group =  $bom_detail_name
+         - assign dtc_wip_ktb.col_Placement = $placement
+         - assign dtc_wip_ktb.col_Mill_Fabric_Article# = $material_no
+         - duplicate dtc row to a new row if more than one "Main Fabric" and "Body" exists, and populate above 3 fields with BOM data.
+    - If that style already have one or more rows in dtc_wip_ktb with col_Fabric_Group <> "MAIN MATERIAL CONTENT", skip to next style. (No-ops)
+- After BOM enrichment, there maybe new rows insert to DTC request.
+- This DTC enrichment should happen before costing_chart construction, so to pipe up-to-date material names into OrbitDuty call.
+- sample BOM JSON: [{"part": "BOM", "details": [{"bom_detail_name": "Main Fabric", "material_type": "Poplin", "material_name": "123455 - 97%Cotton 3%Spandex", "material_no": "WV-0064", "material_sub_type": "", "status": "", "composition": [{"fiber_pecentage": "", "fiber_content": "", "fiber_coo": "", "yarn_type": "", "yarn_coo": "", "trademark_certificate": ""}, {"fiber_pecentage": "", "fiber_content": "", "fiber_coo": "", "yarn_type": "", "yarn_coo": "", "trademark_certificate": ""}], "mill_supplier": "BEPRODUCT VENDOR", "component": "", "usage": "bodice", "placement": "bodice", "qty": null, "size": null, "colorway": []}, {"bom_detail_name": "Stitch/Seam", "material_type": "Polyester", "material_name": "TOPS THREAD T105", "material_no": "TH-000060", "material_sub_type": "", "status": "", "composition": [{"fiber_pecentage": "", "fiber_content": "", "fiber_coo": "", "yarn_type": "", "yarn_coo": "", "trademark_certificate": ""}], "mill_supplier": "", "component": "", "usage": "bodice", "placement": "bodice", "qty": null, "size": null, "colorway": []}, {"bom_detail_name": "Trim", "material_type": "Button", "material_name": "16L PLASTIC BUTTON DTM", "material_no": "16L PLASTIC BUTTON DTM", "material_sub_type": "", "status": "", "composition": [{"fiber_pecentage": "", "fiber_content": "", "fiber_coo": "", "yarn_type": "", "yarn_coo": "", "trademark_certificate": ""}], "mill_supplier": "BEPRODUCT VENDOR", "component": "", "usage": "", "placement": "", "qty": null, "size": null, "colorway": []}, {"bom_detail_name": "Trim", "material_type": "Drawstring", "material_name": "Drawstring", "material_no": "DS-000075", "material_sub_type": "", "status": "", "composition": [{"fiber_pecentage": "", "fiber_content": "", "fiber_coo": "", "yarn_type": "", "yarn_coo": "", "trademark_certificate": ""}], "mill_supplier": "", "component": "", "usage": "Center front", "placement": "Center front", "qty": "1.000", "size": null, "colorway": []}, {"bom_detail_name": "Label", "material_type": "Main Label", "material_name": "WOMEN Label with folded edges", "material_no": "25-3380-01", "material_sub_type": "", "status": "", "composition": [{"fiber_pecentage": "", "fiber_content": "", "fiber_coo": "", "yarn_type": "", "yarn_coo": "", "trademark_certificate": ""}], "mill_supplier": "ZHEJIANG CHARMING DYEING AND FINISHING CO.,LTD.", "component": "", "usage": "", "placement": "", "qty": null, "size": null, "colorway": []}], "column_header": ["**BomHeader", "**MaterialCategory", "**MaterialCode", "**MaterialType", "**MaterialDescription", "**Quantity", "**MaterialContent", "**MaterialConstruction", "**MaterialCuttableWidth", "**Placement", "**Size", "**RefNo", "**Section", "**InternalName", "**SupplierName", "**SupplierCop", "**SupplierRefNo", "**MainMaterial", "**UOM", "**CountryOfOrigin", "**CostFob", "**CostCif", "**WeightBeforeWash", "**WeightAfterWash", "**WeightUOM", "**Comments", "COMPONENT", "MATERIAL/FABRIC WEIGHT"]}]         

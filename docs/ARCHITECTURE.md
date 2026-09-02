@@ -60,6 +60,7 @@ dtc/
 │   ├── p9a_pull_lineplan_to_delta.py    # Phase 9a: pull KTB LinePlan → dtc_lineplan_ktb
 │   ├── p9a_build_costing_chart.py       # Phase 9a: WIP × LinePlan → costing_chart (transpose 4 slots)
 │   ├── p9b_fill_duty_rates.py           # Phase 9b: NT Orbit Duty Tools HTS/Duty/Tariff fill (persistent cache)
+│   ├── p10_pull_bom_and_enrich.py       # Phase 10: BOM enrichment from techpack extraction (serverless task; runs BEFORE build_costing_chart)
 │   └── p2_push_dtc_to_beproduct.py  # Phase 2: DTC → BeProduct pushback
 ├── python/                          # Importable modules (deployed as Workspace files)
 │   ├── client/rest_client.py        # Generic REST client (retry, multipart)
@@ -109,14 +110,26 @@ gate_phase3        (condition: run_phase3)        after request_manager
 repull_dtc         p1_pull_masters_to_delta         targeted re-pull (inserts)    after gate3+phase1 ALL_DONE
 phase3_images      p3_beproduct_to_dtc_images       staging+wip → DTC image       after repull
 
+gate_phase10       (condition: run_phase10)       after phase0_push ALL_DONE    ┐ parallel,
+fill_bom_data      p10_pull_bom_and_enrich          BOM(Lakebase)+wip → DTC push │ SERVERLESS compute
+repull_dtc_bom     p1_pull_masters_to_delta         full re-pull (reflect BOM)   ┘ after fill_bom_data ALL_DONE
+
 gate_phase9a       (condition: run_phase9a)       after wait_cluster            ┐ parallel,
 pull_lineplan_dtc  p9a_pull_lineplan_to_delta         DTC LinePlan → lineplan_ktb  │ independent
-p9a_build_costing_chart p9a_build_costing_chart           wip+lineplan → costing_chart ┘ after pull_lineplan+pull_master
+p9a_build_costing_chart p9a_build_costing_chart           wip+lineplan → costing_chart ┘ after pull_lineplan+repull_dtc_bom
 ```
 
 Condition tasks (`gate_phase*`) evaluate `run_phase*` job parameters; their `true`
 edge gates the respective push/pull tasks. `dry_run` (steps 4/5/6/8) computes +
-logs without writing. Phase 9a runs fully in parallel with the WIP chain.
+logs without writing. Phase 9a/10 both run in parallel with the WIP chain.
+`build_costing_chart` depends on `repull_dtc_bom`, NOT `pull_master_dtc`
+directly — Phase 10 (BOM enrichment) is placed BEFORE costing chart
+construction so up-to-date material names reach Phase 9b's NT Orbit calls;
+since Phase 10 only pushes to the live DTC sheet (never mutates Delta), a
+dedicated re-pull (`repull_dtc_bom`) makes the enrichment visible first.
+`fill_bom_data` runs on SERVERLESS compute (not the shared classic cluster)
+because its BOM source (`alb_tpm_<env>`) is a Lakebase database — see
+`docs/PHASE10_WORKFLOW.md`.
 
 Phase 8a/8b (DTC FABRIC → Delta → BeProduct Material Master) are RETIRED
 (2026-09-01), confirmed by the project team to be replaced by a separate

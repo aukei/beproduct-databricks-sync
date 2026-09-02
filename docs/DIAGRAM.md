@@ -1,11 +1,13 @@
 # BeProduct ⇄ DTC Sync — Pipeline Data-Flow Diagram
 
 > Databricks-centred view of all implemented sync pipelines.
-> `BeProduct_DTC_sync_dag` — job 294837488757511, 21 tasks. Updated 2026-09-01
-> to reflect the current repo: Phase 0 (XTS Master → Directory) and Phase 9b
-> (NT Orbit Duty Tools) added; Phase 8a/8b (FABRIC → Material Master) removed
-> — retired, superseded by a separate "MaterialLib" application. Gate
-> (`gate_phase*`) tasks and control/audit tables are now shown explicitly.
+> `BeProduct_DTC_sync_dag` — job 294837488757511, 24 tasks. Updated 2026-09-02
+> to reflect the current repo: Phase 0 (XTS Master → Directory), Phase 9b
+> (NT Orbit Duty Tools), and Phase 10 (BOM enrichment, runs on SERVERLESS
+> compute, placed BEFORE the costing chart) added; Phase 8a/8b (FABRIC →
+> Material Master) removed — retired, superseded by a separate "MaterialLib"
+> application. Gate (`gate_phase*`) tasks and control/audit tables are shown
+> explicitly.
 >
 > **Render locally:**
 > ```bash
@@ -33,6 +35,11 @@ flowchart TB
     subgraph ORBIT ["☁  NT Orbit Duty Tools  (3rd party)"]
         direction TB
         ORBIT_API(["orbitduty.neotangent.com\nEntra ID delegated OAuth2\n(auchunkei@lifung.com)"])
+    end
+
+    subgraph LAKEBASE ["⚡  alb_tpm_uat / alb_tpm_prd  (Lakebase, Unity Catalog)"]
+        direction TB
+        BOM_SRC(["customer_teckpack_style_log\nbom_unified JSON\nSERVERLESS compute ONLY"])
     end
 
 %% ─── Azure Databricks ────────────────────────────────────────────────────────
@@ -72,7 +79,7 @@ flowchart TB
             end
         end
 
-        subgraph DAG ["BeProduct_DTC_sync_dag  (daily, 21 tasks)"]
+        subgraph DAG ["BeProduct_DTC_sync_dag  (daily, 24 tasks)"]
             direction TB
 
             SW["wait_cluster\ncold-start sentinel"]
@@ -98,6 +105,13 @@ flowchart TB
                 G3{{"gate_phase3\nrun_phase3"}}
                 S7["repull_dtc\ntargeted re-pull"]
                 S8["phase3_images\nfront image binary"]
+            end
+
+            subgraph DAG_10 ["Phase 10 (BEFORE costing chart)"]
+                direction TB
+                G10{{"gate_phase10\nrun_phase10"}}
+                S10A["fill_bom_data\nSERVERLESS compute\n(Lakebase source)"]
+                S10B["repull_dtc_bom\nunconditional re-pull"]
             end
 
             subgraph DAG_CC ["Phases 9a / 9b"]
@@ -172,6 +186,15 @@ flowchart TB
 %% artifact only; dtc_fabric_ktb/dtc_fabric_registry were DROPPED from Delta
 %% the same day (owner-confirmed, zero downstream readers).
 
+%% ─── Phase 10 — BOM enrichment (runs BEFORE costing chart) ─────────────────
+    P0X       -.->|"run_if=ALL_DONE"| G10
+    G10       ==>|"true"| S10A
+    T_WIP     --> S10A
+    BOM_SRC   ==>|"INNER JOIN\nstyle_no + style_season"| S10A
+    S10A      ==>|"PATCH update / INSERT new row"| DTC_WIP
+    S10A      -.->|"run_if=ALL_DONE"| S10B
+    S10B      ==> T_WIP
+
 %% ─── Phase 9a/9b — Costing chain (parallel with WIP chain) ─────────────────
     P0X     -.->|"run_if=ALL_DONE"| G9A
     G9A     ==>|"true"| S9A1
@@ -179,7 +202,7 @@ flowchart TB
     S9A1    ==> T_LP
     S9A1    ==> T_LPREG
     T_LP    --> S9A2
-    T_WIP   --> S9A2
+    S10B    --> S9A2
     S9A2    ==> T_CC
     S9A2    --> G9B
     G9B     ==>|"true"| S9B
@@ -204,10 +227,10 @@ flowchart TB
     classDef gate  fill:#fee2e2,stroke:#dc2626,color:#7f1d1d
     classDef done  fill:#f3f4f6,stroke:#6b7280,color:#374151,stroke-dasharray: 3 3
 
-    class BP,DTC,ORBIT ext
+    class BP,DTC,ORBIT,LAKEBASE ext
     class T_XTS,T_XTSREG,T_DIR,T_STYLES,T_APPREG,T_SEASON,T_STAGING,T_WIP,T_REG,T_LOG1,T_LOG2,T_LP,T_LPREG,T_CC,T_CACHE,T_OAUTH table
-    class SW,P0P,P0U,P0X,S1,S2,S3,S4,S5,S6,S7,S8,S9A1,S9A2,S9B step
-    class G0,G1,G2,G3,G9A,G9B gate
+    class SW,P0P,P0U,P0X,S1,S2,S3,S4,S5,S6,S7,S8,S9A1,S9A2,S9B,S10A,S10B step
+    class G0,G1,G2,G3,G9A,G9B,G10 gate
     class P0X_DONE done
 ```
 
@@ -273,11 +296,23 @@ history only): `LF Material ID` → `lf_material_id` (BP Material Master key);
 Class`, `Fabric Type`, `Mill Fabric Article #`, `Mill Name`, `KB Fabric Code
 (SAP Code)`.
 
+### `alb_tpm_<env>` BOM → DTC WIP `Fabric Group`/`Placement`/`Mill Fabric Article #` (Phase 10)
+
+Join key: `ktb_styles.bp_style_number = customer_teckpack_style_log.style_no`
+AND `(ktb_styles.season || " - " || ktb_styles.year) = style_season`. Parses
+`bom_unified` JSON for "Main Fabric" (exactly 1) and "Fabric" (0+) segments;
+`Fabric Group` = the segment's own `bom_detail_name`, not `material_name`.
+Runs on **serverless compute** (source is a Lakebase database) and BEFORE
+Phase 9a's costing chart build, so up-to-date material names reach Phase
+9b's NT Orbit calls. See `docs/PHASE10_WORKFLOW.md`.
+
 ### DTC LinePlan + WIP × LinePlan → Costing Chart (Phase 9a)
 
 Join key: WIP `"Lineplan Ref #"` = LinePlan `"Lineplan Ref #"`.
 Transpose: Main / Vendor 1 / Vendor 2 / Vendor 3 slots → one row each per vendor.
 `costing_chart` is FULLY OVERWRITTEN every Phase 9a run (no incremental).
+`build_costing_chart` depends on `repull_dtc_bom` (Phase 10's re-pull), not
+`pull_master_dtc` directly.
 
 ### costing_chart → NT Orbit Duty Tools → costing_chart / DTC WIP (Phase 9b)
 

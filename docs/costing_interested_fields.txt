@@ -61,6 +61,11 @@ style_description      | WIP JSON     | "Style Description"
 color_name             | WIP (fixed)  | color_wash column (= "Color / Wash" in DTC)
 lineplan_ref           | WIP JSON     | "Lineplan Ref #"
 fabric_content         | WIP JSON     | "Fabric Group"                (WIP "Content" col)
+                       |              | Enriched by Phase 10 (BOM, docs/PHASE10_WORKFLOW.md) before this
+                       |              | notebook runs, when run_phase10=true -- fills "Fabric Group" from
+                       |              | real BOM data instead of the "MAIN MATERIAL CONTENT" placeholder,
+                       |              | so this reaches Phase 9b's NT Orbit product_description with real
+                       |              | material names, not the placeholder.
 gender                 | WIP JSON     | "Gender"                      (may be blank)
 class_name             | WIP JSON     | "Class"
 sub_class              | WIP JSON     | "Sub Class"

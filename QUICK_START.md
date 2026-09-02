@@ -120,12 +120,19 @@ Run these in order if you prefer step-by-step control (params shown are the key 
 > fallback artifact only; the `dtc_fabric_ktb` / `dtc_fabric_registry` tables
 > were DROPPED from Delta the same day (owner-confirmed, zero downstream readers).
 
+**BOM enrichment (Phase 10 — runs BEFORE `build_costing_chart`, default off):**
+
+| DAG task | Notebook | Purpose | Output |
+|----------|----------|---------|--------|
+| `fill_bom_data` | `dtc/notebooks/p10_pull_bom_and_enrich` | Enrich WIP `Fabric Group`/`Placement`/`Mill Fabric Article #` from `alb_tpm_<env>.public.customer_teckpack_style_log` (**runs on serverless compute** — Lakebase source). `gate_phase10`, `run_phase10=false` default. | live DTC push only (no Delta write) |
+| `repull_dtc_bom` | `dtc/notebooks/p1_pull_masters_to_delta` | Re-pull WIP so `build_costing_chart` sees the enrichment; runs unconditionally (`run_if=ALL_DONE`) | `dtc_wip_ktb` |
+
 **LinePlan + Costing chain (Phase 9a — parallel, independent):**
 
 | DAG task | Notebook | Purpose | Output |
 |----------|----------|---------|--------|
 | `pull_lineplan_dtc` | `dtc/notebooks/p9a_pull_lineplan_to_delta` | Pull KTB LinePlan (Full view) | `dtc_lineplan_ktb` |
-| `p9a_build_costing_chart` | `dtc/notebooks/p9a_build_costing_chart` | INNER JOIN WIP × LinePlan on "Lineplan Ref #" (unmatched WIP rows dropped); transpose 4 vendor/factory slots into `supplier_type` "Main"\|"1"\|"2"\|"3" | `costing_chart` |
+| `p9a_build_costing_chart` | `dtc/notebooks/p9a_build_costing_chart` | INNER JOIN WIP × LinePlan on "Lineplan Ref #" (unmatched WIP rows dropped); transpose 4 vendor/factory slots into `supplier_type` "Main"\|"1"\|"2"\|"3". Depends on `repull_dtc_bom`, not `pull_master_dtc` directly. | `costing_chart` |
 
 **Duty/Tariff chain (Phase 9b — after `build_costing_chart`):**
 

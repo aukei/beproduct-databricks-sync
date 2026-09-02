@@ -6,6 +6,7 @@ schema `lft.beproduct`. Each field syncs **one way only** (no loops).
 
 | Phase | Direction | Description |
 |-------|-----------|-------------|
+| **0** | DTC → Delta → BeProduct | Pull DTC "XTS Master" (Supplier/Factory) → upsert `beproduct_directory` → push to BeProduct. Runs FIRST, before every other phase. |
 | **1** | BeProduct → DTC | Push style fields into the matching WIP request (upsert); create + share missing in-scope requests |
 | **2** | DTC → BeProduct | Push DTC-owned fields back into the BeProduct style |
 | **3** | BeProduct → DTC | Upload front image into the DTC "Style Image" cell (binary, separate endpoint) |
@@ -13,6 +14,7 @@ schema `lft.beproduct`. Each field syncs **one way only** (no loops).
 | **8a/8b** | *(RETIRED 2026-09-01)* | DTC FABRIC → Delta → BeProduct Material Master — superseded by a separate "MaterialLib" application; removed from the deployed DAG |
 | **9a** | DTC → Delta → Delta | Pull KTB LinePlan; join with WIP; build `costing_chart` (Style × Color × Vendor/Factory) |
 | **9b** | API → Delta → DTC | NT Orbit Duty Tools API fill for HTS/Duty/Tariff fields (persistent cross-run cache); push changes back to WIP |
+| **10** | Lakebase → Delta → DTC | Enrich WIP `Fabric Group`/`Placement`/`Mill Fabric Article #` from externally-processed techpack BOM data; runs BEFORE Phase 9a so Phase 9b's NT Orbit calls see current material names. Requires **serverless compute** (source is a Lakebase database). |
 
 The whole pipeline runs as a **multi-task Databricks job** (`BeProduct_DTC_sync_dag`,
 job 294837488757511), defined in `scripts/deploy_job.py`.
@@ -25,11 +27,13 @@ job 294837488757511), defined in `scripts/deploy_job.py`.
 |----------|-------------|
 | [QUICK_START.md](QUICK_START.md) | Setup, how to use, which notebook to run |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Components, full pipeline DAG, and ADB data model |
+| [docs/PHASE0_WORKFLOW.md](docs/PHASE0_WORKFLOW.md) | DTC "XTS Master" → BeProduct Directory (runs FIRST) |
 | [docs/PHASE1_WORKFLOW.md](docs/PHASE1_WORKFLOW.md) | BeProduct → DTC style field upsert (Phases 1 + 7 ride same push) |
 | [docs/PHASE2_WORKFLOW.md](docs/PHASE2_WORKFLOW.md) | DTC → BeProduct pushback |
 | [docs/PHASE3_WORKFLOW.md](docs/PHASE3_WORKFLOW.md) | BeProduct image → DTC "Style Image" |
 | [docs/PHASE5_WORKFLOW.md](docs/PHASE5_WORKFLOW.md) | BeProduct Master Data & Directory sync (admin utility, not in DAG) |
 | [docs/PHASE7_WORKFLOW.md](docs/PHASE7_WORKFLOW.md) | Sample-app submit history → DTC status columns |
+| [docs/PHASE10_WORKFLOW.md](docs/PHASE10_WORKFLOW.md) | BOM enrichment from externally-processed techpack data (serverless compute) |
 | [docs/BEPRODUCT_GUIDE.md](docs/BEPRODUCT_GUIDE.md) | BeProduct SDK/API + BeProduct tables on ADB |
 | [docs/DTC_GUIDE.md](docs/DTC_GUIDE.md) | DTC API + DTC tables on ADB |
 | [docs/DIAGRAM.md](docs/DIAGRAM.md) | Pipeline data-flow Mermaid diagram (render locally — PNG/SVG not committed) |
@@ -64,6 +68,7 @@ dtc/
 │   ├── p9a_pull_lineplan_to_delta.py       # Phase 9a: pull KTB LinePlan → dtc_lineplan_ktb
 │   ├── p9a_build_costing_chart.py          # Phase 9a: WIP × LinePlan join → costing_chart
 │   ├── p9b_fill_duty_rates.py              # Phase 9b: NT Orbit Duty Tools HTS/Duty/Tariff fill
+│   ├── p10_pull_bom_and_enrich.py          # Phase 10: BOM enrichment from techpack extraction (serverless task)
 │   └── p2_push_dtc_to_beproduct.py     # Phase 2: DTC → BeProduct pushback
 ├── python/                             # Importable modules (deployed as Workspace files)
 │   ├── client/rest_client.py           # Generic REST client (retry, multipart)

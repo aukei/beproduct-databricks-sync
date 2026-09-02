@@ -9,13 +9,14 @@ multi-task job `BeProduct_DTC_sync_dag` (job 294837488757511, defined in
 > ⚠️ **Stale by omission (2026-09-01):** all timing tables below reflect the
 > job's 8-task shape as of 2026-06-19 (bp_style_sync, transform, pull_dtc,
 > request_manager, phase1_push, phase2_push, repull_dtc, phase3_images). The
-> job has since grown to 21 tasks — Phase 0 (`gate_phase0` → `phase0_pull` →
-> `phase0_upsert` → `phase0_push`, now the FIRST step) and Phase 9a/9b
+> job has since grown to 24 tasks — Phase 0 (`gate_phase0` → `phase0_pull` →
+> `phase0_upsert` → `phase0_push`, now the FIRST step), Phase 9a/9b
 > (`gate_phase9a` → `pull_lineplan_dtc` → `build_costing_chart` →
-> `gate_phase9b` → `fill_duty_rates`) were added, and Phase 8a/8b were
-> removed. None of those newer tasks' costs are reflected here yet — treat
-> this file as a historical record of the original 8-task optimization work,
-> not a current total-wall-time reference.
+> `gate_phase9b` → `fill_duty_rates`), and Phase 10 (`gate_phase10` →
+> `fill_bom_data` → `repull_dtc_bom`, on serverless compute) were added, and
+> Phase 8a/8b were removed. None of those newer tasks' costs are reflected
+> here yet — treat this file as a historical record of the original 8-task
+> optimization work, not a current total-wall-time reference.
 
 ---
 

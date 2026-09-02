@@ -103,6 +103,34 @@ sheets), staged through **Databricks/Delta**.
   parameters (`duty_cache_table` / `duty_cache_ttl_days`). Notebook:
   `dtc/notebooks/p9b_fill_duty_rates.py`; pure logic + tests:
   `dtc/python/sync/duty.py` / `dtc/tests/test_duty.py`.
+- **Phase 10 — BOM enrichment from externally-processed techpack data**:
+  fulfills a Phase 1 gap (BOM data isn't in the BeProduct API at all).
+  Sourced from `alb_tpm_uat.public.customer_teckpack_style_log` /
+  `alb_tpm_prd.public.customer_teckpack_style_log` — live-confirmed
+  directly reachable Unity Catalog catalogs, joined onto `ktb_styles` by
+  `(bp_style_number=style_no, season||" - "||year=style_season)`, INNER
+  JOIN only. Parses `bom_unified` JSON for "Main Fabric" (exactly 1 by
+  construction) and "Fabric" (0 or more) segments ONLY — corrected
+  2026-09-02, an earlier iteration used "Body" instead of "Fabric" (never
+  appears in live data) and `material_name` instead of `bom_detail_name`
+  for the `Fabric Group` value (see decisions log). A style's WIP rows are
+  enriched only if NONE already have real `Fabric Group` data; "Main
+  Fabric" fills the existing row(s), each "Fabric" segment ALSO duplicates
+  each row into a new one. **CRITICAL**: `alb_tpm_*` catalogs are Lakebase
+  databases registered in Unity Catalog — queryable ONLY from serverless
+  compute, not the classic shared job cluster (live-confirmed 2026-09-02,
+  `UnauthorizedAccessException`). `fill_bom_data`'s task therefore runs on
+  SERVERLESS compute (`nb_task(..., serverless=True)`), the only task in
+  this job that does. Runs BEFORE `build_costing_chart` (owner decision
+  2026-09-02) so up-to-date material names reach Phase 9b's NT Orbit
+  calls; since it never mutates Delta directly (DTC push only), a
+  dedicated `repull_dtc_bom` task (full `p1_pull_masters_to_delta`
+  re-pull, `run_if=ALL_DONE`) runs immediately after so `build_costing_chart`
+  sees the enrichment. Gated by `run_phase10` (default `false` until
+  UAT-validated — **live-validated dry-run 2026-09-02**: 8 matched styles,
+  17 updates + 4 inserts planned, 0 errors). Notebook:
+  `dtc/notebooks/p10_pull_bom_and_enrich.py`; pure logic + tests:
+  `dtc/python/sync/bom.py` / `dtc/tests/test_bom.py`.
 
 Each field syncs **one way only** (no loops). Direction table below.
 Components, data flow, and the full ADB data model: `docs/ARCHITECTURE.md`.
@@ -535,6 +563,37 @@ kept below for historical reference only (see decisions log):**
 
 ## Decisions on record
 
+- **Phase 10 BOM enrichment: "Body" → "Fabric" and `material_name` →
+  `bom_detail_name` correction (owner amendment, 2026-09-02).** Initial spec
+  used `bom_detail_name` values "Main Fabric"/"Body" and read `Fabric Group`
+  from the segment's `material_name`. Live data check across all 16 KONTOOR
+  rows found "Body" NEVER appears at all, but "Fabric" genuinely does (3/16
+  styles, e.g. KTB-00020/KTB-00023/CB-S28003/s234160). Corrected: the two
+  interesting segments are "Main Fabric" (exactly 1 by construction) and
+  "Fabric" (0 or more, not just 0 or 1 — `dtc/python/sync/bom.py`'s
+  `ParsedBomSegments.fabric_list` handles any count), and `Fabric Group` is
+  now assigned from the segment's own `bom_detail_name` (i.e. literally
+  "Main Fabric" or "Fabric"), NOT `material_name`. `Placement`/`Mill Fabric
+  Article #` are unaffected (`placement`/`material_no`, unchanged). Live
+  dry-run re-validated after the fix: 8/8 matched styles, 17 updates + 4
+  inserts (matching exactly the 4 styles confirmed to have a "Fabric"
+  segment), 0 errors.
+- **Phase 10 `alb_tpm_*` requires SERVERLESS compute (live-discovered
+  2026-09-02).** `alb_tpm_uat`/`alb_tpm_prd` are Lakebase databases
+  registered in Unity Catalog, not plain Delta-backed catalogs — the
+  classic shared job cluster (`Standard_D4s_v3`, used by every other task)
+  fails with `UnauthorizedAccessException: ... requires serverless
+  compute` on any `spark.table("alb_tpm_uat...")` call. This is why an
+  earlier local SQL-warehouse validation of the same query succeeded (that
+  warehouse happens to be serverless) while the actual job task failed.
+  Fixed by adding a `serverless` flag to `scripts/deploy_job.py`'s
+  `nb_task()` helper (omits `job_cluster_key` entirely, which Databricks
+  Jobs then runs on serverless compute) and setting it for `fill_bom_data`
+  only — every other task remains on the shared classic cluster. Serverless
+  compute can still read ordinary Unity Catalog Delta tables fine (the
+  constraint is one-directional: Lakebase needs serverless, but serverless
+  isn't restricted from anything classic compute can already do), so this
+  required no other code changes.
 - **Phase 9b WIP push: "Duplicate rowId found" 400 (live-fixed 2026-09-01).**
   `costing_chart` transposes ONE WIP row into up to 4 rows (Main/1/2/3 vendor
   slots) — all 4 map to the SAME underlying WIP `rowId`, differing only in

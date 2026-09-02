@@ -24,7 +24,23 @@ DAG
                                                                                 │       │                             └─► gate_phase3 ──────────────┐          │
                                                                                 │       └─► gate_phase2 ─► phase2_push                                  ├─► repull_dtc ─► phase3_images
                                                                                 │                                                                      (run_if=ALL_DONE)
-                                                                                └─► gate_phase9a ─► pull_lineplan_dtc ─► build_costing_chart ─► gate_phase9b ─► fill_duty_rates
+                                                                                ├─► gate_phase10 ─► fill_bom_data ─► repull_dtc_bom ─┐
+                                                                                │                    (run_if=ALL_DONE)              │
+                                                                                └─► gate_phase9a ─► pull_lineplan_dtc ───────────────┴─► build_costing_chart ─► gate_phase9b ─► fill_duty_rates
+
+Phase 10 (BOM enrichment from externally-processed techpack extraction, see
+`docs/PHASE10_WORKFLOW.md`) is placed BEFORE `build_costing_chart` (owner
+decision 2026-09-02): Fabric Group/Placement/Mill Fabric Article # values it
+fills in must reach `costing_chart`'s `fabric_content` (part of
+`product_description`) BEFORE Phase 9b calls NT Orbit, or the duty
+classification would be computed against stale/placeholder material data.
+Since Phase 10 only pushes to the LIVE DTC sheet (never mutates Delta
+directly), `repull_dtc_bom` re-pulls `dtc_wip_<customer>` afterward so
+`build_costing_chart` sees the enrichment; `build_costing_chart` depends on
+`repull_dtc_bom`, NOT `pull_master_dtc` directly. `repull_dtc_bom` runs
+unconditionally (`run_if=ALL_DONE` on `fill_bom_data`, no gate of its own) so
+a disabled/skipped/failed Phase 10 never blocks Phase 9a — it just becomes an
+extra, harmless full re-pull in that case.
 
 Phase 8a/8b (DTC FABRIC → Delta → BeProduct Material Master) are RETIRED
 (2026-09-01): confirmed by the project team to be replaced by a separate
@@ -150,6 +166,9 @@ JOB_PARAMS = {
     "duty_cache_ttl_days": "180",     # Phase 9b: re-query a cached lookup after this many days
     "orbit_parallel_calls": "false",  # Phase 9b: call NT Orbit serially by default (safer; set true + tune max_workers for throughput)
     "orbit_timeout_seconds": "60",    # Phase 9b: per-call NT Orbit HTTP timeout (live-validated 2026-09-01: 30s was too short)
+    "run_phase10": "false",           # Phase 10: BOM enrichment from techpack extraction (default off until UAT-validated)
+    "bom_catalog": "alb_tpm_uat",      # Phase 10: BOM source catalog (alb_tpm_uat | alb_tpm_prd -- NOT derived from dtc_environment, suffix differs)
+    "bom_customer_name": "KONTOOR",    # Phase 10: pre-filter customer_name in the shared multi-customer BOM table (scoping/perf only)
     "push_duty_to_wip": "true",      # Phase 9b: also PATCH filled values back to DTC WIP
     "push_blanks": "false",
     "img_http_timeout": "30",
@@ -171,15 +190,27 @@ COSTING_TABLE = P("costing_chart_table")
 DRY = P("dry_run")
 
 
-def nb_task(task_key, notebook_path, params, depends=None, run_if=None, timeout=3600):
-    return jobs.Task(
+def nb_task(task_key, notebook_path, params, depends=None, run_if=None, timeout=3600, serverless=False):
+    """
+    serverless=True omits job_cluster_key entirely, which runs the task on
+    SERVERLESS compute instead of the shared classic job cluster. Needed for
+    fill_bom_data (Phase 10): alb_tpm_<env>.public.customer_teckpack_style_log
+    is a Lakebase database registered in Unity Catalog, and Lakebase catalogs
+    can ONLY be queried from serverless compute -- live-confirmed 2026-09-02,
+    the classic Standard_D4s_v3 shared cluster gets
+    "UnauthorizedAccessException: ... requires serverless compute" from
+    spark.table() on that catalog. See AGENTS.md decisions log.
+    """
+    task = jobs.Task(
         task_key=task_key,
         notebook_task=jobs.NotebookTask(notebook_path=notebook_path, base_parameters=params),
-        job_cluster_key=SHARED_CLUSTER_KEY,
         depends_on=depends or [],
         run_if=run_if,
         timeout_seconds=timeout,
     )
+    if not serverless:
+        task.job_cluster_key = SHARED_CLUSTER_KEY
+    return task
 
 
 def gate_task(task_key, param_name, depends, run_if=None):
@@ -325,11 +356,17 @@ def build_tasks():
         "max_workers":     "4",
     }, depends=[dep("gate_phase9a", outcome="true")]))
 
+    # build_costing_chart reads dtc_wip_<customer> from Delta, so it must wait
+    # for repull_dtc_bom (below), NOT pull_master_dtc directly -- Phase 10's
+    # BOM enrichment (Fabric Group/Placement/Mill Fabric Article #) pushes to
+    # the LIVE DTC sheet, not Delta; only a re-pull makes it visible here.
+    # Owner decision 2026-09-02: BOM enrichment must land BEFORE costing_chart
+    # so up-to-date material names flow into Phase 9b's NT Orbit calls.
     tasks.append(nb_task("build_costing_chart", f"{NB_DTC}/p9a_build_costing_chart", {
         "catalog":  CAT,
         "schema":   SCH,
         "customer": CUST,
-    }, depends=[dep("pull_lineplan_dtc"), dep("pull_master_dtc")]))
+    }, depends=[dep("pull_lineplan_dtc"), dep("repull_dtc_bom")]))
 
     # ── Phase 9b — Fill HTS/Duty/Tariff via NT Orbit Duty Tools ────────────────
     tasks.append(gate_task("gate_phase9b", "run_phase9b",
@@ -353,6 +390,47 @@ def build_tasks():
         "max_workers":         "4",
         "orbit_timeout_seconds": P("orbit_timeout_seconds"),
     }, depends=[dep("gate_phase9b", outcome="true")]))
+
+    # ── Phase 10 — BOM enrichment from externally-processed techpack data ─────
+    # Fulfills a Phase 1 gap: BOM data isn't available from the BeProduct API,
+    # so it's sourced from a separate techpack-extraction pipeline
+    # (alb_tpm_<env>.public.customer_teckpack_style_log) and joined onto
+    # ktb_styles by (bp_style_number=style_no, season||' - '||year=style_season).
+    # Depends on pull_master_dtc (needs a fresh dtc_wip_<customer> + registry
+    # snapshot to know current rowId/sheet_id/view_id per style) and
+    # phase0_push (same run_if=ALL_DONE convention as the other WIP-chain
+    # branches, so disabling run_phase0 doesn't deadlock it).
+    tasks.append(gate_task("gate_phase10", "run_phase10",
+                           depends=[dep("phase0_push")], run_if=jobs.RunIf.ALL_DONE))
+    tasks.append(nb_task("fill_bom_data", f"{NB_DTC}/p10_pull_bom_and_enrich", {
+        "catalog":     CAT,
+        "schema":      SCH,
+        "customer":    CUST,
+        "folder_name": P("folder_name"),
+        "dtc_environment": ENV,
+        "dtc_workspace":   WS,
+        "bom_catalog": P("bom_catalog"),
+        "bom_customer_name": P("bom_customer_name"),
+        "dry_run":     DRY,
+        "batch_size":  "100",
+    }, depends=[dep("gate_phase10", outcome="true"), dep("pull_master_dtc")], serverless=True))
+
+    # Re-pull WIP after BOM enrichment so build_costing_chart (Phase 9a) sees
+    # the enriched Fabric Group/Placement/Mill Fabric Article # data -- Phase
+    # 10 only pushes to the LIVE DTC sheet, never mutates Delta directly (see
+    # p10_pull_bom_and_enrich.py's module docstring). A FULL re-pull (not
+    # targeted by request_ids) is used deliberately: fill_bom_data can be
+    # entirely SKIPPED (gate_phase10=false), and referencing a skipped task's
+    # {{tasks.X.values...}} output is fragile/untested, unlike repull_dtc's
+    # existing targeted pattern where its upstream (phase1_push) always runs.
+    # run_if=ALL_DONE so this still executes (as a normal fresh pull) even
+    # when Phase 10 is disabled or fill_bom_data fails/is skipped -- it must
+    # never itself block build_costing_chart.
+    tasks.append(nb_task("repull_dtc_bom", f"{NB_DTC}/p1_pull_masters_to_delta", {
+        "dtc_environment": ENV, "customer": CUST, "dtc_workspace": WS, "dtc_document": DOC,
+        "catalog": CAT, "schema": SCH, "write_mode": "overwrite", "refresh_registry": "false",
+        "max_workers": "4",
+    }, depends=[dep("fill_bom_data")], run_if=jobs.RunIf.ALL_DONE))
 
     return tasks
 
