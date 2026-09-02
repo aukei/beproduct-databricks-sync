@@ -119,10 +119,10 @@ SPARK_CONF = {"spark.master": "local[*]"}
 CLUSTER_LOG_DEST = "/Volumes/lft/beproduct/job_log/BpDtcSync"
 
 # ── Job schedule (retrieved from live job 294837488757511 on 2026-06-20) ────
-# Quartz: 07:57:15, 12:57:15, 15:57:15 HKT daily.
+# Quartz: 07:55:15, 12:55:15, 15:55:15 HKT daily.
 # Set to None to deploy without a schedule (safe for brand-new jobs).
 JOB_SCHEDULE = jobs.CronSchedule(
-    quartz_cron_expression="15 57 7,12,15 * * ?",
+    quartz_cron_expression="15 55 7,12,15 * * ?",
     timezone_id="Asia/Hong_Kong",
     pause_status=jobs.PauseStatus.UNPAUSED,
 )
