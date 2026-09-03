@@ -165,6 +165,7 @@ class ImageUploadOp:
     row_index: int
     image_url: str
     row_id: Optional[str] = None  # informational; the image API keys off rowIndex
+    source: str = "beproduct_extract"  # "beproduct_extract" | "sibling_copy" -- see compute_image_uploads
 
 
 @dataclass
@@ -204,11 +205,30 @@ def compute_image_uploads(
                   'front_image_url'. (Phase 6: was lf_style_number)
 
     Returns:
-        ImagePlan. An upload is emitted only for a DTC row that is blank-image
-        AND has a matching BeProduct row with a valid front_image_url AND a
-        rowIndex. Already-imaged rows are skipped silently (no skip record);
-        blank rows whose source lacks a URL, or that have no rowIndex, are
-        recorded as skips for visibility.
+        ImagePlan. An upload is emitted for a DTC row that is blank-image AND
+        either (a) another row in this SAME request sharing the same BP
+        Style# already has a populated Style Image (copied from that
+        sibling's own DTC-hosted image URL — no BeProduct download at all),
+        or (b) has a matching BeProduct row with a valid front_image_url AND
+        a rowIndex (the original full-extraction path). Already-imaged rows
+        are skipped silently (no skip record); blank rows whose source lacks
+        a URL, or that have no rowIndex, are recorded as skips for
+        visibility.
+
+    Sibling-copy (added 2026-09-03, owner spec): a style's front image is a
+    HEADER-level BeProduct attribute (one per style, not per colorway), so
+    every colorway row of the same BP Style# within one request (fixed
+    Brand+Season) is expected to carry the SAME image. Before falling back
+    to a full BeProduct CDN download+transcode+upload for a blank row, check
+    whether ANY other row for the same BP Style# in this request already has
+    a real Style Image — if so, reuse that row's OWN already-uploaded
+    DTC-hosted image URL as the upload source instead. This avoids: a
+    redundant BeProduct CDN download (some of those URLs are known to 403 —
+    see AGENTS.md), redundant transcoding, and any chance of the two
+    colorways' images silently diverging. The upload MECHANICS are
+    unchanged (still download-the-URL + classify/transcode + multipart
+    POST) — only WHICH url is downloaded differs, so no notebook-side
+    changes were needed; see `ImageUploadOp.source`.
     """
     lf_col, color_col = MATCH_KEY_COLS
 
@@ -220,6 +240,19 @@ def compute_image_uploads(
         if key == (None, None):
             continue
         bp_index.setdefault(key, bp)
+
+    # Index EXISTING (already-imaged) DTC rows by BP Style# alone (style-level,
+    # not colorway-level) so a blank sibling can copy from any already-imaged
+    # colorway of the same style in this request. First real image wins.
+    sibling_image_by_style: Dict[str, str] = {}
+    for r in dtc_rows:
+        style_no = norm(r.get(lf_col))
+        if style_no is None or style_no in sibling_image_by_style:
+            continue
+        if is_image_populated(r):
+            existing_url = norm(r.get(STYLE_IMAGE_COL))
+            if is_valid_image_url(existing_url):
+                sibling_image_by_style[style_no] = existing_url
 
     plan = ImagePlan()
     seen: set = set()
@@ -235,6 +268,24 @@ def compute_image_uploads(
         if is_image_populated(r):
             continue  # already has an image -> nothing to do (idempotent)
 
+        row_index = r.get("rowIndex")
+        if row_index is None:
+            plan.skips.append(ImageSkip(
+                "missing_row_index", key, "DTC row has no rowIndex"))
+            continue
+
+        style_no = norm(r.get(lf_col))
+        sibling_url = sibling_image_by_style.get(style_no) if style_no else None
+        if sibling_url is not None:
+            plan.uploads.append(ImageUploadOp(
+                match_key=key,
+                row_index=int(row_index),
+                image_url=sibling_url,
+                row_id=r.get("rowId"),
+                source="sibling_copy",
+            ))
+            continue
+
         bp = bp_index.get(key)
         if bp is None:
             continue  # DTC row with no BeProduct source row -> leave it alone
@@ -245,17 +296,12 @@ def compute_image_uploads(
                 "no_source_image", key, f"front_image_url={url!r}"))
             continue
 
-        row_index = r.get("rowIndex")
-        if row_index is None:
-            plan.skips.append(ImageSkip(
-                "missing_row_index", key, "DTC row has no rowIndex"))
-            continue
-
         plan.uploads.append(ImageUploadOp(
             match_key=key,
             row_index=int(row_index),
             image_url=norm(url),
             row_id=r.get("rowId"),
+            source="beproduct_extract",
         ))
 
     return plan

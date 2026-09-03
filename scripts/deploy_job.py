@@ -129,16 +129,36 @@ NB_DTC = "/Workspace/Repos/beproduct-sync/DTC/notebooks"
 
 SHARED_CLUSTER_KEY = "shared"
 
+# ── Instance Pool (created 2026-09-03) ───────────────────────────────────────
+# Shared across all 3 split jobs (main / duty_compute / images) below to cut
+# cluster cold-start from ~5-7 min to ~1-2 min WITHOUT merging the jobs into
+# one shared running cluster -- each job still gets its own independent
+# ephemeral job cluster (full isolation, ClassicPreview single-node as
+# before), just provisioned from pre-warmed pooled VMs instead of cold Azure
+# VM allocation. min_idle_instances=1 keeps one warm instance ready;
+# max_capacity=6 covers all 3 jobs potentially overlapping plus headroom.
+# Owner explicitly confirmed independence is fine -- this is purely a
+# warm-time optimization, not a coupling mechanism.
+INSTANCE_POOL_ID = "0903-055346-hose1-pool-cia9e7xn"  # "beproduct-dtc-sync-pool-v5" (Standard_D4as_v5)
+
 # ── Cluster spec (mirrors live cluster retrieved 2026-06-20) ────────────────
 # Classic Preview single-node mode (is_single_node=True, kind=CLASSIC_PREVIEW)
 # matches the live cluster. Standard engine, no Photon.
 SPARK_VERSION = "17.3.x-scala2.13"
-NODE_TYPE = "Standard_D4s_v3"
-# is_single_node / kind are set in CLUSTER_EXTRA — do NOT set num_workers.
+# Changed 2026-09-03 (owner request): Standard_D4s_v3 -> Standard_D4as_v5
+# (Azure AMD Ddsv5-series). Instance pools are immutable on node_type_id, so
+# this required a NEW pool (old Standard_D4s_v3 pool deleted) rather than an
+# in-place edit -- see INSTANCE_POOL_ID above.
+NODE_TYPE = "Standard_D4as_v5"  # informational only when INSTANCE_POOL_ID is set (pool determines node type)
+# is_single_node / kind / instance_pool_id are set in CLUSTER_EXTRA — do NOT set num_workers.
 CLUSTER_EXTRA = {
     "is_single_node": True,
     "kind": "CLASSIC_PREVIEW",
-    "enable_elastic_disk": True,
+    # enable_elastic_disk is REJECTED by Databricks when instance_pool_id is
+    # set ("cannot be supplied when an instance pool ID is provided") --
+    # live-discovered 2026-09-03 deploying with the new pool. Elastic disk is
+    # a per-VM-instance setting anyway; the pool's own instances are used as-is.
+    "instance_pool_id": INSTANCE_POOL_ID,
 }
 SPARK_CONF = {"spark.master": "local[*]"}
 
@@ -257,7 +277,25 @@ def dep(task_key, outcome=None):
     return jobs.TaskDependency(task_key=task_key, outcome=outcome)
 
 
-def build_tasks():
+def build_main_tasks():
+    """Main job: 00 (Phase 0) -> 10 (Phase 1+4+7) -> 20 (Phase 2) -> 30 (Phase 10)
+    -> 40 (Phase 9a) -> 55 (Phase 9b's DTC WIP push only).
+
+    Phase 3 (image upload, "60") and Phase 9b's NT Orbit costing_chart
+    compute ("50") are DELIBERATELY NOT here -- split into their own
+    independent jobs 2026-09-03 (see build_images_tasks / build_duty_compute_tasks
+    and AGENTS.md decisions log). Rationale: DTC has a known concurrent-edit
+    limitation (a browser user's save is silently rejected/lost if an older
+    "last_read" timestamp than the server's, including when this pipeline
+    edits the same request while a user has it open) -- minimizing which
+    jobs touch live DTC, and when, reduces that contention surface. Phase 9b's
+    NT Orbit compute never touches DTC at all and is the slow part (~30s/call
+    serial), so decoupling it removes that latency from this job entirely,
+    independent of the DTC-contention rationale. Phase 3 is optional and was
+    already established as not needing anything from THIS job's Delta state
+    (it does its own live DTC read + only needs dtc_request_mapping/
+    beproduct_to_dtc_staging, both left behind by this job's own last run).
+    """
     tasks = []
 
     # Step 0 — cluster warm-up sentinel (root, no dependencies).
@@ -347,31 +385,21 @@ def build_tasks():
         "dtc_environment": ENV, "dry_run": DRY, "push_blanks": P("push_blanks"),
     }, depends=[dep("gate_phase2", outcome="true")]))
 
-    # Phase 3 gate (after Step 4) + targeted re-pull (Step 7) + images (Step 8)
-    #
-    # repull_dtc is now a SHARED prerequisite (2026-09-02): it makes
-    # phase1_push's newly-created style x color rows visible in Delta, which
-    # both phase3_images AND fill_bom_data (Phase 10, below) need -- Phase 10
-    # must enrich the COMPLETE post-Phase-1 style x color state, not the
-    # pre-Phase-1 snapshot from pull_master_dtc. It therefore no longer
-    # depends on gate_phase3[true] (that would make it -- and everything
-    # transitively behind it, now including the whole Phase 9/10 chain --
-    # EXCLUDED whenever run_phase3=false, the same EXCLUDED-cascade class
-    # already fixed for gate_phase10). The run_phase3 check moves to
-    # phase3_images itself, the only task that's actually optional here.
-    # run_if=ALL_DONE so a skipped/failed phase1_push doesn't block Phase 3.
-    tasks.append(gate_task("gate_phase3", "run_phase3", depends=[dep("request_manager")]))
+    # Targeted re-pull (Step 7): makes phase1_push's newly-created style x
+    # color rows visible in Delta -- fill_bom_data (Phase 10, below) needs
+    # the COMPLETE post-Phase-1 style x color state, not the pre-Phase-1
+    # snapshot from pull_master_dtc. Unconditional (no gate_phase3 dependency
+    # -- that was removed 2026-09-02 to avoid an EXCLUDED-cascade risk, back
+    # when phase3_images also lived in this job and depended on it; Phase 3
+    # has since moved to its own job entirely, see build_images_tasks, and
+    # doesn't need this repull anyway -- it does its own live DTC read and
+    # only needs dtc_request_mapping/beproduct_to_dtc_staging). run_if=
+    # ALL_DONE so a skipped/failed phase1_push doesn't block Phase 10.
     tasks.append(nb_task("repull_dtc", f"{NB_DTC}/p1_pull_masters_to_delta", {
         "dtc_environment": ENV, "customer": CUST, "dtc_workspace": WS, "dtc_document": DOC,
         "catalog": CAT, "schema": SCH, "write_mode": "overwrite", "refresh_registry": "false",
         "request_ids": "{{tasks.phase1_push.values.inserted_ids}}", "max_workers": "4",
     }, depends=[dep("phase1_push")], run_if=jobs.RunIf.ALL_DONE))
-
-    tasks.append(nb_task("phase3_images", f"{NB_BP}/p3_beproduct_to_dtc_images", {
-        "catalog": CAT, "schema": SCH, "staging_table": "beproduct_to_dtc_staging",
-        "dtc_environment": ENV, "dtc_workspace": WS, "dry_run": DRY,
-        "http_timeout": P("img_http_timeout"), "max_uploads": P("img_max_uploads"),
-    }, depends=[dep("gate_phase3", outcome="true"), dep("repull_dtc")]))
 
     # Phase 8a/8b (DTC FABRIC → Delta → BeProduct Material Master) RETIRED
     # 2026-09-01 — confirmed by the project team to be replaced by a separate
@@ -413,27 +441,26 @@ def build_tasks():
         "customer": CUST,
     }, depends=[dep("pull_lineplan_dtc"), dep("repull_dtc_bom")]))
 
-    # ── Phase 9b — Fill HTS/Duty/Tariff via NT Orbit Duty Tools ────────────────
+    # ── Phase 9b (part 2/2, "55") — Push filled HTS/Duty/Tariff -> live DTC WIP ─
+    # NT Orbit's costing_chart-only compute (part 1/2, "50") moved to its own
+    # independent job (build_duty_compute_tasks, 2026-09-03) -- it never
+    # touches DTC and is the slow part (~30s/call), so it no longer blocks
+    # this job at all. This step just reads costing_chart's CURRENT state
+    # (already filled by whatever the compute job's last run produced) and
+    # PATCHes a fast, scoped diff onto DTC -- low DTC-contention window, safe
+    # to keep in the main job right after Phase 9a. See
+    # dtc/notebooks/p9b2_push_duty_to_wip.py and AGENTS.md decisions log.
     tasks.append(gate_task("gate_phase9b", "run_phase9b",
                            depends=[dep("build_costing_chart")]))
-    tasks.append(nb_task("fill_duty_rates", f"{NB_DTC}/p9b_fill_duty_rates", {
+    tasks.append(nb_task("push_duty_rates", f"{NB_DTC}/p9b2_push_duty_to_wip", {
         "catalog":             CAT,
         "schema":              SCH,
         "customer":            CUST,
         "costing_chart_table": COSTING_TABLE,
-        "duty_cache_table":    P("duty_cache_table"),
-        "cache_ttl_days":      P("duty_cache_ttl_days"),
         "dtc_environment":     ENV,
         "dtc_workspace":       WS,
         "dry_run":             DRY,
-        "push_to_wip":         P("push_duty_to_wip"),
-        # Serial by default (2026-09-01, live-validated) -- NT Orbit calls are
-        # ~30s each and occasionally exceed a 30s timeout; serial + 60s
-        # timeout is the safer default. Flip parallel_calls=true to trade
-        # safety for throughput once the API's concurrency tolerance is known.
-        "parallel_calls":      P("orbit_parallel_calls"),
-        "max_workers":         "4",
-        "orbit_timeout_seconds": P("orbit_timeout_seconds"),
+        "batch_size":          "100",
     }, depends=[dep("gate_phase9b", outcome="true")]))
 
     # ── Phase 10 — BOM enrichment from externally-processed techpack data ─────
@@ -502,6 +529,51 @@ def build_tasks():
     return tasks
 
 
+def build_duty_compute_tasks():
+    """Duty-compute job ("50"): NT Orbit -> costing_chart ONLY.
+
+    A single root task, fully independent of the main job. Never touches
+    live DTC at all -- no DTC API key, no DTC read/write. Split out
+    2026-09-03 specifically because it's the slow part of the old Phase 9b
+    (~30s per uncached NT Orbit call, serial by default) and has zero
+    DTC-contention risk, so there's no reason for its latency to hold up
+    Phase 0/1/2/10/9a or the DTC WIP push in the main job. See
+    dtc/notebooks/p9b1_compute_duty_rates.py and AGENTS.md decisions log.
+    """
+    return [nb_task("compute_duty_rates", f"{NB_DTC}/p9b1_compute_duty_rates", {
+        "catalog":               CAT,
+        "schema":                SCH,
+        "costing_chart_table":   COSTING_TABLE,
+        "dry_run":               DRY,
+        "parallel_calls":        P("orbit_parallel_calls"),
+        "max_workers":           "4",
+        "orbit_timeout_seconds": P("orbit_timeout_seconds"),
+        "duty_cache_table":      P("duty_cache_table"),
+        "cache_ttl_days":        P("duty_cache_ttl_days"),
+    })]
+
+
+def build_images_tasks():
+    """Images job ("60"): Phase 3 front-image upload ONLY.
+
+    A single root task, fully independent of the main job. Split out
+    2026-09-03 as part of minimizing which jobs touch live DTC and when
+    (DTC's known concurrent-edit limitation -- a browser user's save is
+    silently rejected/lost against a stale "last_read" timestamp, including
+    when this pipeline edits the same request while a user has it open).
+    Needs NOTHING from the main job's SAME run to be correct: it reads
+    dtc_request_mapping/beproduct_to_dtc_staging (both left behind by the
+    main job's most recent run, whenever that was) and does its own live
+    DTC `get_sheet()` read for the freshest rowIndex/Style Image state
+    immediately before writing -- see p3_beproduct_to_dtc_images.py.
+    """
+    return [nb_task("phase3_images", f"{NB_BP}/p3_beproduct_to_dtc_images", {
+        "catalog": CAT, "schema": SCH, "staging_table": "beproduct_to_dtc_staging",
+        "dtc_environment": ENV, "dtc_workspace": WS, "dry_run": DRY,
+        "http_timeout": P("img_http_timeout"), "max_uploads": P("img_max_uploads"),
+    })]
+
+
 def _build_cluster() -> compute.ClusterSpec:
     """Build the shared job cluster spec.
 
@@ -516,7 +588,10 @@ def _build_cluster() -> compute.ClusterSpec:
 
     spec = compute.ClusterSpec(
         spark_version=SPARK_VERSION,
-        node_type_id=NODE_TYPE,
+        # node_type_id intentionally OMITTED: INSTANCE_POOL_ID (set via
+        # CLUSTER_EXTRA below) determines the node type; specifying both is
+        # rejected by Databricks ("node_type_id and instance_pool_id are
+        # mutually exclusive").
         # num_workers intentionally omitted for is_single_node clusters
         runtime_engine=compute.RuntimeEngine.STANDARD,
         data_security_mode=compute.DataSecurityMode.DATA_SECURITY_MODE_DEDICATED,
@@ -524,18 +599,46 @@ def _build_cluster() -> compute.ClusterSpec:
         cluster_log_conf=log_conf,
     )
 
-    # CLUSTER_EXTRA fields (is_single_node, kind, enable_elastic_disk) are set
-    # via dict-patch so the script still works if the installed SDK predates them.
+    # CLUSTER_EXTRA fields (is_single_node, kind, enable_elastic_disk,
+    # instance_pool_id) are set via dict-patch so the script still works if
+    # the installed SDK predates them.
     raw = spec.as_dict()
     raw.update(CLUSTER_EXTRA)
     # Rebuild from dict so the SDK object stays consistent
     return compute.ClusterSpec.from_dict(raw)
 
 
-def build_settings(schedule: "jobs.CronSchedule | None" = JOB_SCHEDULE) -> jobs.JobSettings:
+# ── The 3 split jobs (2026-09-03) ────────────────────────────────────────────
+# All 3 share the SAME JOB_PARAMS (simplest: each job's build_tasks() only
+# references the subset of parameters it actually needs via P(...); unused
+# parameters on a given job are harmless, matching this repo's established
+# reliance on Databricks auto-injecting every job-level parameter into every
+# task's widgets) and the SAME Instance Pool (INSTANCE_POOL_ID) for warm-time,
+# but are otherwise fully independent jobs -- separate schedules (currently
+# identical cron, can diverge freely), separate clusters per run, separate
+# job IDs. See build_main_tasks/build_duty_compute_tasks/build_images_tasks'
+# own docstrings for the rationale.
+JOB_SPECS = {
+    "main": {
+        "display_name": JOB_NAME,
+        "build_tasks": build_main_tasks,
+    },
+    "duty_compute": {
+        "display_name": "BeProduct_DTC_sync_duty_compute",
+        "build_tasks": build_duty_compute_tasks,
+    },
+    "images": {
+        "display_name": "BeProduct_DTC_sync_images",
+        "build_tasks": build_images_tasks,
+    },
+}
+
+
+def build_settings(job_key: str, schedule: "jobs.CronSchedule | None" = JOB_SCHEDULE) -> jobs.JobSettings:
+    spec = JOB_SPECS[job_key]
     return jobs.JobSettings(
-        name=JOB_NAME,
-        tasks=build_tasks(),
+        name=spec["display_name"],
+        tasks=spec["build_tasks"](),
         job_clusters=[jobs.JobCluster(job_cluster_key=SHARED_CLUSTER_KEY,
                                       new_cluster=_build_cluster())],
         parameters=[jobs.JobParameterDefinition(name=k, default=v) for k, v in JOB_PARAMS.items()],
@@ -553,7 +656,7 @@ def _preview(settings: jobs.JobSettings):
                  if sched else "none (deploy manually)")
     print(f"Job name : {settings.name}")
     print(f"Schedule : {sched_str}")
-    print(f"Cluster  : {NODE_TYPE} single_node=True engine=STANDARD")
+    print(f"Cluster  : {NODE_TYPE} single_node=True engine=STANDARD  pool={INSTANCE_POOL_ID}")
     print(f"Log dest : {CLUSTER_LOG_DEST or 'none'}")
     print(f"Tags     : {settings.tags}")
     print("\nTask graph:")
@@ -569,16 +672,32 @@ def _preview(settings: jobs.JobSettings):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Deploy the BeProduct<->DTC multi-task job.")
+    ap = argparse.ArgumentParser(
+        description="Deploy the BeProduct<->DTC jobs (main / duty_compute / images -- split 2026-09-03).")
+    ap.add_argument("--job", choices=list(JOB_SPECS) + ["all"], default="main",
+                    help="which job spec to act on (default: main, for backward compatibility). "
+                         "'all' previews all 3 (dry-run only).")
     ap.add_argument("--dry-run", action="store_true", help="print the graph/settings; do not apply")
     ap.add_argument("--reset-existing", metavar="JOB_ID", type=int,
-                    help="overwrite an existing job (reset) instead of creating a new one")
+                    help="overwrite an existing job (reset) instead of creating a new one; "
+                         "only valid with a single --job (not 'all')")
     ap.add_argument("--no-schedule", action="store_true",
                     help="omit the cron schedule from the deployed settings (useful for test jobs)")
     args = ap.parse_args()
 
     schedule = None if args.no_schedule else JOB_SCHEDULE
-    settings = build_settings(schedule=schedule)
+
+    if args.job == "all":
+        if args.reset_existing:
+            sys.exit("--reset-existing requires a single --job (not 'all').")
+        for key in JOB_SPECS:
+            settings = build_settings(key, schedule=schedule)
+            _preview(settings)
+            print()
+        print("Dry run — nothing applied. Pass --job <name> to deploy a specific job.")
+        return
+
+    settings = build_settings(args.job, schedule=schedule)
     _preview(settings)
 
     if args.dry_run:
@@ -595,7 +714,7 @@ def main():
     if args.reset_existing:
         w.jobs.reset(job_id=args.reset_existing, new_settings=settings)
         job_id = args.reset_existing
-        print(f"\nReset existing job {job_id} to the multi-task DAG.")
+        print(f"\nReset existing job {job_id} ({args.job}) to the current task graph.")
     else:
         created = w.jobs.create(
             name=settings.name,
@@ -608,7 +727,7 @@ def main():
             queue=settings.queue,
         )
         job_id = created.job_id
-        print(f"\nCreated job {job_id} ({JOB_NAME}).")
+        print(f"\nCreated job {job_id} ({settings.name}).")
     host = os.environ["DATABRICKS_HOST"].rstrip("/")
     print(f"   {host}/jobs/{job_id}")
 

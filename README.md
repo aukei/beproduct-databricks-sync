@@ -16,8 +16,18 @@ schema `lft.beproduct`. Each field syncs **one way only** (no loops).
 | **9b** | API → Delta → DTC | NT Orbit Duty Tools API fill for HTS/Duty/Tariff fields (persistent cross-run cache); push changes back to WIP |
 | **10** | Lakebase → Delta → DTC | Enrich WIP `Fabric Group`/`Placement`/`Mill Fabric Article #` from externally-processed techpack BOM data; runs BEFORE Phase 9a so Phase 9b's NT Orbit calls see current material names. Requires **serverless compute** (source is a Lakebase database). |
 
-The whole pipeline runs as a **multi-task Databricks job** (`BeProduct_DTC_sync_dag`,
-job 294837488757511), defined in `scripts/deploy_job.py`.
+The pipeline runs as **3 independent Databricks jobs** (split 2026-09-03 to
+minimize DTC concurrent-edit contention — see AGENTS.md decisions log),
+all defined in `scripts/deploy_job.py`:
+
+| Job | ID | Contents |
+|-----|----|----|
+| `BeProduct_DTC_sync_dag` (MAIN) | 294837488757511 | 00→10→20→30→40→55 (Phase 0/1/2/10/9a + Phase 9b's DTC WIP push) |
+| `BeProduct_DTC_sync_duty_compute` ("50") | 1026599988408090 | NT Orbit lookups → `costing_chart` only, zero DTC dependency |
+| `BeProduct_DTC_sync_images` ("60") | 847087837807970 | Phase 3 image upload only |
+
+All 3 share a Databricks Instance Pool for fast cluster warm-up while
+remaining fully independent (separate schedules, separate clusters).
 
 ---
 
@@ -87,7 +97,7 @@ dtc/
 
 scripts/
 ├── upload_notebooks.py                 # Deploy notebooks + modules to the Databricks workspace
-├── deploy_job.py                       # Create / reset BeProduct_DTC_sync_dag (21 job parameters)
+├── deploy_job.py                       # Create / reset any of the 3 split jobs (--job main|duty_compute|images)
 └── check_dtc_view.py                   # DTC WIP_ITS_USE column readiness check (Phase 6 pending cols)
 
 docs/                                   # This documentation set
@@ -114,6 +124,8 @@ python scripts/check_dtc_view.py
 # Deploy
 python scripts/upload_notebooks.py --dry-run
 python scripts/upload_notebooks.py
-python scripts/deploy_job.py --dry-run
-python scripts/deploy_job.py --reset-existing 294837488757511
+python scripts/deploy_job.py --job all                              # preview all 3 (dry-run only)
+python scripts/deploy_job.py --job main --reset-existing 294837488757511
+python scripts/deploy_job.py --job duty_compute --reset-existing 1026599988408090
+python scripts/deploy_job.py --job images --reset-existing 847087837807970
 ```

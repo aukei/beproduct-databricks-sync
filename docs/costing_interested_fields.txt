@@ -60,12 +60,16 @@ legacy_code            | WIP JSON     | "Legacy Code"
 style_description      | WIP JSON     | "Style Description"
 color_name             | WIP (fixed)  | color_wash column (= "Color / Wash" in DTC)
 lineplan_ref           | WIP JSON     | "Lineplan Ref #"
-fabric_content         | WIP JSON     | "Fabric Group"                (WIP "Content" col)
-                       |              | Enriched by Phase 10 (BOM, docs/PHASE10_WORKFLOW.md) before this
-                       |              | notebook runs, when run_phase10=true -- fills "Fabric Group" from
-                       |              | real BOM data instead of the "MAIN MATERIAL CONTENT" placeholder,
-                       |              | so this reaches Phase 9b's NT Orbit product_description with real
-                       |              | material names, not the placeholder.
+fabric_content         | WIP JSON     | "Content"  (corrected 2026-09-03 -- was mistakenly "Fabric Group";
+                       |              | "Content" is normally populated by a DTC-internal trigger polling
+                       |              | "Mill Fabric Article #", but Phase 10 ALSO writes it directly from
+                       |              | BOM `material_name` -- see WIP_FIELD_CONTENT in sync/bom.py -- so
+                       |              | this pipeline no longer depends on that trigger's timing)
+fabric_type            | WIP JSON     | "Fabric Type" (new 2026-09-03, same DTC-trigger-populated column;
+                       |              | traceability ONLY -- NOT part of the filter or costing-chart key,
+                       |              | still solely DTC-trigger-populated and may be blank in practice)
+material_no            | WIP JSON     | "Mill Fabric Article #" (new 2026-09-03 -- Phase 10's own field;
+                       |              | THE completeness filter AND costing-chart key column, see below)
 gender                 | WIP JSON     | "Gender"                      (may be blank)
 class_name             | WIP JSON     | "Class"
 sub_class              | WIP JSON     | "Sub Class"
@@ -183,9 +187,23 @@ Pure decision logic (no Spark/HTTP) lives in dtc/python/sync/duty.py, unit
 tested in dtc/tests/test_duty.py.
 
 Costing chart key
------------------
+------------------
   [customer, season_code, brand, bp_style_no, lf_style_no, color_name,
-   lineplan_ref, supplier_type, supplier, factory]
+   lineplan_ref, material_no, supplier_type, supplier, factory]
+
+`material_no` added 2026-09-03 (REVISED same day from an initial
+`fabric_content` attempt -- owner correction: "multiple material_no can
+have same content, and multiple style could share a lineplan" -- so
+`fabric_content` and `lineplan_ref` are each individually unreliable
+material-level discriminators; `material_no` -- Phase 10's own "Mill Fabric
+Article #" -- is the real, unambiguous one). Phase 10 can produce multiple
+WIP rows sharing the same lineplan_ref/bp_style_no/color_name/supplier/
+factory (one "Main Fabric" row + one duplicate per "Fabric" segment),
+differing only in material fields; without material_no in the key, Phase
+9b's MERGE write-back could match multiple source rows to the same
+costing_chart row. `p9b2_push_duty_to_wip.py`'s WIP-row lookup index uses
+the identical (bp_style_no, color_name, material_no) key for the same
+reason.
 
 The table is FULLY OVERWRITTEN on every Phase 9a run (no incremental).
 All prior Phase 9b-filled values are also overwritten; Phase 9b must re-run

@@ -255,6 +255,7 @@ for r in spark.table(wip_table).where(F.col("bp_style_number").isin(list(matched
         "fabric_group": row_fields.get(bom.WIP_FIELD_FABRIC_GROUP),
         "mill_fabric_article": row_fields.get(bom.WIP_FIELD_MILL_FABRIC_ARTICLE),
         "placement": row_fields.get(bom.WIP_FIELD_PLACEMENT),
+        "content": row_fields.get(bom.WIP_FIELD_CONTENT),  # for the Content-backfill check, see bom.py
         "request_id": wr.get("request_id"),
         "data_json": wr.get("data_json"),
     })

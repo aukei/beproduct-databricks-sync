@@ -59,7 +59,9 @@ dtc/
 │   ├── p8a_pull_fabric_to_delta.py      # ⚠️ RETIRED 2026-09-01 (superseded by MaterialLib) — manual fallback only
 │   ├── p9a_pull_lineplan_to_delta.py    # Phase 9a: pull KTB LinePlan → dtc_lineplan_ktb
 │   ├── p9a_build_costing_chart.py       # Phase 9a: WIP × LinePlan → costing_chart (transpose 4 slots)
-│   ├── p9b_fill_duty_rates.py           # Phase 9b: NT Orbit Duty Tools HTS/Duty/Tariff fill (persistent cache)
+│   ├── p9b1_compute_duty_rates.py       # Phase 9b part 1/2: NT Orbit -> costing_chart only (duty_compute job)
+│   ├── p9b2_push_duty_to_wip.py         # Phase 9b part 2/2: costing_chart -> DTC WIP push, diff-checked (MAIN job)
+│   ├── p9b_fill_duty_rates.py           # SUPERSEDED 2026-09-03 -- kept as manual-fallback artifact only
 │   ├── p10_pull_bom_and_enrich.py       # Phase 10: BOM enrichment from techpack extraction (serverless task; runs BEFORE build_costing_chart)
 │   └── p2_push_dtc_to_beproduct.py  # Phase 2: DTC → BeProduct pushback
 ├── python/                          # Importable modules (deployed as Workspace files)
@@ -89,12 +91,25 @@ unit-tested); notebooks are thin Spark/IO wrappers around it. All HTTP lives in
 
 ## 3. Components & data flow
 
-The whole pipeline runs as the **multi-task Databricks job** `BeProduct_DTC_sync_dag`
-(job 294837488757511, defined in `scripts/deploy_job.py`). Steps 1–2 and Step 3 run
-in **parallel** (they are independent); the rest follow in dependency order. Each
-step is a first-class task with its own logs and per-task timing in the Jobs UI.
+The pipeline runs as **3 independent Databricks jobs** (split 2026-09-03 to
+minimize DTC concurrent-edit contention — see AGENTS.md decisions log), all
+defined in `scripts/deploy_job.py`:
+
+- `BeProduct_DTC_sync_dag` (MAIN, job 294837488757511) — everything below
+  except the two items pulled out.
+- `BeProduct_DTC_sync_duty_compute` (job 1026599988408090) — Phase 9b's NT
+  Orbit lookups, writing to `costing_chart` only (zero DTC dependency).
+- `BeProduct_DTC_sync_images` (job 847087837807970) — Phase 3 image upload.
+
+All 3 share a Databricks Instance Pool (`Standard_D4as_v5`) for fast cluster
+warm-up while remaining fully independent (separate schedules, separate
+clusters per run). Within the MAIN job, Steps 1–2 and Step 3 run in
+**parallel** (they are independent); the rest follow in dependency order.
+Each step is a first-class task with its own logs and per-task timing in
+the Jobs UI.
 
 ```
+MAIN JOB (BeProduct_DTC_sync_dag, 294837488757511)
 Task               notebook                      inputs → outputs              parallel group
 ─────────────────  ────────────────────────────  ────────────────────────────  ──────────────
 wait_cluster       wait_cluster                  (root / cold-start sentinel)  root
@@ -108,9 +123,7 @@ phase1_push        p1p7_beproduct_to_dtc_push         staging → DTC upsert+orp
 gate_phase2        (condition: run_phase2)        after transform+pull_master
 phase2_push        p2_push_dtc_to_beproduct      dtc_wip → BP pushback         after gate2
 repull_dtc         p1_pull_masters_to_delta         targeted re-pull (inserts)    after phase1_push ALL_DONE;
-                                                                                  SHARED prereq for Phase 3+10
-gate_phase3        (condition: run_phase3)        after request_manager
-phase3_images      p3_beproduct_to_dtc_images       staging+wip → DTC image       after gate3+repull_dtc
+                                                                                  prereq for fill_bom_data
 
 fill_bom_data      p10_pull_bom_and_enrich          BOM(Lakebase)+wip → DTC push ┐ SERVERLESS compute;
                                                                                   │ after repull_dtc ALL_DONE;
@@ -121,20 +134,31 @@ repull_dtc_bom     p1_pull_masters_to_delta         full re-pull (reflect BOM)  
 
 gate_phase9a       (condition: run_phase9a)       after wait_cluster            ┐ parallel,
 pull_lineplan_dtc  p9a_pull_lineplan_to_delta         DTC LinePlan → lineplan_ktb  │ independent
-p9a_build_costing_chart p9a_build_costing_chart           wip+lineplan → costing_chart ┘ after pull_lineplan+repull_dtc_bom
+build_costing_chart p9a_build_costing_chart           wip+lineplan → costing_chart ┘ after pull_lineplan+repull_dtc_bom
+gate_phase9b       (condition: run_phase9b)       after build_costing_chart
+push_duty_rates    p9b2_push_duty_to_wip            costing_chart → DTC WIP (diffed) after gate9b
+
+DUTY_COMPUTE JOB (BeProduct_DTC_sync_duty_compute, 1026599988408090) -- independent
+compute_duty_rates p9b1_compute_duty_rates          NT Orbit → costing_chart ONLY   root (no DTC dependency)
+
+IMAGES JOB (BeProduct_DTC_sync_images, 847087837807970) -- independent
+phase3_images      p3_beproduct_to_dtc_images       staging+live DTC → DTC image    root
 ```
 
 Condition tasks (`gate_phase*`) evaluate `run_phase*` job parameters; their `true`
-edge gates the respective push/pull tasks. `dry_run` (steps 4/5/6/8) computes +
-logs without writing. Phase 9a/10 both run in parallel with the WIP chain.
-`build_costing_chart` depends on `repull_dtc_bom`, NOT `pull_master_dtc`
+edge gates the respective push/pull tasks. `dry_run` computes + logs without
+writing. Phase 9a/10 both run in parallel with the WIP chain within the MAIN
+job. `build_costing_chart` depends on `repull_dtc_bom`, NOT `pull_master_dtc`
 directly — Phase 10 (BOM enrichment) is placed BEFORE costing chart
-construction so up-to-date material names reach Phase 9b's NT Orbit calls;
-since Phase 10 only pushes to the live DTC sheet (never mutates Delta), a
-dedicated re-pull (`repull_dtc_bom`) makes the enrichment visible first.
-`fill_bom_data` runs on SERVERLESS compute (not the shared classic cluster)
-because its BOM source (`alb_tpm_<env>`) is a Lakebase database — see
-`docs/PHASE10_WORKFLOW.md`.
+construction so up-to-date material names reach the duty_compute job's NT
+Orbit calls; since Phase 10 only pushes to the live DTC sheet (never mutates
+Delta), a dedicated re-pull (`repull_dtc_bom`) makes the enrichment visible
+first. `fill_bom_data` runs on SERVERLESS compute (not the shared classic
+cluster) because its BOM source (`alb_tpm_<env>`) is a Lakebase database —
+see `docs/PHASE10_WORKFLOW.md`. `push_duty_rates` reads whatever
+`costing_chart` state the duty_compute job's most recent (independently
+scheduled) run left behind and diffs against the current DTC WIP row before
+PATCHing, so it's correct regardless of run ordering between the 2 jobs.
 
 **Neither `phase1_push` nor `fill_bom_data` is gated by a `gate_phase*`
 condition task** (hardened 2026-09-02), unlike every other phase —
@@ -143,27 +167,25 @@ condition task** (hardened 2026-09-02), unlike every other phase —
 condition task made `fill_bom_data` become `EXCLUDED` (not merely skipped)
 whenever `run_phase10=false`, and Databricks propagates `EXCLUDED` to every
 downstream dependent unconditionally — silently excluding the entire
-`repull_dtc_bom` → `build_costing_chart` → `gate_phase9b` → `fill_duty_rates`
-chain on every scheduled run. Since `repull_dtc`/`phase3_images` (and now, via
-`repull_dtc`, the entire Phase 9/10 chain behind `fill_bom_data`) transitively
-depend on `phase1_push` too, `gate_phase1` was removed the same way to close
-off the identical risk if `run_phase1` were ever set `false`. See
-`AGENTS.md`'s decisions log.
+`repull_dtc_bom` → `build_costing_chart` → `gate_phase9b` → `push_duty_rates`
+chain on every scheduled run. Since `repull_dtc` (and, via `repull_dtc`, the
+entire Phase 9/10 chain behind `fill_bom_data`) transitively depends on
+`phase1_push` too, `gate_phase1` was removed the same way to close off the
+identical risk if `run_phase1` were ever set `false`. See `AGENTS.md`'s
+decisions log.
 
-**`repull_dtc` is a SHARED, unconditional prerequisite** for both
-`phase3_images` and `fill_bom_data` (changed 2026-09-02, no longer gated by
-`gate_phase3`): it makes `phase1_push`'s newly-created style×color rows
-visible in `dtc_wip_<customer>`/`dtc_request_registry`, which Phase 10 needs
-to enrich the COMPLETE post-Phase-1 state — `pull_master_dtc`'s snapshot
-(taken before `phase1_push` runs) can be missing rows Phase 1 just created
-this same run. Only `phase3_images` itself is gated by `run_phase3`
-(`gate_phase3[true]`), so Phase 10 is never held hostage to whether images
-are wanted. `phase3_images` and `fill_duty_rates` are then the two parallel,
-optional, WIP-mutating leaf branches; they're safe to run concurrently since
-they write through disjoint DTC surfaces (binary `/images` endpoint keyed by
-`rowindex` vs. JSON `sheetData` PATCH keyed by `rowId`, touching disjoint
-columns) and `phase3_images` re-reads the live sheet itself immediately before
-writing.
+**`repull_dtc` is `fill_bom_data`'s prerequisite** (unconditional, not gated
+by `gate_phase3` — that dependency was removed once `phase3_images` moved to
+its own job entirely 2026-09-03): it makes `phase1_push`'s newly-created
+style×color rows visible in `dtc_wip_<customer>`/`dtc_request_registry`,
+which Phase 10 needs to enrich the COMPLETE post-Phase-1 state —
+`pull_master_dtc`'s snapshot (taken before `phase1_push` runs) can be missing
+rows Phase 1 just created this same run. `phase3_images` (now in its own
+job) and `push_duty_rates` are the two WIP-mutating leaf points across the
+3 jobs; they're safe to run concurrently since they write through disjoint
+DTC surfaces (binary `/images` endpoint keyed by `rowindex` vs. JSON
+`sheetData` PATCH keyed by `rowId`, touching disjoint columns) and
+`phase3_images` re-reads the live sheet itself immediately before writing.
 
 Phase 8a/8b (DTC FABRIC → Delta → BeProduct Material Master) are RETIRED
 (2026-09-01), confirmed by the project team to be replaced by a separate

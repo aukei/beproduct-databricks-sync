@@ -1,18 +1,24 @@
 # Databricks notebook source
 """
-*** SUPERSEDED 2026-09-03 — kept only as a manual-fallback/historical
-artifact, no longer scheduled. *** Split into two independently-schedulable
-notebooks as part of the 3-job restructuring (see AGENTS.md decisions log):
-  - `p9b1_compute_duty_rates.py` (Steps 1-4 below): NT Orbit -> costing_chart
-    only, no DTC dependency. Runs in its own job, own schedule.
-  - `p9b2_push_duty_to_wip.py` (Step 5 below, rewritten with a real diff
-    check against current WIP values): costing_chart -> live DTC WIP push.
-    Runs in the MAIN job, right after Phase 9a.
-This file's logic is otherwise unchanged and still works standalone if ever
-needed for manual/ad-hoc runs.
-
-Phase 9b — Fill HTS Code / Duty Rate / Tariff Rate via NT Orbit Duty Tools
+Phase 9b (part 1 of 2) — Compute HTS Code / Duty Rate / Tariff Rate via NT
+Orbit Duty Tools, write results to `costing_chart` ONLY
 ============================================================================
+
+Split from the original single `p9b_fill_duty_rates.py` notebook (2026-09-03,
+job restructuring — see AGENTS.md decisions log) into two independently
+schedulable halves:
+
+  - THIS notebook (steps 1-4): reads/writes ONLY `lft.beproduct.costing_chart`
+    and the persistent NT Orbit cache. It NEVER touches live DTC at all — no
+    DTC API key, no DTC read/write of any kind. This is also the SLOW part
+    (~30s per uncached NT Orbit call, serial by default), so decoupling it
+    from the main job means its latency never blocks Phase 0/1/2/10/9a or
+    the DTC WIP push (p9b2_push_duty_to_wip.py).
+  - `p9b2_push_duty_to_wip.py` (former Step 5): reads the (now-filled)
+    `costing_chart` and PATCHes newly-available HTS/Duty/Tariff values onto
+    the live DTC WIP sheet. Runs in the MAIN job, right after Phase 9a,
+    since it's a fast, scoped PATCH — low DTC-contention window, unlike this
+    notebook's long NT Orbit call chain.
 
 For every ``lft.beproduct.costing_chart`` row (built by Phase 9a,
 ``p9a_build_costing_chart.py``) that is missing ``hts_code`` and/or
@@ -23,21 +29,15 @@ For every ``lft.beproduct.costing_chart`` row (built by Phase 9a,
   2. Merge the results back onto ``costing_chart`` (write-once — an existing
      non-blank value is never overwritten; matches Phase 1's default-fill
      semantics).
-  3. Optionally (``push_to_wip=true``) PATCH the newly-filled HTS/Duty values
-     back onto the corresponding per-vendor-slot columns of the live DTC WIP
-     sheet (same ``sheetData`` PATCH contract as Phase 1 — see
-     connectors.dtc.DTCConnector.patch_rows). "Tariff Rate" columns do not
-     exist in the WIP view yet (confirmed 2026-07-17); those pushes are
-     skipped and logged, the value stays in ``costing_chart`` only.
 
 PERSISTENT cross-run caching (critical — each NT Orbit call is ~30s)
 ----------------------------------------------------------------------
 ``costing_chart`` is FULLY OVERWRITTEN by every Phase 9a run (see its own
-docstring), which wipes every hts_code/duty_rate_*/tariff_rate value Phase 9b
-previously filled. Without a cache that survives ACROSS runs, every single
-daily run would have to re-look-up EVERY row from scratch at ~30s/call — for
-hundreds of rows that's tens of minutes of pure API latency, for data that
-almost never actually changes.
+docstring), which wipes every hts_code/duty_rate_*/tariff_rate value this
+notebook previously filled. Without a cache that survives ACROSS runs, every
+single daily run would have to re-look-up EVERY row from scratch at ~30s/call
+— for hundreds of rows that's tens of minutes of pure API latency, for data
+that almost never actually changes.
 
 So this notebook keeps a separate, NEVER-overwritten Delta table,
 ``duty_cache_table`` (default ``lft.beproduct.nt_orbit_duty_cache``), keyed on
@@ -90,7 +90,6 @@ from datetime import datetime, timezone
 
 from client.entra_auth import EntraTokenProvider
 from connectors.nt_orbit import NTOrbitConnector
-from connectors.dtc import DTCConnector
 from sync import duty
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
@@ -100,19 +99,14 @@ from pyspark.sql.types import (
 # ── Parameters ────────────────────────────────────────────────────────────────
 dbutils.widgets.text("catalog", "lft", "Catalog")
 dbutils.widgets.text("schema", "beproduct", "Schema")
-dbutils.widgets.text("customer", "KTB", "Customer code")
 dbutils.widgets.text("costing_chart_table", "lft.beproduct.costing_chart",
                      "Costing Chart table (fully-qualified; test override e.g. "
                      "lft.beproduct.costing_chart_kei)")
-dbutils.widgets.text("dtc_environment", "uat", "DTC Environment")
-dbutils.widgets.text("dtc_workspace", "KTB", "DTC Workspace")
 dbutils.widgets.text("dry_run", "true", "Dry run (true/false) — skip writes")
-dbutils.widgets.text("push_to_wip", "false", "Push filled values back to DTC WIP (true/false)")
 dbutils.widgets.text("parallel_calls", "false",
                      "Call NT Orbit concurrently (true) or one-at-a-time (false, default/safer)")
 dbutils.widgets.text("max_workers", "4", "Parallel NT Orbit call threads (only used if parallel_calls=true)")
 dbutils.widgets.text("orbit_timeout_seconds", "60", "Per-call NT Orbit HTTP timeout (seconds)")
-dbutils.widgets.text("batch_size", "100", "Rows per WIP PATCH call")
 dbutils.widgets.text("duty_cache_table", "lft.beproduct.nt_orbit_duty_cache",
                      "Persistent cross-run NT Orbit result cache (fully-qualified)")
 dbutils.widgets.text("cache_ttl_days", str(duty.DEFAULT_CACHE_TTL_DAYS),
@@ -120,33 +114,26 @@ dbutils.widgets.text("cache_ttl_days", str(duty.DEFAULT_CACHE_TTL_DAYS),
 
 catalog       = dbutils.widgets.get("catalog")
 schema        = dbutils.widgets.get("schema")
-customer      = dbutils.widgets.get("customer").strip().upper()
 costing_table = dbutils.widgets.get("costing_chart_table").strip()
-environment   = dbutils.widgets.get("dtc_environment").strip().lower()
-workspace     = dbutils.widgets.get("dtc_workspace").strip()
 dry_run       = dbutils.widgets.get("dry_run").strip().lower() == "true"
-push_to_wip   = dbutils.widgets.get("push_to_wip").strip().lower() == "true"
 parallel_calls = dbutils.widgets.get("parallel_calls").strip().lower() == "true"
 max_workers   = int(dbutils.widgets.get("max_workers") or 4) if parallel_calls else 1
 orbit_timeout_seconds = int(dbutils.widgets.get("orbit_timeout_seconds") or 60)
-batch_size    = int(dbutils.widgets.get("batch_size") or 100)
 duty_cache_table = dbutils.widgets.get("duty_cache_table").strip()
 cache_ttl_days   = int(dbutils.widgets.get("cache_ttl_days") or duty.DEFAULT_CACHE_TTL_DAYS)
 
-wip_table       = f"{catalog}.{schema}.dtc_wip_{customer.lower()}"
-registry_table  = f"{catalog}.{schema}.dtc_request_registry"
 oauth_state_tbl = f"{catalog}.{schema}.nt_orbit_oauth_state"
 now = datetime.now(timezone.utc)
 
 print("=" * 72)
-print("PHASE 9b — Fill HTS Code / Duty Rate / Tariff Rate (NT Orbit Duty Tools)")
+print("PHASE 9b part 1/2 — Compute HTS/Duty/Tariff via NT Orbit -> costing_chart ONLY")
 print("=" * 72)
 print(f"  Costing chart : {costing_table}")
-print(f"  WIP table     : {wip_table}")
 print(f"  Duty cache    : {duty_cache_table}  (ttl={cache_ttl_days}d)")
-print(f"  dry_run={dry_run}  push_to_wip={push_to_wip}")
+print(f"  dry_run={dry_run}")
 print(f"  parallel_calls={parallel_calls}  max_workers={max_workers}  "
       f"orbit_timeout_seconds={orbit_timeout_seconds}")
+print("  NOTE: this notebook never touches live DTC -- see p9b2_push_duty_to_wip.py")
 
 # COMMAND ----------
 
@@ -227,9 +214,22 @@ print(f"  Total costing_chart rows: {len(chart_rows)}")
 # "supplier_type" (renamed from "factory_slot" 2026-09-01) is the single
 # "Main"|"1"|"2"|"3" flag generated from WIP structure -- see
 # p9a_build_costing_chart.py's module docstring.
+#
+# "material_no" added 2026-09-03 (REVISED same day from an initial
+# "fabric_content" attempt -- owner correction: "multiple material_no can
+# have same content, and multiple style could share a lineplan", so the key
+# must be [bp_style_no, lineplan_ref, material_no], not fabric_content/
+# lineplan_ref alone). Required because Phase 10 can produce MULTIPLE WIP
+# rows sharing the SAME lineplan_ref/bp_style_no/color_name/supplier/factory
+# (one "Main Fabric" row + one duplicate per "Fabric" segment -- see
+# sync/bom.py) -- those rows differ ONLY in Fabric Group/Placement/Mill
+# Fabric Article # (= material_no). Without material_no in the key, this
+# MERGE's ON clause could match multiple source rows to the same
+# costing_chart row (ambiguous MERGE / wrong-row clobbering) once a style
+# has both a Main Fabric and a Fabric-segment costing entry.
 COSTING_KEY = [
     "customer", "season_code", "brand", "bp_style_no", "lf_style_no",
-    "color_name", "lineplan_ref", "supplier_type", "supplier", "factory",
+    "color_name", "lineplan_ref", "material_no", "supplier_type", "supplier", "factory",
 ]
 
 needing = [r for r in chart_rows if duty.row_needs_any_lookup(r)]
@@ -443,89 +443,6 @@ elif row_updates and dry_run:
 else:
     print("\nStep 4: No costing_chart updates to write.")
 
-# COMMAND ----------
-
-# ── Step 5: Push filled HTS/Duty values back to the live DTC WIP sheet ───────
-if push_to_wip and row_updates:
-    print(f"\nStep 5: Pushing filled values back to DTC WIP (env={environment}) …")
-
-    secret_key = f"dtc_api_key_{environment}"
-    dtc_api_key = dbutils.secrets.get(scope="beproduct", key=secret_key)
-    dtc = DTCConnector(api_key=dtc_api_key, environment=environment, workspace_name=workspace)
-
-    # WIP rows keyed by (bp_style_number, color_wash) -> {row_id, sheet_id, view_id}
-    reg = {r["request_id"]: r.asDict()
-           for r in spark.table(registry_table).where(F.col("environment") == environment).collect()}
-    wip_index: dict = {}
-    for r in spark.table(wip_table).collect():
-        wr = r.asDict()
-        key = (wr.get("bp_style_number"), wr.get("color_wash"))
-        reg_entry = reg.get(wr.get("request_id"), {})
-        wip_index[key] = {
-            "row_id": wr.get("row_id"),
-            "sheet_id": reg_entry.get("sheet_id"),
-            "view_id": reg_entry.get("view_id"),
-        }
-
-    # Merge patch fields per ACTUAL WIP row before batching. Multiple
-    # costing_chart rows (one per vendor/factory slot: Main/1/2/3) map to the
-    # SAME underlying WIP row -- they only differ in which columns they
-    # target (e.g. "Main Factory HTS Code" vs "Factory 1 - HTS code"), never
-    # in rowId. Sending them as separate sheetData objects with the same
-    # rowId in one PATCH call is rejected by DTC with 400 "Duplicate rowId
-    # found." (confirmed live 2026-09-01) -- merge is safe since each slot's
-    # fields target disjoint column names.
-    merged_by_rowid: dict = {}   # (sheet_id, view_id, row_id) -> merged fields dict
-    push_skipped_reasons: set = set()
-    push_no_match = 0
-
-    for idx, fields in row_updates:
-        row = needing[idx]
-        wip_key = (row.get("bp_style_no"), row.get("color_name"))
-        target = wip_index.get(wip_key)
-        if not target or not target.get("row_id"):
-            push_no_match += 1
-            continue
-        plan = duty.build_wip_patch_fields(row.get("supplier_type"), fields)
-        for reason in plan.skipped:
-            push_skipped_reasons.add(reason)
-        if not plan.fields:
-            continue
-        merge_key = (target["sheet_id"], target["view_id"], target["row_id"])
-        merged_by_rowid.setdefault(merge_key, {}).update(plan.fields)
-
-    # Group the (now rowId-unique) merged rows by (sheet_id, view_id) so each
-    # target sheet gets one batched PATCH call (UPDATE-only: all WIP rows
-    # here already exist).
-    by_sheet: dict = {}
-    for (sheet_id, view_id, row_id), fields in merged_by_rowid.items():
-        sheet_key = (sheet_id, view_id)
-        by_sheet.setdefault(sheet_key, []).append({**fields, "rowId": row_id})
-
-    pushed, push_errors = 0, 0
-    for (sheet_id, view_id), sheet_data in by_sheet.items():
-        if not sheet_id or not view_id:
-            push_errors += len(sheet_data)
-            continue
-        from sync.phase1 import chunked
-        for chunk in chunked(sheet_data, batch_size):
-            try:
-                if not dry_run:
-                    dtc.patch_rows(sheet_id, view_id, chunk)
-                pushed += len(chunk)
-            except Exception as e:
-                print(f"  ❌ PATCH sheet={sheet_id} view={view_id} failed: {e}")
-                push_errors += len(chunk)
-
-    dtc.close()
-    print(f"  Pushed rows: {pushed}  (errors: {push_errors}, no WIP match: {push_no_match})")
-    for reason in push_skipped_reasons:
-        print(f"  ⚠️  {reason}")
-elif push_to_wip:
-    print("\nStep 5: push_to_wip=true but there is nothing to push.")
-else:
-    print("\nStep 5: push_to_wip=false — costing_chart was updated but WIP was not touched.")
-
 orbit.close()
 
 # COMMAND ----------
@@ -540,5 +457,5 @@ print(f"    served from persistent cache : {len(keys_from_cache_hit)}  (no API c
 print(f"    fetched live from NT Orbit   : {len(newly_fetched)}  (failed: {len(errors)})")
 print(f"  Rows with filled fields      : {len(row_updates)}")
 print(f"  Cache TTL                    : {cache_ttl_days} day(s)  (table: {duty_cache_table})")
-print(f"  dry_run={dry_run}  push_to_wip={push_to_wip}")
-print("\n✅ Phase 9b duty-rate fill complete")
+print(f"  dry_run={dry_run}")
+print("  costing_chart updated only -- see p9b2_push_duty_to_wip.py for the DTC WIP push")

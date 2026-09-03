@@ -44,10 +44,20 @@ untouched, so re-runs are idempotent.
    inserted, independent of step 1's table refresh).
 2. Matches each DTC row to its BeProduct staging row on the in-request key
    `(BP Style#, Color / Wash)` (Phase 6; was `LF Style#`).
-3. For every row that is **blank-image AND** whose BeProduct staging row has a
+3. **Sibling-copy check (added 2026-09-03, owner spec)**: for every
+   blank-image row, first checks whether ANY OTHER row with the SAME `BP
+   Style#` in this request already has a real Style Image (a style's front
+   image is a HEADER-level BeProduct attribute — one per style, not per
+   colorway — so every colorway is expected to carry the same image). If a
+   sibling has one, its own already-uploaded DTC-hosted image URL is reused
+   as the source — no BeProduct CDN download at all for this row.
+4. Otherwise (no sibling has an image yet), falls back to the original path:
+   for a row that is **blank-image AND** whose BeProduct staging row has a
    **valid `front_image_url`**: downloads the image from the BeProduct CDN,
-   classifies it, transcodes if needed, then POSTs it to the DTC image endpoint.
-4. Logs every decision (uploaded / converted / skipped / failed) to
+   classifies it, transcodes if needed, then POSTs it to the DTC image
+   endpoint. (Both paths POST via the same multipart upload mechanics —
+   only WHICH url is downloaded differs; see `ImageUploadOp.source`.)
+5. Logs every decision (uploaded / converted / skipped / failed) to
    `lft.beproduct.beproduct_to_dtc_sync_log` with `stage='images'`.
 
 Decision logic is the pure, unit-tested `dtc/python/sync/phase3.py`
@@ -58,14 +68,19 @@ notebook and `connectors/dtc.py`.
 
 ## Upload rule (per row)
 
-Upload an image only when ALL hold:
+Upload an image only when the DTC row's **Style Image** cell is **not
+populated**, the row has a `rowIndex`, AND EITHER:
 
-- the DTC row's **Style Image** cell is **not populated**, AND
-- a matching BeProduct staging row exists with a **valid http(s) `front_image_url`**, AND
-- the DTC row has a `rowIndex`.
+- another row with the SAME **BP Style#** in this request already has a
+  real Style Image (source = sibling's own DTC-hosted URL, no BeProduct
+  download), OR
+- a matching BeProduct staging row exists with a **valid http(s)
+  `front_image_url`** (source = BeProduct CDN, the original full-extraction
+  path).
 
-Rows already imaged are skipped silently (idempotent). Blank rows whose source has
-no usable URL, or vector/unknown image types, are recorded as `skipped`.
+Rows already imaged are skipped silently (idempotent). Blank rows with
+neither a same-style sibling image nor a usable BeProduct source URL, or
+vector/unknown image types, are recorded as `skipped`.
 
 ---
 

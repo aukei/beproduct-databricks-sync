@@ -565,7 +565,7 @@ phase 3 while not a blocker, expects to fill all rows (style x color x material)
     - use table "customer_teckpack_style_latest", each style_no + customer_name + style_season returns at most 1 row 
     - change of BOM_UNIFIED: base on Fabric_Group + Mill_Fabric_Article#, *upsert* only, if BOM disappeared or material removed, keep the DTC row untouch.
     - basically the only potential field to be update in this area is "placement"
-    - note: "customer_department" is part of "customer_teckpack_style_latest" unique key. In Kontoor, this is always null.
+    - note: "customer_department" is part of "customer_teckpack_style_latest" unique key. In Kontoor, this is always "brand".
 - rethinking sequence of whole job
 00. DTC -> BeProduct - factory / supplier masters (phase 0)
 10. BeProduct -> DTC - DTC contains rows style x color (phase 1 + 4 + 7)
@@ -585,3 +585,50 @@ phase 3 while not a blocker, expects to fill all rows (style x color x material)
         - likely split phase 9b into 2 tasks (50 & 55)
     - "DTC rows get images" can also run separately, fill in missing images against DTC direcly (60).
     - The main job handles 00-10-20-30-40-55 
+- use Standard_D4as_v5 as job cluster node type
+
+## costing chart (phase 9) & DTC product image (phase 3) clarifications
+- while populating costing chart from WIP x LinePlan requests, only take WIP rows where fabric details ("Content", "Fabric Type") are not null.
+- these fields are populated by DTC internal trigger that poll "Mill Fabric Article #"
+//- at step 55, check if current DTC request row has a newer modified date than corresponding orbit API cache result. 
+//    - if not, fill the newer Duty result to DTC. 
+//    - if so, the DTC row should contain up-to-date already
+- update Tariff/Duty/HS_Code every time
+- when phase 3 runs, scan rows without "Style image" and first look up whether other rows of same BP_STYLE_NO on the same request (i.e. same Brand same season) already have an image.
+    - if so, copy the image locator
+    - if not, do the full image extraction from BP flow
+- when ever issuing DTC PATCH API against WIP request, according to interested fields mapping, the body should include only all or some of these fields of WIP document:
+    - Product_status
+    - Style_Image
+    - LF_style_no
+    - Legacy_code
+    - BP_Style_no
+    - Style_description
+    - class
+    - sub_class
+    - Division
+    - brand
+    - color_wash
+    - Garment_finish
+    - Tech_pack_stage
+    - Proto_Sample_Status
+    - Pre-Line sample status
+    - SMS Sample Status
+    - 2nd fit sample status
+    - Top sample approval status
+    - PP sample submission approval status
+    - Fabric_Group
+    - Placement
+    - Mill_Fabric_Article
+  do not include other fields in PATCH body.
+
+## Costing_chart clarifications
+- since multiple "material_no" can have same "content", and multiple style could share a lineplan, the key for costing chart should be "bp_style_no" + "lineplan_ref" + "material_no"
+- "material_no" is not in costing chart at this moment. add to table.
+- the check should be against "bp_style_no" + "lineplan_ref" + "material_no"
+- dtc.content: while it will be populated by DTC's own trigger, for our purpose we can bring BOM.material_name to populate it. Then phase9a will not be blocked.
+
+## check docs
+- take out 'brands' from BP tables - use 'brand' (brand_hk) only now
+
+- update docs

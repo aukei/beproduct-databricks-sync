@@ -17,6 +17,7 @@ from sync.bom import (
     to_wip_fields, segment_key, is_unenriched, build_target_segments,
     plan_style_enrichment, PLACEHOLDER_FABRIC_GROUP,
     WIP_FIELD_FABRIC_GROUP, WIP_FIELD_PLACEMENT, WIP_FIELD_MILL_FABRIC_ARTICLE,
+    WIP_FIELD_CONTENT,
     build_insert_row_payload, INSERT_EXCLUDE_COLS, compute_non_writable_cols,
 )
 
@@ -115,21 +116,26 @@ check(fields == {
     "fabric_group": "Main Fabric",     # bom_detail_name, NOT material_name (corrected 2026-09-02)
     "placement": "BODICE",
     "mill_fabric_article": "WV-0063",
-}, "fabric_group = bom_detail_name (NOT material_name); placement/mill_fabric_article unaffected")
+    "content": "100% Recycled Nylon Shell",   # material_name (added 2026-09-03)
+}, "fabric_group = bom_detail_name (NOT material_name); content = material_name (added 2026-09-03)")
 
 fabric_fields = extract_enrichment_fields(segs.fabric_list[0])
 check(fabric_fields["fabric_group"] == "Fabric",
       "a 'Fabric' segment's fabric_group is literally 'Fabric'")
+check(fabric_fields["content"] == "LINING FABRIC (100% POLYESTER): AVAILABLE LINING",
+      "a 'Fabric' segment's content is ITS OWN material_name, not Main Fabric's")
 
 wip_fields = to_wip_fields(fields)
 check(wip_fields == {
     WIP_FIELD_FABRIC_GROUP: "Main Fabric",
     WIP_FIELD_PLACEMENT: "BODICE",
     WIP_FIELD_MILL_FABRIC_ARTICLE: "WV-0063",
+    WIP_FIELD_CONTENT: "100% Recycled Nylon Shell",
 }, "maps to the exact live-confirmed raw DTC field names")
 check(WIP_FIELD_FABRIC_GROUP == "Fabric Group"
       and WIP_FIELD_PLACEMENT == "Placement"
-      and WIP_FIELD_MILL_FABRIC_ARTICLE == "Mill Fabric Article #",
+      and WIP_FIELD_MILL_FABRIC_ARTICLE == "Mill Fabric Article #"
+      and WIP_FIELD_CONTENT == "Content",
       "raw field name constants match the live WIP view definition")
 
 # ---------------------------------------------------------------------------
@@ -246,19 +252,40 @@ actions = plan_style_enrichment(
 )
 check(actions == [], "no Main Fabric -> zero actions at all, even for a placeholder row")
 
-print("  [6g] upsert: row already matches a segment by (Fabric Group, Mill Fabric Article #) -> Placement-only update")
+print("  [6g] upsert: row already matches a segment by (Fabric Group, Mill Fabric Article #) -> Placement-fix + Content-backfill")
 row_matches_main = {"row_id": "r1", "fabric_group": "Main Fabric",
-                     "mill_fabric_article": "WV-0064", "placement": "WRONG PLACEMENT"}
+                     "mill_fabric_article": "WV-0064", "placement": "WRONG PLACEMENT", "content": None}
 actions = plan_style_enrichment([row_matches_main], REAL_BOM_KTB00016)
-check(len(actions) == 1 and actions[0].kind == "update", "exactly one Placement-fix update")
-check(actions[0].wip_fields == {WIP_FIELD_PLACEMENT: "bodice"},
-      "ONLY Placement is in the payload -- Fabric Group/Mill Fabric Article # never re-written")
+check(len(actions) == 1 and actions[0].kind == "update", "exactly one update")
+check(actions[0].wip_fields == {WIP_FIELD_PLACEMENT: "bodice",
+                                 WIP_FIELD_CONTENT: "123455 - 97%Cotton 3%Spandex"},
+      "Placement fixed AND blank Content backfilled in the SAME payload -- Fabric Group/Mill Fabric Article # never re-written")
 
-print("  [6h] upsert: row already matches AND Placement already correct -> no-op (idempotent)")
+print("  [6h] upsert: row already matches AND Placement/Content already correct -> no-op (idempotent)")
 row_fully_correct = {"row_id": "r1", "fabric_group": "Main Fabric",
-                      "mill_fabric_article": "WV-0064", "placement": "bodice"}
+                      "mill_fabric_article": "WV-0064", "placement": "bodice",
+                      "content": "123455 - 97%Cotton 3%Spandex"}
 check(plan_style_enrichment([row_fully_correct], REAL_BOM_KTB00016) == [],
-      "already fully matching -> no PATCH issued at all")
+      "already fully matching (incl. Content) -> no PATCH issued at all")
+
+print("  [6h2] Content backfill: row matches, Placement already correct, ONLY Content is blank")
+row_only_content_blank = {"row_id": "r1", "fabric_group": "Main Fabric",
+                           "mill_fabric_article": "WV-0064", "placement": "bodice", "content": ""}
+actions = plan_style_enrichment([row_only_content_blank], REAL_BOM_KTB00016)
+check(len(actions) == 1 and actions[0].wip_fields == {WIP_FIELD_CONTENT: "123455 - 97%Cotton 3%Spandex"},
+      "ONLY Content is in the payload when Placement already matches")
+
+print("  [6h3] Content backfill: a row that ALREADY has a real (different) Content value is NEVER overwritten")
+row_real_content_already = {"row_id": "r1", "fabric_group": "Main Fabric",
+                             "mill_fabric_article": "WV-0064", "placement": "bodice",
+                             "content": "SOME OTHER VALUE -- e.g. written by DTC's own trigger"}
+check(plan_style_enrichment([row_real_content_already], REAL_BOM_KTB00016) == [],
+      "a non-blank Content value (ours or DTC-trigger-written) is never overwritten by the backfill")
+
+print("  [6h4] content_key=None disables the backfill check entirely (Placement-fix is independent)")
+actions = plan_style_enrichment([row_matches_main], REAL_BOM_KTB00016, content_key=None)
+check(len(actions) == 1 and actions[0].wip_fields == {WIP_FIELD_PLACEMENT: "bodice"},
+      "content_key=None -> only Placement is fixed, Content backfill skipped entirely")
 
 print("  [6i] never-revert: row holds a real, unrecognized (Fabric Group, Article#) combo not in current BOM -> untouched")
 row_vanished_segment = {"row_id": "r1", "fabric_group": "Fabric",
@@ -268,11 +295,13 @@ check(plan_style_enrichment([row_vanished_segment], REAL_BOM_KTB00016) == [],
 
 print("  [6j] never-insert-duplicate: a Fabric segment already represented by an existing row -> no re-insert")
 existing_with_fabric_segment = [
-    {"row_id": "r1", "fabric_group": "Main Fabric", "mill_fabric_article": "WV-0063", "placement": "BODICE"},
-    {"row_id": "r2", "fabric_group": "Fabric", "mill_fabric_article": "WV-0047", "placement": "Body Front"},
+    {"row_id": "r1", "fabric_group": "Main Fabric", "mill_fabric_article": "WV-0063", "placement": "BODICE",
+     "content": "100% Recycled Nylon Shell"},
+    {"row_id": "r2", "fabric_group": "Fabric", "mill_fabric_article": "WV-0047", "placement": "Body Front",
+     "content": "LINING FABRIC (100% POLYESTER): AVAILABLE LINING"},
 ]
 check(plan_style_enrichment(existing_with_fabric_segment, REAL_BOM_KTB00023) == [],
-      "both segments already correctly represented -> zero actions, no duplicate insert")
+      "both segments already correctly represented (incl. Content) -> zero actions, no duplicate insert")
 
 # ---------------------------------------------------------------------------
 print("\n[7] build_insert_row_payload() — Style Image must never be copied forward")

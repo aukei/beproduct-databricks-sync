@@ -86,7 +86,9 @@ all-or-nothing `style_already_enriched` design this replaces):
   * The value written to `Fabric Group` is the segment's own
     `bom_detail_name` (i.e. literally "Main Fabric" or "Fabric"), NOT
     `material_name`. `Placement` / `Mill Fabric Article #` map from
-    `placement` / `material_no`.
+    `placement` / `material_no`. `Content` (added 2026-09-03) maps from
+    `material_name` instead — see `WIP_FIELD_CONTENT`'s comment for why
+    Phase 10 writes this itself rather than relying on DTC's own trigger.
   * A BOM segment list with neither "Main Fabric" nor "Fabric" (e.g. only
     "Trim"/"Label"/"Stitch/Seam") is equivalent to "no Main Fabric" above —
     zero actions, never revert.
@@ -141,6 +143,17 @@ SEGMENT_FABRIC = "Fabric"
 WIP_FIELD_FABRIC_GROUP = "Fabric Group"
 WIP_FIELD_PLACEMENT = "Placement"
 WIP_FIELD_MILL_FABRIC_ARTICLE = "Mill Fabric Article #"
+# Added 2026-09-03 (owner spec): "Content" is normally populated by a
+# DTC-internal trigger polling Mill Fabric Article #, but that trigger's
+# timing/conditions in UAT are unreliable (live-confirmed: every KTB test
+# row still blank days after Mill Fabric Article # was set) and was blocking
+# Phase 9a's fabric-details completeness filter. For our purposes, Phase 10
+# writes "Content" itself from the SAME BOM segment's `material_name` --
+# removing that dependency on DTC's own trigger entirely. This is an
+# intentional, accepted dual-write (DTC's trigger may also write the same
+# cell independently) per explicit owner instruction, unlike the earlier
+# Phase 1/Phase 10 Fabric Group conflict, which was an unintentional bug.
+WIP_FIELD_CONTENT = "Content"
 
 
 def _blank(v: Any) -> bool:
@@ -224,18 +237,23 @@ def parse_bom_segments(bom_unified: Any) -> ParsedBomSegments:
 def extract_enrichment_fields(detail: Dict[str, Any]) -> Dict[str, Optional[str]]:
     """
     Map one BOM detail object ("Main Fabric" or a "Fabric" segment) to the
-    three fields Phase 10 writes, using the module's own (Delta-agnostic)
+    four fields Phase 10 writes, using the module's own (Delta-agnostic)
     field names — see `to_wip_fields()` for the raw-DTC-field-name mapping
     used for the actual PATCH.
 
     IMPORTANT: `fabric_group` is the segment's own `bom_detail_name` (i.e.
     literally "Main Fabric" or "Fabric"), NOT `material_name` — corrected
     2026-09-02 per an explicit spec amendment.
+
+    `content` (added 2026-09-03) IS the segment's `material_name` — see
+    `WIP_FIELD_CONTENT`'s comment for why Phase 10 writes this itself rather
+    than waiting on DTC's own trigger.
     """
     return {
         "fabric_group": detail.get("bom_detail_name"),
         "placement": detail.get("placement"),
         "mill_fabric_article": detail.get("material_no"),
+        "content": detail.get("material_name"),
     }
 
 
@@ -246,6 +264,7 @@ def to_wip_fields(fields: Dict[str, Optional[str]]) -> Dict[str, Optional[str]]:
         WIP_FIELD_FABRIC_GROUP: fields.get("fabric_group"),
         WIP_FIELD_PLACEMENT: fields.get("placement"),
         WIP_FIELD_MILL_FABRIC_ARTICLE: fields.get("mill_fabric_article"),
+        WIP_FIELD_CONTENT: fields.get("content"),
     }
 
 
@@ -315,6 +334,7 @@ def plan_style_enrichment(
     mill_fabric_article_key: str = "mill_fabric_article",
     placement_key: str = "placement",
     row_id_key: str = "row_id",
+    content_key: Optional[str] = "content",
 ) -> List[RowAction]:
     """
     Plan every action needed to upsert ONE style's existing WIP rows from
@@ -323,7 +343,9 @@ def plan_style_enrichment(
     docstring for the full upsert-semantics spec; summary:
 
       - Row already matches a current segment by (Fabric Group, Mill
-        Fabric Article #): update `Placement` only, only if it changed.
+        Fabric Article #): update `Placement` only if it changed, PLUS
+        backfill `Content` if it's currently blank there (added 2026-09-03
+        — see below; never overwrites a real existing Content value).
       - Row is still un-enriched (blank/placeholder): apply "Main Fabric"'s
         full field set (first-time enrichment).
       - Row carries some OTHER real value not in the current BOM data
@@ -334,15 +356,27 @@ def plan_style_enrichment(
       - Each "Fabric" segment not yet represented by any existing row is
         genuinely new: duplicate every existing row once per such segment.
 
+    Content backfill (added 2026-09-03): a row enriched by an EARLIER
+    version of this notebook (before `Content` existed as a target field at
+    all) already satisfies the "matches a current segment" branch above and
+    would otherwise NEVER get `Content` populated — first-time enrichment
+    (the `is_unenriched` branch) is the only OTHER place `Content` is
+    written, and that branch is for un-enriched rows only. So the matched
+    branch also fills `Content` whenever the row's current value (via
+    `content_key`) is blank, sourced from the SAME matched segment's
+    `content` field. Pass `content_key=None` to disable this check entirely
+    if the caller doesn't track the row's current Content value.
+
     Args:
         existing_rows: the style's current WIP rows (one dict per colorway
             row), each containing at least `fabric_group_key` (current
             Fabric Group value), `mill_fabric_article_key` (current Mill
             Fabric Article # value), `placement_key` (current Placement
-            value), and `row_id_key` (its DTC rowId). Any other keys are
-            passed through untouched into `RowAction.base_row` for "insert"
-            actions, so the notebook can copy the FULL row when creating a
-            genuinely new DTC row.
+            value), `content_key` (current Content value, or omit/None to
+            skip the backfill check), and `row_id_key` (its DTC rowId). Any
+            other keys are passed through untouched into `RowAction.
+            base_row` for "insert" actions, so the notebook can copy the
+            FULL row when creating a genuinely new DTC row.
         bom_unified: the raw `bom_unified` JSON (string or parsed).
 
     Returns:
@@ -374,12 +408,30 @@ def plan_style_enrichment(
         matched_target = next(
             (t for t in target_segments if segment_key(t) == rkey), None)
         if matched_target is not None:
-            # Already represents this exact segment -- upsert Placement only.
+            # Already represents this exact segment -- upsert ONLY the
+            # fields expected to still legitimately drift or need
+            # backfilling, never re-write Fabric Group/Mill Fabric Article #
+            # (they're already correct, that's how we matched).
+            upsert_fields: Dict[str, Optional[str]] = {}
             if row.get(placement_key) != matched_target.get("placement"):
+                upsert_fields[WIP_FIELD_PLACEMENT] = matched_target.get("placement")
+            # Content backfill (added 2026-09-03): rows enriched by an
+            # earlier version of this notebook (before Content existed as a
+            # target field at all) already satisfy the match above and would
+            # otherwise NEVER get Content populated, since first-time
+            # enrichment (the `is_unenriched` branch below) is the only
+            # other place Content is written. Only fills a currently-blank
+            # cell -- never overwrites a real existing Content value (e.g.
+            # one DTC's own trigger already wrote independently).
+            if content_key and _blank(row.get(content_key)):
+                content_val = matched_target.get("content")
+                if not _blank(content_val):
+                    upsert_fields[WIP_FIELD_CONTENT] = content_val
+            if upsert_fields:
                 actions.append(RowAction(
                     kind="update",
                     row_id=row.get(row_id_key),
-                    wip_fields={WIP_FIELD_PLACEMENT: matched_target.get("placement")},
+                    wip_fields=upsert_fields,
                 ))
         elif is_unenriched(row.get(fabric_group_key)):
             # Never-enriched row -- first-time enrichment from Main Fabric.

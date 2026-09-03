@@ -134,26 +134,60 @@ KONTOOR rows: "Body" never appears at all; "Fabric" genuinely does, in 3/16
 styles — `KTB-00020`, `KTB-00023`, `CB-S28003`, `s234160`). `"Stitch/Seam"`,
 `"Trim"`, `"Label"` are live-confirmed present and NOT used.
 
-## Enrichment decision logic
+## Enrichment decision logic — UPSERT semantics (REVISED 2026-09-03)
 
-1. A style's WIP rows are enriched **only if NONE of them already carry real
-   `Fabric Group` data** — a single already-enriched row (`Fabric Group` !=
-   the DTC placeholder `"MAIN MATERIAL CONTENT"`) short-circuits the WHOLE
-   style to a no-op. Phase 10 never partially re-enriches a style some of
-   whose colorway rows already have real data.
-2. Otherwise, every currently-placeholder row for that style gets `Fabric
-   Group` / `Placement` / `Mill Fabric Article #` set from the "Main Fabric"
-   segment.
-3. For **each** "Fabric" segment found (0 or more), each such row is ALSO
-   duplicated into a brand-new row carrying THAT "Fabric" segment's values
-   instead — i.e. an N-colorway style with 1 "Main Fabric" + M "Fabric"
-   segments produces N UPDATEs + N×M INSERTs.
-4. **`Fabric Group` is set to the segment's own `bom_detail_name`** (literally
+Rewritten from an earlier all-or-nothing design (a single already-enriched
+row used to short-circuit the WHOLE style to a permanent no-op) to genuine
+per-row upsert semantics — see `AGENTS.md`'s decisions log for the full
+history of why.
+
+1. **Match key**: a BOM segment matches an existing WIP row by the PAIR
+   `(Fabric Group, Mill Fabric Article #)` together. `Placement` is
+   deliberately excluded from the key — it's the one field expected to still
+   legitimately drift for an otherwise-unchanged assignment.
+2. Per existing row, per run:
+   - If its current `(Fabric Group, Mill Fabric Article #)` matches a
+     CURRENT BOM segment exactly: upsert `Placement` ONLY, and only if it
+     actually changed.
+   - Else if the row is still un-enriched (blank or the placeholder
+     `"MAIN MATERIAL CONTENT"`): apply the "Main Fabric" segment's FULL
+     field set (first-time enrichment — unchanged from the original design).
+   - Else (the row carries some OTHER real value not in the current BOM
+     data — e.g. a "Fabric" segment that's since disappeared, or hand-edited
+     DTC data): leave it COMPLETELY UNTOUCHED. Phase 10 NEVER reverts or
+     blanks existing DTC data just because this run's BOM snapshot no
+     longer contains a matching segment.
+3. If the style's `bom_unified` is entirely missing/blank this run, or its
+   "Main Fabric" segment itself is absent: take ZERO actions for the WHOLE
+   style — never revert.
+4. For **each** "Fabric" segment (0 or more) whose `(Fabric Group, Mill
+   Fabric Article #)` key is NOT already represented by ANY existing row for
+   this style: it's genuinely new — duplicate every existing row once per
+   such segment (unchanged fan-out shape: N colorway rows × each new segment
+   produces N new INSERTs).
+5. **`Fabric Group` is set to the segment's own `bom_detail_name`** (literally
    `"Main Fabric"` or `"Fabric"`) — corrected 2026-09-02, NOT `material_name`.
-   `Placement` / `Mill Fabric Article #` are unaffected by this correction —
-   still `placement` / `material_no`.
-5. A BOM row with neither segment (e.g. only `"Trim"`/`"Label"`/`"Stitch/Seam"`)
-   is a no-op for that style.
+   `Placement` / `Mill Fabric Article #` map from `placement` / `material_no`.
+   **`Content` (added 2026-09-03) maps from `material_name`** — see next
+   section for why Phase 10 writes this itself.
+6. A BOM row with neither segment (e.g. only `"Trim"`/`"Label"`/`"Stitch/Seam"`)
+   is equivalent to "no Main Fabric" above — zero actions, never revert.
+
+## `Content` — written directly by Phase 10 (added 2026-09-03)
+
+"Content" is normally a DTC WIP column populated by a DTC-internal trigger
+that polls "Mill Fabric Article #" — but that trigger's timing/conditions
+in UAT are unreliable (live-confirmed: every KTB test row stayed blank for
+days after Mill Fabric Article # was set), which was blocking Phase 9a's
+completeness filter entirely (see `docs/costing_interested_fields.txt`).
+**Fixed at the source**: Phase 10 now writes `Content` itself, from the
+SAME BOM segment's `material_name` — removing the dependency on DTC's own
+trigger for this column. This is an intentional, accepted dual-write (DTC's
+trigger may still also write the same cell independently) per explicit
+owner instruction — unlike the earlier Phase 1/Phase 10 `Fabric Group`
+conflict, which was an unintentional bug (see `AGENTS.md` decisions log).
+"Fabric Type" remains solely DTC-trigger-populated (traceability only, not
+part of the filter/key — see costing_interested_fields.txt).
 
 Raw DTC WIP field names used for the PATCH (live-confirmed via
 `GET /v1/views/{WIP_ITS_USE view id}` `dynamicFields`, 2026-09-02 — NOT the
@@ -164,6 +198,7 @@ Delta `col_*` normalized names):
 | `fabric_group` | `Fabric Group` |
 | `placement` | `Placement` |
 | `mill_fabric_article` | `Mill Fabric Article #` |
+| `content` | `Content` (added 2026-09-03) |
 
 ## Push mechanics
 

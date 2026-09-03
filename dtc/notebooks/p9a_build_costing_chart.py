@@ -59,7 +59,11 @@ Costing chart schema (field → source):
   style_description   from WIP data_json "Style Description"
   color_name          from WIP data_json "Color / Wash"
   lineplan_ref        from WIP data_json "Lineplan Ref #"
-  fabric_content      from WIP data_json "Fabric Group"   (WIP "Content" column)
+  fabric_content      from WIP data_json "Content"  (corrected 2026-09-03 --
+                       was mistakenly "Fabric Group"; "Content" is a
+                       DIFFERENT, DTC-internal-trigger-populated column, see
+                       the filter note below)
+  fabric_type         from WIP data_json "Fabric Type" (new 2026-09-03)
   gender              from WIP data_json "Gender"
   class               from WIP data_json "Class"
   sub_class           from WIP data_json "Sub Class"
@@ -78,9 +82,45 @@ Costing chart schema (field → source):
   hts_code            from WIP per-slot HTS field  (Phase 9b: NT Orbit fallback)
   duty_rate_us        from WIP per-slot duty (US)  (Phase 9b: NT Orbit fallback)
   duty_rate_ca        from WIP per-slot duty (CA)  (Phase 9b: NT Orbit fallback)
-  duty_rate_mx        from WIP per-slot duty (MX)  (Phase 9b: NT Orbit fallback)
-  tariff_rate         NULL placeholder              (Phase 9b: from NT Orbit)
-  updated_at          current timestamp
+   duty_rate_mx        from WIP per-slot duty (MX)  (Phase 9b: NT Orbit fallback)
+   tariff_rate         NULL placeholder              (Phase 9b: from NT Orbit)
+   updated_at          current timestamp
+   material_no         from WIP data_json "Mill Fabric Article #" (new 2026-09-03 --
+                        see "Costing chart key" below)
+
+Costing chart key (REVISED 2026-09-03, owner spec)
+----------------------------------------------------
+The match/merge key for a costing chart row is
+`[bp_style_no, lineplan_ref, material_no]` (plus `supplier_type`/`supplier`/
+`factory` to distinguish the 4 transposed vendor slots — see `COSTING_KEY`
+in `p9b1_compute_duty_rates.py`), NOT `fabric_content` (an earlier
+same-day iteration used `fabric_content`, but "Content" is free text that
+MULTIPLE distinct `material_no` values can legitimately share, and multiple
+STYLES can share one `lineplan_ref` — neither `fabric_content` nor
+`lineplan_ref` alone is a reliable material-level discriminator).
+`material_no` (Phase 10's own "Mill Fabric Article #") is the real,
+unambiguous per-material identifier.
+
+Fabric-details completeness filter (REVISED 2026-09-03, owner spec)
+----------------------------------------------------------------------
+Originally gated on WIP's "Content"/"Fabric Type" columns (populated by a
+DTC-internal trigger polling "Mill Fabric Article #") both being non-blank
+— but live-confirmed 2026-09-03 that trigger's timing/conditions in UAT are
+unreliable (every KTB test row still blank days after Mill Fabric Article #
+was set), which blocked Phase 9a entirely. Fixed at the SOURCE instead:
+Phase 10 (`p10_pull_bom_and_enrich.py` / `sync/bom.py`) now writes "Content"
+itself from the SAME BOM segment's `material_name` (`WIP_FIELD_CONTENT`),
+removing the dependency on DTC's own trigger for that column (DTC's trigger
+may still also write it independently — an intentional, accepted dual-write
+per explicit owner instruction). The filter now gates on `material_no`
+(Mill Fabric Article #) being non-blank instead — the real completeness
+signal now that it's also the costing-chart key component: a WIP row Phase
+10 hasn't touched yet has no `material_no` and is dropped (same treatment
+as a blank "Lineplan Ref #" — see Step 3). `fabric_type` ("Fabric Type") is
+still extracted and carried through to `costing_chart.fabric_type` for
+traceability, but is NOT part of the filter or the NT Orbit description
+string (unaffected by this revision) — it remains solely DTC-trigger-
+populated and may still be blank in practice.
 
 Phase 9b hook
 -------------
@@ -151,7 +191,9 @@ wip = wip_raw.select(
     jcol("data_json", "Legacy Code",       "legacy_code"),
     jcol("data_json", "Style Description", "style_description"),
     jcol("data_json", "Brand",             "brand"),
-    jcol("data_json", "Fabric Group",      "fabric_content"),   # "Content" col in WIP
+    jcol("data_json", "Content",           "fabric_content"),   # corrected 2026-09-03 (was "Fabric Group")
+    jcol("data_json", "Fabric Type",       "fabric_type"),      # new 2026-09-03 -- traceability only, NOT the filter/key
+    jcol("data_json", "Mill Fabric Article #", "material_no"),  # new 2026-09-03 -- the real costing-chart key + filter column
     jcol("data_json", "Gender",            "gender"),
     jcol("data_json", "Class",             "class_"),           # avoid Python keyword
     jcol("data_json", "Sub Class",         "sub_class"),
@@ -195,6 +237,24 @@ wip = wip_raw.select(
 )
 
 print(f"  WIP columns extracted: {len(wip.columns)}")
+
+# COMMAND ----------
+
+# ── Step 1b: Drop WIP rows Phase 10 hasn't enriched yet ──────────────────────
+# See module docstring "Fabric-details completeness filter" (REVISED
+# 2026-09-03: gates on material_no now, not Content/Fabric Type -- Phase 10
+# writes Content itself now, but material_no is the real signal AND the new
+# costing-chart key component, see "Costing chart key" above).
+print("\nStep 1b: Filtering out WIP rows with no material_no (Mill Fabric Article #) yet …")
+wip_before_fabric_filter = wip.count()
+wip = wip.filter(
+    F.col("material_no").isNotNull() & (F.trim(F.col("material_no")) != "")
+)
+dropped_incomplete_fabric = wip_before_fabric_filter - wip.count()
+print(f"  WIP rows before filter : {wip_before_fabric_filter}")
+print(f"  WIP rows after filter  : {wip.count()}")
+print(f"  Dropped (material_no still blank -- Phase 10 hasn't enriched this "
+      f"row yet): {dropped_incomplete_fabric}")
 
 # COMMAND ----------
 
@@ -286,7 +346,7 @@ print("\nStep 4: Transposing 4 vendor/factory slots …")
 COMMON_COLS = [
     "customer", "season_code", "brand", "bp_style_no", "lf_style_no",
     "legacy_code", "style_description", "color_name", "lineplan_ref",
-    "fabric_content", "gender", "class_", "sub_class",
+    "fabric_content", "fabric_type", "material_no", "gender", "class_", "sub_class",
     "order_quantity", "target_ldp", "target_fob",
 ]
 
@@ -371,6 +431,7 @@ print("SUMMARY")
 print(f"{'='*72}")
 print(f"  WIP input rows        : {wip_raw.count()}")
 print(f"  LinePlan input rows   : {lp_raw.count()}")
+print(f"  WIP rows w/o material_no (dropped, not yet Phase-10-enriched) : {dropped_incomplete_fabric}")
 print(f"  WIP rows w/o Lineplan Ref # (dropped) : {dropped_no_ref}")
 print(f"  WIP rows matched to LinePlan (INNER)  : {joined_count}")
 print(f"  Costing chart rows    : {total_costing}")

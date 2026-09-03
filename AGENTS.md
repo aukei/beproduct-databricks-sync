@@ -579,6 +579,201 @@ kept below for historical reference only (see decisions log):**
 
 ## Decisions on record
 
+- **Costing chart key corrected to `material_no`, not `fabric_content`
+  (2026-09-03, same-day owner correction).** An initial iteration keyed
+  `COSTING_KEY` and the WIP-row disambiguation on `fabric_content`
+  ("Content"); owner corrected this same day: "multiple material_no can
+  have same content, and multiple style could share a lineplan" — so
+  neither `fabric_content` (free text, not guaranteed unique per material)
+  nor `lineplan_ref` alone (can be shared across styles) is a reliable
+  material-level discriminator. `material_no` (Phase 10's own "Mill Fabric
+  Article #") is the real, unambiguous one. Changed: `COSTING_KEY` in
+  `p9b1_compute_duty_rates.py` (now `[..., lineplan_ref, material_no,
+  supplier_type, supplier, factory]`), `p9b2_push_duty_to_wip.py`'s
+  WIP-row lookup index (now `(bp_style_number, color_wash, "Mill Fabric
+  Article #")`), and `p9a_build_costing_chart.py` — added a NEW
+  `costing_chart.material_no` column (extracted from WIP "Mill Fabric
+  Article #") and changed the Step 1b completeness filter from gating on
+  `Content`/`Fabric Type` to gating on `material_no` being non-blank (the
+  real signal now that Phase 10 always sets it together with Content —
+  see next entry). Live-validated: `costing_chart` correctly carries
+  `material_no` per row, and `KTB-00023` (which has BOTH a "Main Fabric"
+  and a "Fabric" segment, each a different `material_no`) correctly
+  produces separate, non-colliding costing rows per material.
+- **Phase 10 now writes `Content` directly from BOM `material_name`,
+  removing the DTC-trigger dependency that was blocking Phase 9a
+  (2026-09-03, owner spec).** "Content" is normally populated by a
+  DTC-internal trigger polling "Mill Fabric Article #", but that trigger's
+  timing/conditions in UAT are unreliable (every KTB test row stayed blank
+  for days after Mill Fabric Article # was set) — Phase 9a's original
+  Content/Fabric Type completeness filter was permanently blocked as a
+  result. Fixed at the source: `sync/bom.py` gained `WIP_FIELD_CONTENT`
+  ("Content") and `extract_enrichment_fields()`/`to_wip_fields()` now
+  include it (sourced from the BOM segment's `material_name`, same segment
+  `fabric_group`/`mill_fabric_article` already come from) — an
+  intentional, ACCEPTED dual-write with DTC's own trigger (per explicit
+  owner instruction), unlike the earlier Phase 1/Phase 10 `Fabric Group`
+  conflict, which was an unintentional bug. **Backfill for
+  already-enriched rows**: a row enriched by an EARLIER version of this
+  notebook (before `Content` existed as a target field) already satisfies
+  `plan_style_enrichment()`'s "matches a current segment" branch and would
+  otherwise never get `Content` populated (first-time enrichment is the
+  only OTHER place it's written, and that's for un-enriched rows only) —
+  so that branch now ALSO backfills `Content` whenever the row's current
+  value is blank (never overwrites a real existing value, whether ours or
+  DTC-trigger-written). New `content_key` parameter on
+  `plan_style_enrichment()` (default `"content"`, pass `None` to disable).
+  6 new/changed unit tests (`test_bom.py` `[6g]`-`[6h4]`). Live-validated:
+  after redeploying, a run correctly backfilled `Content` on all
+  previously-enriched styles that have real BOM data (17 updates, 0
+  errors); `KTB-00016`/`KTB-00021` correctly remain blank throughout (their
+  `bom_unified` is genuinely `None` in the source table — confirmed via a
+  local replay of `plan_style_enrichment()` against live data, not a bug).
+- **Phase 9a/9b/3 clarifications (2026-09-03, owner spec).**
+  - **`fabric_content` was reading the WRONG WIP column** (`"Fabric Group"`
+    instead of `"Content"`) since Phase 9a was first built — corrected.
+    `"Content"` and `"Fabric Type"` (new `costing_chart.fabric_type` column)
+    are DTC-internal-trigger-populated columns (the trigger polls "Mill
+    Fabric Article #", which Phase 10 sets from TPM/BOM data) — NOT written
+    by this pipeline directly. A WIP row missing either one now gets DROPPED
+    from `costing_chart` entirely (`p9a_build_costing_chart.py` Step 1b,
+    same treatment as a blank "Lineplan Ref #"), since incomplete material
+    data would otherwise silently reach Phase 9b's NT Orbit classification.
+    **Live-confirmed same day**: every current KTB test WIP row (231 total)
+    still has both columns blank even where Mill Fabric Article # has been
+    set for days — the DTC trigger's latency/conditions in UAT aren't fully
+    understood. Filter live-validated: 203/231 dropped, 0 of the remaining
+    28 matched a Lineplan Ref# (they're unrelated non-test WIP rows),
+    `costing_chart` correctly ends up empty for our Lineplan-linked test
+    styles — `build_costing_chart`/`push_duty_rates` both complete with 0
+    rows and 0 errors, confirming the empty-result path is handled cleanly.
+  - **`COSTING_KEY` (the MERGE key Phase 9b writes NT Orbit results back
+    onto `costing_chart` with) gained `fabric_content`.** Phase 10 can
+    produce MULTIPLE WIP rows per style×color (one "Main Fabric" row + one
+    duplicate per "Fabric" segment — see `sync/bom.py`), which otherwise
+    share an IDENTICAL key (customer/season/brand/style/color/lineplan_ref/
+    supplier_type/supplier/factory) and would ambiguously MERGE-match
+    against each other once each carries its own real `Content` value.
+    `p9b2_push_duty_to_wip.py`'s WIP-row lookup index was fixed the same
+    way: keyed on `(bp_style_number, color_wash, Content)` instead of
+    `(bp_style_number, color_wash)` alone — otherwise it would silently push
+    one material's duty data onto the WRONG physical WIP row (dict
+    last-write-wins on the ambiguous key). `docs/costing_interested_fields.txt`
+    updated to match.
+  - **Phase 9b's "55" staleness safeguard: rejected timestamp-based check,
+    push unconditionally instead.** Originally proposed: compare DTC's
+    per-row "modified date" against the NT Orbit cache's `looked_up_at`
+    before pushing, skipping if DTC looks newer. Investigation found DTC's
+    API only exposes a per-REQUEST `updatedDat` (via `GET /v1/requests/
+    {id}`) — confirmed live, individual `sheetData` rows carry NO timestamp
+    at all — and that timestamp is touched by every OTHER phase's push too
+    (Phase 1/2/7 all write to the same request), making it untrustworthy as
+    a "did duty data specifically change" signal and prone to false-positive
+    skips within the same job run. Owner decision: since HTS/Duty/Tariff
+    values are sourced from `costing_chart` (our own Delta table, not
+    independently edited by anyone else in DTC), it's safe to just push
+    them every run ("should be a few merge ops") — no staleness check
+    needed. The value-diff check already implemented in
+    `p9b2_push_duty_to_wip.py` (only PATCH a column if it actually differs
+    from the WIP row's current value) is kept as a cheap, non-fragile
+    optimization; it isn't a staleness/freshness mechanism, just avoids
+    redundant identical PATCHes.
+  - **Phase 3 (`phase3_images`) now checks for a sibling row's image before
+    doing a full BeProduct extraction.** A style's front image is a
+    HEADER-level BeProduct attribute (one per style, not per colorway), so
+    every colorway row of the same BP Style# within one request (fixed
+    Brand+Season) is expected to carry the SAME image. For a blank-image
+    row, `phase3.compute_image_uploads` now first checks whether ANY OTHER
+    row with the same BP Style# in this request already has a real Style
+    Image — if so, it reuses THAT row's own already-uploaded DTC-hosted
+    image URL as the upload source (`ImageUploadOp.source="sibling_copy"`)
+    instead of downloading+transcoding from BeProduct's CDN again. Falls
+    back to the original full-extraction path (`source=
+    "beproduct_extract"`) when no sibling has an image yet. No notebook
+    changes needed — the upload mechanics (download-the-URL + classify/
+    transcode + multipart POST) are unchanged, only WHICH url is
+    downloaded differs. 4 new unit tests (`test_phase3.py` `[15a]`-`[15d]`):
+    copy-from-sibling, fallback when no sibling image exists, style-scoped
+    isolation (a DIFFERENT style's image is never copied), and
+    missing-rowIndex still blocks even a copy upload.
+- **Pipeline split into 3 independent Databricks jobs (2026-09-03, owner
+  design decision).** Motivated by DTC's known concurrent-edit limitation: a
+  browser user's 'save' is silently rejected (or the user's in-progress edit
+  is silently lost) if the request's server-side `last_read` timestamp has
+  moved past what the browser last loaded — including when this pipeline
+  edits the same DTC request while a user has it open (DTC team is working
+  on real concurrent-edit support, not yet shipped). Minimizing which jobs
+  touch live DTC, and for how long, reduces that contention surface; splitting
+  also removes Phase 9b's NT Orbit compute (~30s/call, serial) from blocking
+  everything else.
+  - **`BeProduct_DTC_sync_dag`** (job `294837488757511`, unchanged job ID) —
+    the MAIN job: 00 (Phase 0) → 10 (Phase 1+4+7) → 20 (Phase 2) → 30
+    (Phase 10) → 40 (Phase 9a) → 55 (Phase 9b's DTC WIP push only, renamed
+    task `push_duty_rates`, notebook `p9b2_push_duty_to_wip.py`). No longer
+    contains `gate_phase3`/`phase3_images` (moved out) or the NT Orbit
+    compute step (moved out).
+  - **`BeProduct_DTC_sync_duty_compute`** (new job `1026599988408090`, "50")
+    — single task `compute_duty_rates` running the NEW
+    `p9b1_compute_duty_rates.py` notebook (steps 1-4 of the original
+    `p9b_fill_duty_rates.py`): NT Orbit lookups → `costing_chart` ONLY.
+    Zero DTC dependency of any kind (no API key, no DTC read/write) —
+    fully independent, can run on its own cadence without ever touching
+    live DTC.
+  - **`BeProduct_DTC_sync_images`** (new job `847087837807970`, "60") —
+    single task `phase3_images` running the existing
+    `p3_beproduct_to_dtc_images.py` unchanged. Confirmed safe to decouple:
+    it needs nothing from the SAME main-job run to be correct — it reads
+    `dtc_request_mapping`/`beproduct_to_dtc_staging` (left behind by
+    whichever main-job run most recently populated them) and does its own
+    live `DTCConnector.get_sheet()` read for the freshest rowIndex/Style
+    Image state immediately before writing.
+  - **`p9b_fill_duty_rates.py` split into two notebooks**:
+    `p9b1_compute_duty_rates.py` (steps 1-4, unchanged logic, just the
+    DTC-push widgets/imports removed) and `p9b2_push_duty_to_wip.py`
+    (rewritten Step 5 — since it's now a genuinely separate job run with no
+    shared in-memory state from part 1, it independently re-reads
+    `costing_chart` for ANY row with a filled `hts_code`/`duty_rate_*`/
+    `tariff_rate`, computes target WIP fields via the unchanged
+    `duty.build_wip_patch_fields`, and — new — diffs each target field
+    against the WIP row's CURRENT `data_json` value before including it in
+    the PATCH, so a `costing_chart` row that already matches its WIP cell
+    produces NO API call at all; this avoids re-pushing identical values on
+    every run now that this step can no longer rely on "only rows this
+    exact run just filled"). Original `p9b_fill_duty_rates.py` kept in
+    place as a superseded/manual-fallback artifact (banner added), same
+    retirement pattern as Phase 8a's notebook.
+  - **Shared Instance Pool** (`INSTANCE_POOL_ID` in `scripts/deploy_job.py`)
+    across all 3 jobs: keeps each job's cluster fully independent
+    (separate ephemeral job cluster per run, no shared running cluster) but
+    cuts cold-start from ~5-7 min to ~1-2 min by drawing from pre-warmed
+    pooled VMs — owner explicitly confirmed job independence over sharing
+    one literal cluster. `enable_elastic_disk` is REJECTED by Databricks
+    when `instance_pool_id` is set (`InvalidParameterValue`, live-discovered
+    deploying) — removed from `CLUSTER_EXTRA`.
+  - **Node type changed same day**: `Standard_D4s_v3` → `Standard_D4as_v5`
+    (owner request). Instance pools are immutable on `node_type_id`, so this
+    required deleting the original pool and creating a new one (old pool
+    `0903-044952-son1-pool-us7wrezv` deleted, new pool
+    `0903-055346-hose1-pool-cia9e7xn` created) rather than an in-place edit.
+  - `scripts/deploy_job.py` restructured around a `JOB_SPECS` dict
+    (`main`/`duty_compute`/`images`, each with its own `build_*_tasks()`
+    function) and a `--job {main,duty_compute,images,all}` CLI flag
+    (default `main` for backward compatibility; `all` previews all 3,
+    dry-run only). All 3 jobs share the same `JOB_PARAMS` definitions for
+    simplicity (each job's tasks only reference the subset they need via
+    `P(...)`; unused parameters are harmless).
+  - **Live-validated same day**: all 3 jobs deployed and triggered
+    independently — `duty_compute` (0 lookups needed, everything already
+    cached/filled, 0 errors), `images` (0 new uploads needed, already
+    fully imaged, 0 errors), `main` (all 20 tasks `SUCCESS`, including the
+    new `push_duty_rates` task correctly diffing against WIP and finding
+    nothing to push since `duty_compute`'s prior run had already filled
+    everything). One transient issue during testing (deleting the OLD
+    instance pool while a main-job run from BEFORE the redeploy was still
+    mid-flight caused that one run's `wait_cluster`/`push_duty_rates` tasks
+    to fail with `RESOURCE_DOES_NOT_EXIST` on the deleted pool) was a
+    self-inflicted testing-methodology artifact, not a real bug — a fresh
+    run afterward completed cleanly with 0 errors.
 - **Phase 1 was silently reverting Phase 10's Fabric Group/Placement
   enrichment on every scheduled run — live-discovered and fixed
   2026-09-03.** `phase1.FIELD_MAPPING` had `"fabric_group": "Fabric Group"`
@@ -1053,10 +1248,18 @@ kept below for historical reference only (see decisions log):**
 
 Full history in `docs/PERFORMANCE.md`. Key facts for agents:
 
-**Current production job:** `BeProduct_DTC_sync_dag` (job 294837488757511),
-8 first-class tasks on one shared single-node non-Photon cluster. Defined in
-`scripts/deploy_job.py`; deploy with `python scripts/deploy_job.py`. The old
-single-notebook orchestrator (job 22324120218492, `orchestrate_sync.py`) is retired.
+**Current production jobs (split into 3, 2026-09-03 — see decisions log):**
+`BeProduct_DTC_sync_dag` (job 294837488757511, MAIN — 00/10/20/30/40/55),
+`BeProduct_DTC_sync_duty_compute` (job 1026599988408090, "50" — NT Orbit
+compute only, no DTC dependency), `BeProduct_DTC_sync_images` (job
+847087837807970, "60" — Phase 3 image upload only). Each has its own
+single-node non-Photon cluster, drawing from a SHARED Instance Pool
+(`Standard_D4as_v5`) for fast warm-up while remaining fully independent
+(separate schedules, separate cluster instances). Defined in
+`scripts/deploy_job.py`; deploy a specific job with
+`python scripts/deploy_job.py --job {main,duty_compute,images}`. The old
+single-notebook orchestrator (job 22324120218492, `orchestrate_sync.py`) is
+retired.
 
 **Parallel DAG:** Steps 1→2 (BeProduct chain) run in parallel with Step 3 (DTC
 pull), converging at Step 4. Steps 1-2 ≈ 110 s; Step 3 ≈ 84 s — they overlap.
@@ -1120,6 +1323,7 @@ python3 dtc/tests/test_samples.py       # Phase 7 sample formatter unit tests
 python3 dtc/tests/test_registry.py      # request-registry pure-function unit tests
 python3 dtc/tests/test_xts_master.py    # Phase 0 XTS Master pure-function unit tests
 python3 dtc/tests/test_duty.py          # Phase 9b NT Orbit Duty Tools pure-function unit tests (fixture-based)
+python3 dtc/tests/test_bom.py           # Phase 10 BOM enrichment pure-function unit tests (upsert semantics)
 python3 dtc/tests/test_entra_auth.py    # Phase 9b Entra OAuth2 URL-building / callback-parsing pure-function unit tests
 python3 dtc/tests/test_phase1_live.py   # live reversible DTC write test (needs UAT)
 python3 dtc/tests/test_nt_orbit_live.py # LIVE Entra OAuth2 + real NT Orbit API call (needs NT_ORBIT_* env + RUN_NT_ORBIT_LIVE_TEST=true; skips cleanly otherwise)
@@ -1127,9 +1331,10 @@ python scripts/nt_orbit_oauth_setup.py  # ONE-TIME Entra ID interactive login fo
 python scripts/check_dtc_view.py        # DTC WIP_ITS_USE column readiness check
 python scripts/upload_notebooks.py --dry-run   # preview Databricks notebook upload
 python scripts/upload_notebooks.py             # deploy notebooks to Databricks
-python scripts/deploy_job.py --dry-run         # preview multi-task job definition
-python scripts/deploy_job.py                   # create BeProduct_DTC_sync_dag job
-python scripts/deploy_job.py --reset-existing <JOB_ID>  # update existing job in place
+python scripts/deploy_job.py --job all                            # preview all 3 job definitions (dry-run only)
+python scripts/deploy_job.py --job main --dry-run                  # preview one job's task graph
+python scripts/deploy_job.py --job main                            # create a job (main/duty_compute/images)
+python scripts/deploy_job.py --job main --reset-existing <JOB_ID>   # update an existing job in place
 ```
 
 Run `beproduct/00_init_style_app_registry` (ADB) once per folder, and again whenever
