@@ -214,7 +214,7 @@ JOB_PARAMS = {
     "duty_cache_ttl_days": "180",     # Phase 9b: re-query a cached lookup after this many days
     "orbit_parallel_calls": "false",  # Phase 9b: call NT Orbit serially by default (safer; set true + tune max_workers for throughput)
     "orbit_timeout_seconds": "60",    # Phase 9b: per-call NT Orbit HTTP timeout (live-validated 2026-09-01: 30s was too short)
-    "run_phase10": "false",           # Phase 10: BOM enrichment from techpack extraction (default off until UAT-validated)
+    "run_phase10": "true",            # Phase 10: BOM enrichment from techpack extraction (flipped true 2026-09-03 -- extensively live-validated: upsert semantics, Content backfill, material_no key, 0 errors across multiple runs)
     "bom_catalog": "alb_tpm_uat",      # Phase 10: BOM source catalog (alb_tpm_uat | alb_tpm_prd -- NOT derived from dtc_environment, suffix differs)
     "bom_customer_name": "KONTOOR",    # Phase 10: pre-filter customer_name in the shared multi-customer BOM table (scoping/perf only)
     "push_duty_to_wip": "true",      # Phase 9b: also PATCH filled values back to DTC WIP
