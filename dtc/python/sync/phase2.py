@@ -29,6 +29,17 @@ write succeeded and persisted, then reverted), the same pattern already
 seen with DTC's unreliable `isReadOnly` flag. Present in both the "KTB" and
 "TEST KTB" folders.
 
+NOTE: on the DTC SIDE, "Main Factory Customer ID" is itself `type: "lookup"`
+(computed from the "XTS Factory Master" request via the row's selected
+"Main Factory (Sampling)", NOT a plain user-editable column — the same
+data Phase 0 already syncs into `beproduct_directory`). This module only
+READS whatever value DTC has already computed there and forwards it —
+mechanically identical to `parent_vendor`/`factory` above — so this is
+unaffected either way; it only means a genuine non-null value can't be
+manufactured by hand (a direct PATCH to a DTC lookup field is silently
+ignored) and only appears once a row's factory has a populated "Customer
+Factory ID" in real XTS Factory Master data. See AGENTS.md decisions log.
+
 The actual write uses the BeProduct SDK in one call per style:
 
     api.style.attributes_update(

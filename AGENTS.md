@@ -623,7 +623,30 @@ kept below for historical reference only (see decisions log):**
   evidently also a UI-only lock, not an API-enforced one. Wired into
   `sync/phase2.py`'s `REVERSE_HEADER_FIELDS` (moved out of the now-empty
   `UNSUPPORTED_FIELDS` tuple, kept as an empty tuple rather than removed so
-  future unsupported columns have an obvious place to land).
+  future unsupported columns have an obvious place to land). Live-verified
+  end-to-end via `phase2_push`'s existing generic mechanism (`HDR_ID_TO_COL`
+  is derived from `REVERSE_HEADER_FIELDS`, so no notebook code changes were
+  needed at all — the SAME run that added this field also correctly pushed
+  `parent_vendor`/`factory` for `KTB-00023`, proving the shared code path
+  works). **Important discovery while attempting to manufacture a live
+  non-null test value**: DTC's own "Main Factory Customer ID" field is
+  `type: "lookup"` (`GET /v1/views/{id}` dynamicFields) — a COMPUTED field
+  looked up from the "XTS Factory Master" request based on the row's
+  selected "Main Factory (Sampling)", NOT a plain user-editable text
+  column. A direct `PATCH` to this field returns `204` but the value is
+  silently ignored/never persists (same non-obvious-rejection class as the
+  formula/image fields found earlier — `isReadOnly: false` here too,
+  equally unreliable). This does not affect correctness of the Phase 2
+  read-and-forward logic (reading a DTC-computed lookup value and pushing
+  it elsewhere is fine, mechanically identical to `parent_vendor`/
+  `factory`) — it only means a genuine non-null value can't be manufactured
+  by hand for testing; it only appears once a row's assigned factory has a
+  populated "Customer Factory ID" in the real XTS Factory Master data
+  (the same source Phase 0 already syncs into `beproduct_directory`). No
+  current KTB WIP row has both a real `BP Style#` and a populated "Main
+  Factory Customer ID" simultaneously, so full end-to-end validation with
+  a real non-null value is deferred until live production data provides
+  one.
 - **Costing chart key corrected to `material_no`, not `fabric_content`
   (2026-09-03, same-day owner correction).** An initial iteration keyed
   `COSTING_KEY` and the WIP-row disambiguation on `fabric_content`
