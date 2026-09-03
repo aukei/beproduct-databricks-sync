@@ -133,16 +133,16 @@ sheets), staged through **Databricks/Delta**.
   run); `repull_dtc` is what makes those rows visible in Delta, and is now
   a SHARED, unconditional prerequisite for both `phase3_images` and
   `fill_bom_data` (no longer gated by `gate_phase3` — only `phase3_images`
-  itself still checks `run_phase3`). Gated by `run_phase10` (default `false`
-  until UAT-validated live), checked INSIDE the notebook itself (NOT via a
-  DAG-level condition task, unlike most other phases — a `gate_phase10`
-  condition task caused a Databricks `EXCLUDED`-status cascade that broke
-  Phase 9a/9b whenever it evaluated false; see decisions log). `gate_phase1`
-  was removed the same way (2026-09-02) for the identical reason, now that
-  the whole Phase 3/9/10 chain transitively depends on `phase1_push` via
-  `repull_dtc` — **live-validated dry-run 2026-09-02**: 8 matched styles, 17 updates + 4
-  inserts planned, 0 errors. Notebook:
-  `dtc/notebooks/p10_pull_bom_and_enrich.py`; pure logic + tests:
+  itself still checks `run_phase3`). Gated by `run_phase10` (deployed job
+  default still `false` pending an explicit go-live decision, but now
+  **live-validated with a REAL push, not just dry-run** — see next
+  paragraph), checked INSIDE the notebook itself (NOT via a DAG-level
+  condition task, unlike most other phases — a `gate_phase10` condition
+  task caused a Databricks `EXCLUDED`-status cascade that broke Phase 9a/9b
+  whenever it evaluated false; see decisions log). `gate_phase1` was removed
+  the same way (2026-09-02) for the identical reason, now that the whole
+  Phase 3/9/10 chain transitively depends on `phase1_push` via `repull_dtc`.
+  Notebook: `dtc/notebooks/p10_pull_bom_and_enrich.py`; pure logic + tests:
   `dtc/python/sync/bom.py` / `dtc/tests/test_bom.py`.
 
 Each field syncs **one way only** (no loops). Direction table below.
@@ -176,10 +176,13 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
 ### Current direction partition
 
 - **BeProduct → DTC**: Product Status, Style Description, Class, Sub Class, Division,
-  Brand, Garment Finish, Tech Pack Stage, Fabric Group, Placement, Gender (pending DTC col);
+  Brand, Garment Finish, Tech Pack Stage, Gender (pending DTC col);
   BP Style# (new match key, pending DTC col), LF Style# (optional), Legacy Code (optional);
   Supplier (default-fill "Supplier" when blank; pending DTC col).
   **Filter**: styles with Product Status = "Finalized" are excluded from staging/DTC sync.
+  Fabric Group / Placement are default-fill ONLY (fixed 2026-09-03) — Phase 1
+  sets the "MAIN MATERIAL CONTENT" placeholder on INSERT alone; Phase 10
+  (TPM/BOM data) is the sole ongoing owner of real values — see decisions log.
 - **BeProduct → DTC (Phase 7, sample submit history)**: All 6 apps mapped.
   Proto → "Proto Sample - Sample Status", PreLine → "Pre-line Sample - Status",
   SMS → "SMS - Sample Status", Fit → "2nd Fit Sample Approval Status",
@@ -576,6 +579,83 @@ kept below for historical reference only (see decisions log):**
 
 ## Decisions on record
 
+- **Phase 1 was silently reverting Phase 10's Fabric Group/Placement
+  enrichment on every scheduled run — live-discovered and fixed
+  2026-09-03.** `phase1.FIELD_MAPPING` had `"fabric_group": "Fabric Group"`
+  and `"placement": "Placement"` as REGULAR (always-overwrite) entries —
+  predating Phase 10, from when `p1p7_beproduct_to_dtc_transform.py`
+  hardcoded a `"MAIN MATERIAL CONTENT"` placeholder into every staging row
+  (`df_denormalized.withColumn("fabric_group", lit("MAIN MATERIAL
+  CONTENT"))`) as a stopgap before any real BOM source existed. This
+  violated the repo's own "one field, one direction" rule the moment Phase
+  10 started actually writing real values to those same two DTC columns.
+  **Live-confirmed real damage**: `beproduct_to_dtc_sync_log` shows a
+  scheduled `phase1_push` run at `2026-09-03 00:07:58 UTC` (the 07:55 HKT
+  cron trigger) pushed `{"Fabric Group": "MAIN MATERIAL CONTENT"}` onto a
+  KTB-00023 WIP row that Phase 10 had correctly enriched to `"Fabric"` in
+  the previous day's testing — silently destroying it, confirming this was
+  not theoretical but actively happening on the live 3x/day schedule.
+  **Fixed** by adding `"Fabric Group"` and `"Placement"` to
+  `DEFAULT_FILL_COLS` (same write-once pattern already used for
+  `"Supplier"`) rather than removing them from `FIELD_MAPPING` outright —
+  this preserves the existing INSERT-time placeholder behavior (still
+  needed: `bom.is_unenriched()` treats the placeholder as equivalent to
+  blank, so this is not strictly required, but keeps the established
+  "MAIN MATERIAL CONTENT" placeholder visible to DTC users on brand-new
+  rows rather than silently leaving the cell blank) while ensuring
+  `diff_updatable_fields()` NEVER re-pushes either column on UPDATE once
+  the DTC cell holds ANY value (placeholder or Phase-10-enriched) — see
+  `diff_updatable_fields()`'s existing `DEFAULT_FILL_COLS` skip logic,
+  unchanged. Updated: `dtc/python/sync/phase1.py` (`FIELD_MAPPING` comment
+  + `DEFAULT_FILL_COLS`), `dtc/tests/test_phase1.py` (new case `[14]`,
+  6 assertions), `docs/beproduct_style_interested_fields.txt`, this file's
+  "Current direction partition" section. The corrupted live KTB-00023 WIP
+  row was manually restored (`Fabric Group` set back to `"Fabric"`) so
+  Phase 10's upsert logic doesn't misinterpret it as a fresh placeholder row
+  on its next run (which would have inserted yet another duplicate).
+- **Phase 10 source table changed to `customer_teckpack_style_latest`, and
+  enrichment logic redesigned to UPSERT semantics (owner spec, 2026-09-03).**
+  `customer_teckpack_style_log` required this notebook to dedupe multiple
+  versions itself (`current_version` DESC / `timestamp_lf_captured`
+  tie-break); `customer_teckpack_style_latest` pre-resolves that, guaranteeing
+  at most one row per (`style_no`, `customer_name`, `customer_department`,
+  `style_season`) — live-confirmed 0 duplicate groups for `customer_name=
+  'KONTOOR'` on that full 4-column key (2026-09-03). `customer_department`
+  IS part of the real uniqueness key (a constant, non-null value for KONTOOR,
+  `"Wrangler Collaborations"`, but genuinely varies for other customers in
+  this shared table) — a defensive `row_number()` dedup keyed on it plus
+  style_no/style_season is kept as a near-zero-cost safety net even though
+  it's a no-op for KONTOOR today. Separately, the enrichment decision logic
+  was redesigned from the original all-or-nothing `style_already_enriched`
+  gate (a single real value on ANY row short-circuited the WHOLE style to a
+  permanent no-op) to genuine per-row UPSERT semantics: the match key
+  between a BOM segment and an existing WIP row is (Fabric Group, Mill
+  Fabric Article #) together (`Placement` excluded from the key since it's
+  the one field expected to still legitimately drift for an otherwise-
+  unchanged assignment); a matching row gets `Placement` upserted (only if
+  changed); an un-enriched row gets Main Fabric's full field set (first-time
+  enrichment, unchanged). A row holding
+  some OTHER real, unrecognized combination (a "Fabric" segment that's since
+  disappeared from the techpack, or hand-edited DTC data) is left
+  COMPLETELY UNTOUCHED; a style with no "Main Fabric" segment at all this
+  run (BOM missing entirely, or Main Fabric itself vanished) takes ZERO
+  actions for the whole style. This last rule has a REAL, live-confirmed
+  trigger: switching to `customer_teckpack_style_latest` left `bom_unified`
+  NULL for two previously-BOM-bearing KONTOOR test styles (`KTB-00016`,
+  `KTB-00021`) that had already been correctly enriched by an earlier run —
+  without this rule, the table switch alone would have silently reverted
+  their already-correct DTC data on the next scheduled run. Implementation:
+  `sync/bom.py` gained `segment_key()`, `is_unenriched()`, and
+  `build_target_segments()`; `style_already_enriched`/`RowEnrichmentPlan`/
+  `plan_row_enrichment` were removed (superseded); `plan_style_enrichment()`
+  was rewritten around the new per-row match logic (same `RowAction`
+  output contract, so `p10_pull_bom_and_enrich.py`'s Step 4 PATCH/INSERT
+  push code is unaffected). `dtc/tests/test_bom.py` cases `[4]`-`[6j]`
+  rewritten for the new semantics (11 new/changed cases, including the
+  never-revert/never-re-insert/idempotent-no-op scenarios). Step 2 of the
+  notebook now also extracts each WIP row's current `Mill Fabric Article #`
+  / `Placement` values (previously only `Fabric Group`), required for the
+  new match key.
 - **Phase 10 DAG-level EXCLUDED cascade broke Phase 9a/9b on every scheduled
   run (live-discovered and fixed 2026-09-02).** `fill_bom_data` was
   originally gated by a `gate_phase10` condition task
@@ -640,7 +720,68 @@ kept below for historical reference only (see decisions log):**
   scripts/deploy_job.py --dry-run` re-verified after the fix: 22 tasks, no
   `gate_phase1`/`gate_phase10`, `phase1_push <- request_manager`,
   `repull_dtc <- phase1_push`, `phase3_images <- gate_phase3[true],
-  repull_dtc`, `fill_bom_data <- repull_dtc`.
+  repull_dtc`, `fill_bom_data <- repull_dtc`. **Deployed live** the same day
+  (`python scripts/upload_notebooks.py` + `python scripts/deploy_job.py
+  --reset-existing 294837488757511`) and triggered with
+  `run_phase10=true, dry_run=false` for a real end-to-end validation — see
+  next entry for what that run uncovered.
+- **Phase 10 INSERT payload copied non-writable DTC columns (Style Image +
+  formula fields), causing 100% of live INSERTs to fail (live-discovered
+  and fixed 2026-09-02, same deployment as the entry above).** The
+  triggered live run (`run_phase10=true, dry_run=false`) surfaced a
+  previously-undetected bug (dry-run mode never actually calls the DTC
+  PATCH endpoint, so this could only ever be caught by a real push): all 17
+  UPDATEs succeeded but all 4 INSERTs failed with HTTP 400 `"'Style Image'
+  is an image field and cannot have data added to it"`. Root cause:
+  `p10_pull_bom_and_enrich.py`'s INSERT path (duplicating a row for each
+  "Fabric" segment) copied the ENTIRE original row's fields from
+  `data_json` forward into the new row, including "Style Image" — DTC's
+  sheetData PATCH/INSERT endpoint rejects ANY write to an image-type column
+  outright, even a mere copy-forward of an existing value (images can ONLY
+  be set via Phase 3's separate multipart `/images` endpoint). Excluding
+  just `"Style Image"` and re-testing (via a direct, isolated replay of the
+  exact failing payload against the live sheet, using
+  `dtc.get_max_row_index`/`dtc.patch_rows` the same way the notebook does)
+  immediately hit a SECOND, different-shaped 400: `"'Fabric Article' is a
+  formula field and cannot have data added to it"` — a computed/derived
+  column, not an image one. Checking DTC's own `isReadOnly` flag on both
+  fields (`GET /v1/views/{id}` dynamicFields) found it `false` on BOTH —
+  **`isReadOnly` is not a reliable signal for this at all**. Live-scanning
+  all 204 fields on the KTB `WIP_ITS_USE` view found the two signals that
+  DO reliably predict a rejection: `type == "contact"` (exactly one field,
+  "Style Image") and a truthy `formula` key (6 fields: "Fabric Article",
+  "Fabric Mill", and 4 "`<app>` - Target Sample Ready Date" fields).
+  **Fixed** generally, not just for these two named fields:
+  `sync/bom.py` gained `compute_non_writable_cols(dynamic_fields)` (derives
+  the exclusion set from a view's own `dynamicFields` metadata using the
+  `type`/`formula` signals) and `build_insert_row_payload(base_fields,
+  wip_fields, exclude_cols=...)` (the actual row-copy-plus-override logic,
+  now unit-tested); `p10_pull_bom_and_enrich.py` calls
+  `dtc.get_view_definition(view_id)` once per distinct `view_id` (cached),
+  falling back to the static `INSERT_EXCLUDE_COLS` (rowId/rowIndex/Style
+  Image) alone if that call fails (live-observed once, a transient 403 from
+  the Azure Application Gateway fronting the DTC API — the fallback still
+  produced 0 errors for this run's specific payloads). **Re-validated live**
+  after the fix: the 2 styles that actually carry a "Fabric" BOM segment
+  (`KTB-00020`, `KTB-00023` — confirmed directly against
+  `alb_tpm_uat.public.customer_teckpack_style_log`; the OTHER 6 matched
+  KONTOOR test styles have Main Fabric only, no "Fabric" segment, so were
+  never going to exercise the INSERT path at all) were reset back to the
+  `MAIN MATERIAL CONTENT` placeholder (undoing just enough of the prior
+  run's partial UPDATE so `style_already_enriched()` would treat them as
+  un-enriched again — `style_already_enriched()` short-circuits a whole
+  style to a no-op the moment ANY of its rows carries real Fabric Group
+  data, so a partially-failed run cannot be silently "completed" by a
+  plain re-run without this reset) and the job re-triggered end-to-end:
+  `fill_bom_data` reported `Pushed updates: 4  Pushed inserts: 4  errors:
+  0`, and the resulting `dtc_wip_ktb` rows confirm both new "Fabric" rows
+  landed correctly (`KTB-00020`/`KTB-00023` each now appear twice — once
+  `Fabric Group="Main Fabric"`, once `Fabric Group="Fabric"` — across both
+  physical KTB WIP requests in this test data). A stray manually-inserted
+  validation row (used to isolate-reproduce the original failure before the
+  fix, with placeholder test values) was deleted from the live UAT sheet
+  afterward via `DTCConnector.delete_rows` so no test artifacts were left
+  behind. New tests: `dtc/tests/test_bom.py` cases `[7]`/`[8]`.
 - **Phase 10 BOM enrichment: "Body" → "Fabric" and `material_name` →
   `bom_detail_name` correction (owner amendment, 2026-09-02).** Initial spec
   used `bom_detail_name` values "Main Fabric"/"Body" and read `Fabric Group`

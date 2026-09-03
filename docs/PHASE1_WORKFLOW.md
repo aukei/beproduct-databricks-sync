@@ -49,7 +49,7 @@ here — they flow the other way in Phase 2. Authoritative mapping:
 | Division          | header `division_hk`               | |
 | Garment Finish    | header `garment_finish`            | |
 | Tech Pack Stage   | header `techpack_stage`            | |
-| Fabric Group / Placement | header `core_main_material` | |
+| Fabric Group / Placement | header `core_main_material` | **Default-fill ONLY** (fixed 2026-09-03): INSERT-time "MAIN MATERIAL CONTENT" placeholder only; Phase 10 (TPM/BOM data) owns real ongoing values, never re-pushed on UPDATE — see AGENTS.md decisions log |
 | Gender            | header `gender`                    | Phase 6; DTC col confirmed in view |
 | LF Style#         | header `lf_style_number`           | Phase 6 optional (new separate field) |
 | Legacy Code       | header `customer_style_number`     | Phase 6 optional; was DTC→BP before |

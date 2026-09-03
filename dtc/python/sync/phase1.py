@@ -38,13 +38,30 @@ the row identity used for matching is (BP Style#, Color / Wash). RowIndex is
 therefore numbered per request (= per season+brand).
 
 Phase 1 pushes only BeProduct-OWNED columns (Product Status, Style Description,
-Class, Sub Class, Division, Brand, Garment Finish, Tech Pack Stage, Fabric Group,
-Placement, Gender, BP Style#, LF Style# (optional), Legacy Code (optional);
+Class, Sub Class, Division, Brand, Garment Finish, Tech Pack Stage,
+Gender, BP Style#, LF Style# (optional), Legacy Code (optional);
 Supplier (default-fill: "Supplier" only when DTC cell is blank);
 Style Image excluded). The DTC-owned columns (Lot#,
 Main Vendor (Sampling), Main Factory (Sampling), Main Factory Customer ID) flow
 the other way (DTC -> BeProduct) and live in sync/phase2.py; they are NOT in
 FIELD_MAPPING so a field is never synced in both directions.
+
+**Fabric Group / Placement are DEFAULT-FILL, not regular BeProduct-owned
+fields** (fixed 2026-09-03 — live-discovered cross-phase conflict; see
+AGENTS.md decisions log). `p1p7_beproduct_to_dtc_transform.py` still
+computes a placeholder Fabric Group="MAIN MATERIAL CONTENT" / Placement=
+main_material_content for every staging row (this predates Phase 10 and
+establishes the initial placeholder Phase 10's `bom.is_unenriched()` looks
+for on a brand-new row). But Phase 10 (`p10_pull_bom_and_enrich.py`, sourced
+from TPM/BOM data) is the SOLE ongoing owner of these two columns once a row
+exists — a regular (non-default-fill) FIELD_MAPPING entry would make every
+scheduled Phase 1 run silently revert Phase 10's real enrichment back to the
+placeholder, which is EXACTLY what was observed live (2026-09-03, a
+scheduled Phase 1 run pushed `{"Fabric Group": "MAIN MATERIAL CONTENT"}`
+onto an already-Phase-10-enriched row). Both are therefore in
+`DEFAULT_FILL_COLS`, same write-once pattern as "Supplier": pushed on
+INSERT (new row) only; never re-pushed on UPDATE once the DTC cell already
+holds ANY value (placeholder or real).
 
 All API I/O lives in connectors.dtc.DTCConnector; this module never calls it.
 The DTC column names below were validated live against the WIP_ITS_USE view
@@ -87,6 +104,8 @@ FIELD_MAPPING: Dict[str, str] = {
     "division": "Division",            # was "Division?"; the '?' column was renamed
     "garment_finish": "Garment Finish",
     "techpack_stage": "Tech Pack Stage",
+    # --- default-fill (write-once at INSERT; Phase 10 owns ongoing updates —
+    # see DEFAULT_FILL_COLS and the module docstring's 2026-09-03 note) ---
     "fabric_group": "Fabric Group",
     "placement": "Placement",
     "gender": "Gender",                # Phase 6: new field (pending DTC column creation)
@@ -124,7 +143,7 @@ FIELD_MAPPING: Dict[str, str] = {
 # Columns that are only filled when the DTC cell is currently blank — existing
 # non-blank DTC values are NEVER overwritten (write-once default fill).
 # Used in diff_updatable_fields() and respected for UPDATE ops; INSERT always fills.
-DEFAULT_FILL_COLS: frozenset = frozenset({"Supplier"})
+DEFAULT_FILL_COLS: frozenset = frozenset({"Supplier", "Fabric Group", "Placement"})
 
 # Sentinel written to a stale DTC row's "Product Status" when the BeProduct style
 # behind it has moved to a different request (key change). It is intentionally NOT

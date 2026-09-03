@@ -14,9 +14,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "python"))
 from sync import bom
 from sync.bom import (
     build_style_season, parse_bom_segments, extract_enrichment_fields,
-    to_wip_fields, style_already_enriched, plan_row_enrichment,
+    to_wip_fields, segment_key, is_unenriched, build_target_segments,
     plan_style_enrichment, PLACEHOLDER_FABRIC_GROUP,
     WIP_FIELD_FABRIC_GROUP, WIP_FIELD_PLACEMENT, WIP_FIELD_MILL_FABRIC_ARTICLE,
+    build_insert_row_payload, INSERT_EXCLUDE_COLS, compute_non_writable_cols,
 )
 
 _failures = []
@@ -132,55 +133,51 @@ check(WIP_FIELD_FABRIC_GROUP == "Fabric Group"
       "raw field name constants match the live WIP view definition")
 
 # ---------------------------------------------------------------------------
-print("\n[4] style_already_enriched()")
-check(style_already_enriched([PLACEHOLDER_FABRIC_GROUP]) is False,
-      "only the placeholder present -> not yet enriched")
-check(style_already_enriched([None, ""]) is False, "blank/None values -> not yet enriched")
-check(style_already_enriched([PLACEHOLDER_FABRIC_GROUP, "Real Fabric Data"]) is True,
-      "ANY row with real data short-circuits the WHOLE style to already-enriched")
-check(style_already_enriched([]) is False, "no rows at all -> not enriched (nothing to check)")
+print("\n[4] segment_key() / is_unenriched()")
+check(segment_key({"fabric_group": "Main Fabric", "mill_fabric_article": "WV-0063"})
+      == ("Main Fabric", "WV-0063"), "normal pair -> normalized tuple")
+check(segment_key({"fabric_group": " Main Fabric ", "mill_fabric_article": "WV-0063"})
+      == ("Main Fabric", "WV-0063"), "whitespace stripped")
+check(segment_key({"fabric_group": None, "mill_fabric_article": ""})
+      == (None, None), "blank/None values normalize to (None, None)")
+check(segment_key({"fabric_group": "Fabric", "mill_fabric_article": "X"})
+      != segment_key({"fabric_group": "Main Fabric", "mill_fabric_article": "X"}),
+      "different Fabric Group -> different key even with same article #")
+
+check(is_unenriched(PLACEHOLDER_FABRIC_GROUP) is True, "placeholder -> unenriched")
+check(is_unenriched(None) is True, "None -> unenriched")
+check(is_unenriched("") is True, "blank string -> unenriched")
+check(is_unenriched("Main Fabric") is False, "real value -> NOT unenriched")
 
 # ---------------------------------------------------------------------------
-print("\n[5] plan_row_enrichment()")
-plan_main_and_fabric = plan_row_enrichment(segs)
-check(plan_main_and_fabric.update_fields["fabric_group"] == "Main Fabric",
-      "Main Fabric present -> update_fields set")
-check(len(plan_main_and_fabric.duplicate_fields_list) == 1
-      and plan_main_and_fabric.duplicate_fields_list[0]["mill_fabric_article"] == "WV-0047",
-      "one Fabric segment -> one duplicate plan entry")
+print("\n[5] build_target_segments()")
+targets = build_target_segments(REAL_BOM_KTB00023)
+check(targets is not None and len(targets) == 2, "Main Fabric + 1 Fabric segment -> 2 targets")
+check(targets[0]["fabric_group"] == "Main Fabric", "target[0] is always Main Fabric")
+check(targets[1]["fabric_group"] == "Fabric" and targets[1]["mill_fabric_article"] == "WV-0047",
+      "target[1] is the Fabric segment")
 
-plan_main_only = plan_row_enrichment(segs16)
-check(plan_main_only.update_fields is not None
-      and plan_main_only.duplicate_fields_list == [],
-      "Main Fabric only -> update, no duplicates")
+targets16 = build_target_segments(REAL_BOM_KTB00016)
+check(targets16 is not None and len(targets16) == 1, "Main Fabric only -> 1 target")
 
-plan_multi = plan_row_enrichment(segs_multi)
-check(len(plan_multi.duplicate_fields_list) == 2, "two Fabric segments -> two duplicate plan entries")
-
-plan_none = plan_row_enrichment(bom.ParsedBomSegments())
-check(plan_none.is_empty(), "no segments at all -> empty plan")
-
-fabric_only_segs = bom.ParsedBomSegments(main_fabric=None, fabric_list=[{"bom_detail_name": "Fabric", "material_no": "X"}])
-plan_fabric_only = plan_row_enrichment(fabric_only_segs)
-check(plan_fabric_only.update_fields is None and len(plan_fabric_only.duplicate_fields_list) == 1,
-      "Fabric segment(s) with NO Main Fabric -> no update, but duplicates still planned")
+check(build_target_segments(None) is None, "blank bom_unified -> None (nothing to upsert)")
+check(build_target_segments(json.dumps([{"part": "BOM", "details": [
+    {"bom_detail_name": "Trim", "material_name": "x"},
+]}])) is None, "no Main Fabric/Fabric segments at all -> None")
+check(build_target_segments([{"part": "BOM", "details": [
+    {"bom_detail_name": "Fabric", "material_no": "FB-999", "placement": "yoke"},
+]}]) is None, "Fabric segment(s) present but NO Main Fabric -> None (never just insert-only)")
 
 # ---------------------------------------------------------------------------
-print("\n[6] plan_style_enrichment() — full integration")
+print("\n[6] plan_style_enrichment() — full integration (upsert semantics)")
 
-print("  [6a] style already enriched -> no-op")
-actions = plan_style_enrichment(
-    existing_rows=[{"row_id": "r1", "fabric_group": "Real Data"}],
-    bom_unified=REAL_BOM_KTB00023,
-)
-check(actions == [], "any real Fabric Group value short-circuits to []")
-
-print("  [6b] no existing WIP rows -> no-op")
+print("  [6a] no existing WIP rows -> no-op")
 check(plan_style_enrichment([], REAL_BOM_KTB00023) == [], "empty existing_rows -> []")
 
-print("  [6c] single row, Main Fabric only (KTB-00016-like) -> one UPDATE, no INSERT")
+print("  [6b] first-time enrichment: single row, Main Fabric only (KTB-00016-like) -> one full UPDATE")
 actions = plan_style_enrichment(
-    existing_rows=[{"row_id": "r1", "fabric_group": PLACEHOLDER_FABRIC_GROUP}],
+    existing_rows=[{"row_id": "r1", "fabric_group": PLACEHOLDER_FABRIC_GROUP,
+                     "mill_fabric_article": None, "placement": None}],
     bom_unified=REAL_BOM_KTB00016,
 )
 check(len(actions) == 1, "exactly one action")
@@ -188,10 +185,13 @@ check(actions[0].kind == "update" and actions[0].row_id == "r1",
       "single UPDATE targeting the existing row_id")
 check(actions[0].wip_fields[WIP_FIELD_FABRIC_GROUP] == "Main Fabric",
       "UPDATE's Fabric Group is the literal segment name 'Main Fabric'")
+check(WIP_FIELD_MILL_FABRIC_ARTICLE in actions[0].wip_fields,
+      "first-time enrichment writes the FULL field set (not just Placement)")
 
-print("  [6d] single row, Main Fabric + 1 Fabric segment (KTB-00023-like) -> one UPDATE + one INSERT")
+print("  [6c] first-time enrichment: single row, Main Fabric + 1 Fabric segment -> one UPDATE + one INSERT")
 actions = plan_style_enrichment(
-    existing_rows=[{"row_id": "r1", "fabric_group": PLACEHOLDER_FABRIC_GROUP, "color": "RedGingham"}],
+    existing_rows=[{"row_id": "r1", "fabric_group": PLACEHOLDER_FABRIC_GROUP,
+                     "mill_fabric_article": None, "placement": None, "color": "RedGingham"}],
     bom_unified=REAL_BOM_KTB00023,
 )
 check(len(actions) == 2, "exactly two actions (update + insert)")
@@ -205,14 +205,16 @@ check(insert_action.wip_fields[WIP_FIELD_FABRIC_GROUP] == "Fabric",
       "the INSERT's Fabric Group = 'Fabric'")
 check(insert_action.wip_fields[WIP_FIELD_MILL_FABRIC_ARTICLE] == "WV-0047",
       "the INSERT carries the Fabric segment's own material_no")
-check(insert_action.base_row == {"row_id": "r1", "fabric_group": PLACEHOLDER_FABRIC_GROUP, "color": "RedGingham"},
+check(insert_action.base_row["color"] == "RedGingham",
       "the INSERT's base_row is the full original row dict, for copying all other fields")
 
-print("  [6e] multi-row style (colorways), Main Fabric + 2 Fabric segments -> N updates + N*M inserts")
+print("  [6d] multi-row style (colorways), first-time, Main Fabric + 2 Fabric segments -> N updates + N*M inserts")
 actions = plan_style_enrichment(
     existing_rows=[
-        {"row_id": "r1", "fabric_group": PLACEHOLDER_FABRIC_GROUP, "color": "Black"},
-        {"row_id": "r2", "fabric_group": PLACEHOLDER_FABRIC_GROUP, "color": "White"},
+        {"row_id": "r1", "fabric_group": PLACEHOLDER_FABRIC_GROUP, "mill_fabric_article": None,
+         "placement": None, "color": "Black"},
+        {"row_id": "r2", "fabric_group": PLACEHOLDER_FABRIC_GROUP, "mill_fabric_article": None,
+         "placement": None, "color": "White"},
     ],
     bom_unified=MULTI_FABRIC_BOM,
 )
@@ -225,23 +227,99 @@ insert_base_colors = sorted(a.base_row["color"] for a in actions if a.kind == "i
 check(insert_base_colors == ["Black", "Black", "White", "White"],
       "each colorway gets one duplicated row PER Fabric segment")
 
-print("  [6f] BOM with no relevant segments -> no-op even though row is on placeholder")
-no_seg_bom = json.dumps([{"part": "BOM", "details": [
+print("  [6e] BOM missing entirely this run -> ZERO actions, never revert existing enrichment")
+already_enriched_row = {"row_id": "r1", "fabric_group": "Main Fabric",
+                         "mill_fabric_article": "WV-0064", "placement": "bodice"}
+check(plan_style_enrichment([already_enriched_row], None) == [],
+      "bom_unified=None (e.g. missing from customer_teckpack_style_latest) -> no-op, row untouched")
+check(plan_style_enrichment([already_enriched_row], json.dumps([{"part": "BOM", "details": [
     {"bom_detail_name": "Trim", "material_name": "x"},
-]}])
-check(plan_style_enrichment(
-    [{"row_id": "r1", "fabric_group": PLACEHOLDER_FABRIC_GROUP}], no_seg_bom
-) == [], "no Main Fabric/Fabric segments -> no-op")
+]}])) == [], "no Main Fabric/Fabric segments at all -> no-op, row untouched")
 
-print("  [6g] only Fabric segment(s), no Main Fabric -> inserts only, existing row untouched")
+print("  [6f] Fabric segment(s) present but NO Main Fabric -> ZERO actions (not insert-only anymore)")
 fabric_only_bom = [{"part": "BOM", "details": [
     {"bom_detail_name": "Fabric", "material_no": "FB-999", "placement": "yoke"},
 ]}]
 actions = plan_style_enrichment(
-    [{"row_id": "r1", "fabric_group": PLACEHOLDER_FABRIC_GROUP}], fabric_only_bom
+    [{"row_id": "r1", "fabric_group": PLACEHOLDER_FABRIC_GROUP, "mill_fabric_article": None, "placement": None}],
+    fabric_only_bom
 )
-check(len(actions) == 1 and actions[0].kind == "insert",
-      "no Main Fabric -> no UPDATE, but the Fabric segment still produces an INSERT")
+check(actions == [], "no Main Fabric -> zero actions at all, even for a placeholder row")
+
+print("  [6g] upsert: row already matches a segment by (Fabric Group, Mill Fabric Article #) -> Placement-only update")
+row_matches_main = {"row_id": "r1", "fabric_group": "Main Fabric",
+                     "mill_fabric_article": "WV-0064", "placement": "WRONG PLACEMENT"}
+actions = plan_style_enrichment([row_matches_main], REAL_BOM_KTB00016)
+check(len(actions) == 1 and actions[0].kind == "update", "exactly one Placement-fix update")
+check(actions[0].wip_fields == {WIP_FIELD_PLACEMENT: "bodice"},
+      "ONLY Placement is in the payload -- Fabric Group/Mill Fabric Article # never re-written")
+
+print("  [6h] upsert: row already matches AND Placement already correct -> no-op (idempotent)")
+row_fully_correct = {"row_id": "r1", "fabric_group": "Main Fabric",
+                      "mill_fabric_article": "WV-0064", "placement": "bodice"}
+check(plan_style_enrichment([row_fully_correct], REAL_BOM_KTB00016) == [],
+      "already fully matching -> no PATCH issued at all")
+
+print("  [6i] never-revert: row holds a real, unrecognized (Fabric Group, Article#) combo not in current BOM -> untouched")
+row_vanished_segment = {"row_id": "r1", "fabric_group": "Fabric",
+                         "mill_fabric_article": "OLD-ARTICLE-NO-LONGER-IN-BOM", "placement": "yoke"}
+check(plan_style_enrichment([row_vanished_segment], REAL_BOM_KTB00016) == [],
+      "row's real data isn't Main Fabric's key and isn't unenriched -> left completely untouched")
+
+print("  [6j] never-insert-duplicate: a Fabric segment already represented by an existing row -> no re-insert")
+existing_with_fabric_segment = [
+    {"row_id": "r1", "fabric_group": "Main Fabric", "mill_fabric_article": "WV-0063", "placement": "BODICE"},
+    {"row_id": "r2", "fabric_group": "Fabric", "mill_fabric_article": "WV-0047", "placement": "Body Front"},
+]
+check(plan_style_enrichment(existing_with_fabric_segment, REAL_BOM_KTB00023) == [],
+      "both segments already correctly represented -> zero actions, no duplicate insert")
+
+# ---------------------------------------------------------------------------
+print("\n[7] build_insert_row_payload() — Style Image must never be copied forward")
+base_fields = {
+    "rowId": "r1", "rowIndex": 3, "BP Style#": "KTB-00023",
+    "Color / Wash": "Indigo", "Style Image": "https://cdn.example/img.jpg",
+    "Fabric Group": "MAIN MATERIAL CONTENT",
+}
+wip = {"Fabric Group": "Fabric", "Placement": "yoke", "Mill Fabric Article #": "FB-999"}
+payload = build_insert_row_payload(base_fields, wip)
+check("Style Image" not in payload,
+      "Style Image excluded from INSERT payload (DTC rejects image data on INSERT)")
+check("rowId" not in payload and "rowIndex" not in payload,
+      "rowId/rowIndex identity fields excluded from INSERT payload")
+check(payload["BP Style#"] == "KTB-00023" and payload["Color / Wash"] == "Indigo",
+      "non-excluded original fields still copied forward")
+check(payload["Fabric Group"] == "Fabric" and payload["Placement"] == "yoke"
+      and payload["Mill Fabric Article #"] == "FB-999",
+      "wip_fields override applied on top of the copied row")
+check(INSERT_EXCLUDE_COLS == frozenset({"rowId", "rowIndex", "Style Image"}),
+      "INSERT_EXCLUDE_COLS is exactly the identity fields + Style Image")
+
+# ---------------------------------------------------------------------------
+print("\n[8] compute_non_writable_cols() — isReadOnly is unreliable; type/formula are the real signals")
+dynamic_fields = [
+    {"fieldName": "Style Image", "type": "contact", "isReadOnly": False},
+    {"fieldName": "Fabric Article", "type": "string", "formula": "{69f029a4052cf39ce40da5ad}", "isReadOnly": False},
+    {"fieldName": "Fabric Mill", "type": "string", "formula": "{69f029a4052cf39ce40da5ae}", "isReadOnly": False},
+    {"fieldName": "Proto Sample - Target Sample Ready Date", "type": "date", "formula": "{x}"},
+    {"fieldName": "BP Style#", "type": "string", "isReadOnly": False},
+    {"fieldName": "Mill Fabric Article #", "type": "string", "formula": "", "isReadOnly": False},
+    {"fieldName": "Color / Wash", "type": "string"},
+]
+non_writable = compute_non_writable_cols(dynamic_fields)
+check(non_writable == frozenset({
+    "Style Image", "Fabric Article", "Fabric Mill",
+    "Proto Sample - Target Sample Ready Date",
+}), "type=contact + truthy formula fields flagged; isReadOnly=False ignored (unreliable)")
+check("BP Style#" not in non_writable and "Color / Wash" not in non_writable,
+      "plain writable string fields NOT flagged")
+check("Mill Fabric Article #" not in non_writable,
+      "empty-string formula ('') is falsy -> NOT flagged (only a real formula expression counts)")
+
+full_payload = build_insert_row_payload(
+    base_fields, wip, exclude_cols=INSERT_EXCLUDE_COLS | non_writable)
+check("Fabric Article" not in full_payload,
+      "combining INSERT_EXCLUDE_COLS with compute_non_writable_cols excludes formula fields too")
 
 # ---------------------------------------------------------------------------
 print(f"\n{'='*60}")

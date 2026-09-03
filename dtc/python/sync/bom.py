@@ -43,30 +43,72 @@ style, and ZERO OR MORE "Fabric" segments (never seen more than 1 in live
 data, but the notebook handles any count). "Stitch/Seam", "Trim", "Label" are
 also live-confirmed present and are NOT used.
 
-Enrichment logic (owner spec, corrected 2026-09-02):
-  * A style's WIP rows are enriched ONLY if NONE of them already carry real
-    Fabric Group data — a single already-enriched row (Fabric Group !=
-    the DTC placeholder ``"MAIN MATERIAL CONTENT"``) short-circuits the
-    WHOLE style to a no-op (`style_already_enriched`).
-  * Otherwise, every one of that style's WIP rows still on the placeholder
-    gets its `Fabric Group` / `Placement` / `Mill Fabric Article #` set from
-    the "Main Fabric" segment.
-  * For EACH "Fabric" segment found (0 or more), each of those same rows is
-    ALSO duplicated into a brand-new row carrying that "Fabric" segment's
-    values instead — i.e. an N-colorway style with 1 "Main Fabric" + M
-    "Fabric" segments produces N UPDATEs (from Main Fabric) + N*M INSERTs
-    (one per colorway row, per Fabric segment).
-  * IMPORTANT — the value written to `Fabric Group` is the segment's own
+Enrichment logic -- UPSERT semantics (owner spec, revised 2026-09-03; see
+AGENTS.md decisions log for the full history including the earlier
+all-or-nothing `style_already_enriched` design this replaces):
+
+  * The match key between a BOM segment and an existing DTC WIP row is the
+    PAIR (Fabric Group, Mill Fabric Article #) — i.e. these two values
+    together identify "this is the same fabric assignment" across runs.
+    `Placement` is explicitly EXCLUDED from the match key because it is the
+    one field expected to still legitimately change/correct itself over
+    time for an otherwise-unchanged material assignment.
+  * Per existing WIP row, per run:
+      - If the row's current (Fabric Group, Mill Fabric Article #) matches
+        one of this style's CURRENT BOM segments (Main Fabric or any
+        Fabric segment) exactly: UPSERT — update `Placement` ONLY, and only
+        if it actually changed. `Fabric Group`/`Mill Fabric Article #`
+        are never blindly re-written once they already match.
+      - Else if the row is still un-enriched (blank or the DTC placeholder
+        `"MAIN MATERIAL CONTENT"`): apply the "Main Fabric" segment's full
+        field set (first-time enrichment — unchanged from the original
+        design).
+      - Else (the row carries some OTHER real, recognized-as-real value not
+        present in the CURRENT BOM data — e.g. a "Fabric" segment that has
+        since disappeared from the techpack, or a material someone edited
+        by hand in DTC): **leave it COMPLETELY UNTOUCHED.** Phase 10 NEVER
+        reverts or blanks existing DTC data just because this run's BOM
+        snapshot no longer contains a matching segment — see the next
+        bullet for the even more common trigger of this rule.
+  * If the style's `bom_unified` is entirely missing/blank THIS RUN, or its
+    "Main Fabric" segment itself is absent (parses to no "Main Fabric" at
+    all): treat the WHOLE STYLE as "nothing to upsert" and take ZERO
+    actions — never revert. Live-confirmed real trigger (2026-09-03):
+    switching the source table to `customer_teckpack_style_latest` (see
+    below) left `bom_unified` NULL for some previously-BOM-bearing test
+    styles (KTB-00016, KTB-00021) — this rule is what keeps their earlier,
+    correct Phase 10 enrichment intact rather than silently wiping it.
+  * For each "Fabric" segment (0 or more) whose (Fabric Group, Mill Fabric
+    Article #) key is NOT already represented by ANY existing row for this
+    style: it's genuinely new — duplicate every existing row once per such
+    segment (unchanged fan-out shape: N colorway rows x each new segment
+    produces N new INSERTs).
+  * The value written to `Fabric Group` is the segment's own
     `bom_detail_name` (i.e. literally "Main Fabric" or "Fabric"), NOT
-    `material_name` (corrected 2026-09-02; an earlier iteration of this spec
-    used `material_name`). `Placement` / `Mill Fabric Article #` are
-    unaffected by this correction — still `placement` / `material_no`.
-  * A BOM row with neither segment (e.g. only "Trim"/"Label"/"Stitch/Seam")
-    is a no-op for that style.
+    `material_name`. `Placement` / `Mill Fabric Article #` map from
+    `placement` / `material_no`.
+  * A BOM segment list with neither "Main Fabric" nor "Fabric" (e.g. only
+    "Trim"/"Label"/"Stitch/Seam") is equivalent to "no Main Fabric" above —
+    zero actions, never revert.
+
+Source table (changed 2026-09-03, owner spec): reads
+`customer_teckpack_style_latest`, NOT `customer_teckpack_style_log` — the
+"latest" table pre-resolves the multi-version-per-style history the "log"
+table required this module to dedupe itself (`current_version` DESC /
+`timestamp_lf_captured` tie-break), guaranteeing at most one row per
+(`style_no`, `customer_name`, `customer_department`, `style_season`).
+NOTE `customer_department` IS part of that uniqueness key even though it is
+a constant, non-null value for KONTOOR ("Wrangler Collaborations") in this
+environment — live-confirmed 0 duplicate groups for
+`customer_name='KONTOOR'` on the full 4-column key (2026-09-03); the 3-column
+key without `customer_department` is ALSO duplicate-free for KONTOOR
+specifically today, but the 4-column key is used for correctness since the
+column is genuinely part of the table's real uniqueness constraint and other
+customers in this shared table are NOT constant on it.
 
 This module holds only the deterministic decision logic (JSON parsing, the
-no-op/update/duplicate decision, and mapping to the raw DTC field names for
-the eventual PATCH). Notebook orchestration (Spark I/O, DTCConnector PATCH
+upsert/no-op/insert decision, and mapping to the raw DTC field names for the
+eventual PATCH). Notebook orchestration (Spark I/O, DTCConnector PATCH
 calls) lives in ``dtc/notebooks/p10_pull_bom_and_enrich.py``.
 """
 
@@ -74,7 +116,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -208,54 +250,49 @@ def to_wip_fields(fields: Dict[str, Optional[str]]) -> Dict[str, Optional[str]]:
 
 
 # ---------------------------------------------------------------------------
-# Per-style enrichment decision
+# Per-style enrichment decision (upsert semantics — see module docstring)
 # ---------------------------------------------------------------------------
 
-def style_already_enriched(existing_fabric_groups: List[Optional[str]]) -> bool:
+def _norm_key_part(v: Any) -> Optional[str]:
+    return None if _blank(v) else str(v).strip()
+
+
+def segment_key(fields: Dict[str, Optional[str]]) -> Tuple[Optional[str], Optional[str]]:
     """
-    True if ANY of a style's existing WIP rows already carries real (non-
-    blank, non-placeholder) Fabric Group data. Per spec this short-circuits
-    the WHOLE style to a no-op — Phase 10 never partially re-enriches a style
-    some of whose colorway rows already have real data, even if others are
-    still on the placeholder (safer than guessing why they differ).
+    The (Fabric Group, Mill Fabric Article #) composite match key used to
+    identify "the same fabric assignment" across runs. `Placement` is
+    deliberately excluded — it's the one field expected to still change for
+    an otherwise-unchanged assignment (see module docstring).
     """
-    return any(
-        not _blank(fg) and str(fg).strip() != PLACEHOLDER_FABRIC_GROUP
-        for fg in existing_fabric_groups
+    return (
+        _norm_key_part(fields.get("fabric_group")),
+        _norm_key_part(fields.get("mill_fabric_article")),
     )
 
 
-@dataclass
-class RowEnrichmentPlan:
-    """
-    What to do to ONE existing WIP row for a style, given its BOM segments.
-
-    update_fields: fields to PATCH onto the row itself, from "Main Fabric".
-        None means no "Main Fabric" segment was found -> the existing row is
-        left untouched (still no-op'd even if "Fabric" segments exist).
-    duplicate_fields_list: fields for ZERO OR MORE new rows to be inserted as
-        copies of this one, one per "Fabric" segment found (in document
-        order). Empty list means no duplication needed.
-    """
-    update_fields: Optional[Dict[str, Optional[str]]] = None
-    duplicate_fields_list: List[Dict[str, Optional[str]]] = field(default_factory=list)
-
-    def is_empty(self) -> bool:
-        return self.update_fields is None and not self.duplicate_fields_list
+def is_unenriched(fabric_group_value: Optional[str]) -> bool:
+    """True if a WIP row's current Fabric Group means "never enriched yet""
+    -- blank, or still the DTC placeholder."""
+    return _blank(fabric_group_value) or str(fabric_group_value).strip() == PLACEHOLDER_FABRIC_GROUP
 
 
-def plan_row_enrichment(segments: ParsedBomSegments) -> RowEnrichmentPlan:
+def build_target_segments(bom_unified: Any) -> Optional[List[Dict[str, Optional[str]]]]:
     """
-    Decide, from the segments found by `parse_bom_segments()`, what to do to
-    ONE existing WIP row (the actual "for every currently-placeholder row of
-    this style" fan-out happens in `plan_style_enrichment()`).
+    Build the ordered list of enrichment-field dicts (module field names —
+    see `extract_enrichment_fields`) Phase 10 targets for one style:
+    [Main Fabric fields] + [Fabric segment fields, ...] (0 or more).
+
+    Returns None if there is no "Main Fabric" segment at all (BOM missing
+    entirely this run, parse failure, or Main Fabric itself absent).
+    Callers MUST treat None as "nothing to upsert for this style right
+    now" — never as license to revert or blank already-enriched DTC rows.
     """
-    update_fields = (
-        extract_enrichment_fields(segments.main_fabric)
-        if segments.main_fabric is not None else None
-    )
-    duplicate_fields_list = [extract_enrichment_fields(d) for d in segments.fabric_list]
-    return RowEnrichmentPlan(update_fields=update_fields, duplicate_fields_list=duplicate_fields_list)
+    segments = parse_bom_segments(bom_unified)
+    if segments.main_fabric is None:
+        return None
+    return [extract_enrichment_fields(segments.main_fabric)] + [
+        extract_enrichment_fields(d) for d in segments.fabric_list
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -275,53 +312,175 @@ def plan_style_enrichment(
     existing_rows: List[Dict[str, Any]],
     bom_unified: Any,
     fabric_group_key: str = "fabric_group",
+    mill_fabric_article_key: str = "mill_fabric_article",
+    placement_key: str = "placement",
     row_id_key: str = "row_id",
 ) -> List[RowAction]:
     """
-    Plan every action needed to enrich ONE style's existing WIP rows from its
-    BOM data. This is the top-level entry point the notebook calls once per
-    style that has a matched BOM row.
+    Plan every action needed to upsert ONE style's existing WIP rows from
+    its current BOM data. This is the top-level entry point the notebook
+    calls once per style that has a matched BOM row. See the module
+    docstring for the full upsert-semantics spec; summary:
+
+      - Row already matches a current segment by (Fabric Group, Mill
+        Fabric Article #): update `Placement` only, only if it changed.
+      - Row is still un-enriched (blank/placeholder): apply "Main Fabric"'s
+        full field set (first-time enrichment).
+      - Row carries some OTHER real value not in the current BOM data
+        (a vanished segment, or hand-edited DTC data): left COMPLETELY
+        UNTOUCHED — never reverted.
+      - No "Main Fabric" segment at all this run (BOM missing/vanished):
+        ZERO actions for the whole style — never reverts existing data.
+      - Each "Fabric" segment not yet represented by any existing row is
+        genuinely new: duplicate every existing row once per such segment.
 
     Args:
         existing_rows: the style's current WIP rows (one dict per colorway
             row), each containing at least `fabric_group_key` (current
-            Fabric Group value) and `row_id_key` (its DTC rowId). Any other
-            keys are passed through untouched into `RowAction.base_row` for
-            "insert" actions, so the notebook can copy the FULL row when
-            creating a genuinely new DTC row.
+            Fabric Group value), `mill_fabric_article_key` (current Mill
+            Fabric Article # value), `placement_key` (current Placement
+            value), and `row_id_key` (its DTC rowId). Any other keys are
+            passed through untouched into `RowAction.base_row` for "insert"
+            actions, so the notebook can copy the FULL row when creating a
+            genuinely new DTC row.
         bom_unified: the raw `bom_unified` JSON (string or parsed).
-        fabric_group_key / row_id_key: lets the notebook pass its own dict
-            shape without a separate translation step.
 
     Returns:
-        [] if there's nothing to do (style already enriched, no WIP rows,
-        or the BOM has neither "Main Fabric" nor any "Fabric" segments).
-        Otherwise, per existing row: at most one `RowAction(kind="update")`
-        (only if a "Main Fabric" segment exists) plus one
-        `RowAction(kind="insert")` PER "Fabric" segment found (zero or more).
+        [] if there's nothing to do (no existing rows, or no "Main Fabric"
+        segment this run). Otherwise a mix of `RowAction(kind="update")`
+        (Placement-only or full-field, per row) and `RowAction(kind=
+        "insert")` (one per existing row, per genuinely-new "Fabric"
+        segment).
     """
     if not existing_rows:
         return []
-    if style_already_enriched([r.get(fabric_group_key) for r in existing_rows]):
-        return []
 
-    segments = parse_bom_segments(bom_unified)
-    plan = plan_row_enrichment(segments)
-    if plan.is_empty():
+    target_segments = build_target_segments(bom_unified)
+    if target_segments is None:
+        # No Main Fabric this run (BOM missing entirely, or Main Fabric
+        # itself vanished) -- never revert existing DTC data. No-op.
         return []
+    main_target, fabric_targets = target_segments[0], target_segments[1:]
+
+    def row_key(row: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+        return segment_key({
+            "fabric_group": row.get(fabric_group_key),
+            "mill_fabric_article": row.get(mill_fabric_article_key),
+        })
 
     actions: List[RowAction] = []
     for row in existing_rows:
-        if plan.update_fields:
+        rkey = row_key(row)
+        matched_target = next(
+            (t for t in target_segments if segment_key(t) == rkey), None)
+        if matched_target is not None:
+            # Already represents this exact segment -- upsert Placement only.
+            if row.get(placement_key) != matched_target.get("placement"):
+                actions.append(RowAction(
+                    kind="update",
+                    row_id=row.get(row_id_key),
+                    wip_fields={WIP_FIELD_PLACEMENT: matched_target.get("placement")},
+                ))
+        elif is_unenriched(row.get(fabric_group_key)):
+            # Never-enriched row -- first-time enrichment from Main Fabric.
             actions.append(RowAction(
                 kind="update",
                 row_id=row.get(row_id_key),
-                wip_fields=to_wip_fields(plan.update_fields),
+                wip_fields=to_wip_fields(main_target),
             ))
-        for dup_fields in plan.duplicate_fields_list:
+        # else: row carries some OTHER real, unrecognized (Fabric Group,
+        # Mill Fabric Article #) combination -- e.g. a "Fabric" segment
+        # that's since disappeared, or hand-edited DTC data. NEVER revert
+        # or overwrite it; leave completely untouched.
+
+    existing_keys = {row_key(row) for row in existing_rows}
+    for target in fabric_targets:
+        if segment_key(target) in existing_keys:
+            continue  # already represented by some existing row -- no insert needed
+        for row in existing_rows:
             actions.append(RowAction(
                 kind="insert",
                 base_row=row,
-                wip_fields=to_wip_fields(dup_fields),
+                wip_fields=to_wip_fields(target),
             ))
+
     return actions
+
+
+# ---------------------------------------------------------------------------
+# INSERT row-copy payload construction
+# ---------------------------------------------------------------------------
+
+# Columns that must NEVER be copied forward into a new (INSERT) row, on top
+# of the always-excluded rowId/rowIndex identity fields.
+#
+# Live-discovered 2026-09-02: DTC's sheetData PATCH/INSERT endpoint rejects
+# any value in an image-type column outright -- "'Style Image' is an image
+# field and cannot have data added to it" (HTTP 400) -- even when merely
+# copying an existing value forward from the row being duplicated. Images can
+# ONLY be set via the separate multipart /images endpoint (Phase 3), never
+# via sheetData; this mirrors Phase 1's own long-standing rule that
+# STYLE_IMAGE_COL is "never written in Phase 1". New duplicate rows are
+# simply created with a blank Style Image cell; `phase3_images` picks them up
+# on its next run like any other blank-image row.
+INSERT_EXCLUDE_COLS = frozenset({"rowId", "rowIndex", "Style Image"})
+
+
+def build_insert_row_payload(
+    base_fields: Dict[str, Any],
+    wip_fields: Dict[str, Optional[str]],
+    exclude_cols: Optional[frozenset] = None,
+) -> Dict[str, Any]:
+    """
+    Build the sheetData INSERT payload for a duplicated row: a full copy of
+    `base_fields` (the original row's parsed `data_json`), minus
+    `exclude_cols` (identity fields that must never be copied, plus any
+    write-rejected column like Style Image), with `wip_fields` (the new
+    row's own Fabric Group/Placement/Mill Fabric Article # values) applied
+    on top.
+
+    `exclude_cols` should normally be `INSERT_EXCLUDE_COLS |
+    compute_non_writable_cols(view_dynamic_fields)` (see that function) so
+    every column DTC actually rejects a write to is excluded, not just the
+    ones hardcoded here. `INSERT_EXCLUDE_COLS` alone is a safe minimum
+    fallback (e.g. for unit tests / when view metadata isn't available).
+    """
+    cols = INSERT_EXCLUDE_COLS if exclude_cols is None else exclude_cols
+    new_row = {k: v for k, v in base_fields.items() if k not in cols}
+    new_row.update(wip_fields)
+    return new_row
+
+
+def compute_non_writable_cols(dynamic_fields: List[Dict[str, Any]]) -> frozenset:
+    """
+    Determine which WIP view columns must NEVER be written via the
+    sheetData PATCH/INSERT endpoint, from a DTC view's `dynamicFields`
+    metadata (`DTCConnector.get_view_definition(view_id)["dynamicFields"]`).
+
+    Live-discovered 2026-09-02 (two separate 400s hit back-to-back while
+    fixing the first): DTC's own `isReadOnly` flag is NOT a reliable signal
+    for this -- live-confirmed `false` on every field that DTC itself then
+    rejected a write to. The two signals that DID reliably predict a
+    rejection, checked against the live KTB WIP_ITS_USE view (204 fields):
+      - `type == "contact"` -- the view's one image-upload field ("Style
+        Image"); images are binary and can ONLY be set via the separate
+        multipart /images endpoint (Phase 3), never sheetData. DTC's error:
+        "'Style Image' is an image field and cannot have data added to it."
+      - a truthy `formula` key -- a computed/derived column. Live-confirmed
+        6 such fields in this view: "Fabric Article", "Fabric Mill", and 4
+        "<app> - Target Sample Ready Date" fields (Proto/Pre-line/SMS/
+        Advertising). DTC's error: "'<field>' is a formula field and cannot
+        have data added to it."
+    Both error shapes are HTTP 400 from the SAME sheetData PATCH/INSERT
+    endpoint, discovered when Phase 10 tried to copy a full existing row
+    forward (as the base for a new "Fabric" segment duplicate row) and hit
+    each one in turn as the prior one was excluded.
+    """
+    non_writable = set()
+    for f in dynamic_fields:
+        name = f.get("fieldName")
+        if not name:
+            continue
+        if f.get("type") == "contact" or f.get("formula"):
+            non_writable.add(name)
+    return frozenset(non_writable)

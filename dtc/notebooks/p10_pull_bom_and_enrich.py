@@ -7,9 +7,13 @@ Fulfills a Phase 1 gap: BOM (Bill of Materials) data is not available from
 the BeProduct API at all and instead relies on a SEPARATE techpack-extraction
 pipeline, landed in:
 
-    alb_tpm_uat.public.customer_teckpack_style_log   (UAT)
-    alb_tpm_prd.public.customer_teckpack_style_log   (PRD)
+    alb_tpm_uat.public.customer_teckpack_style_latest   (UAT)
+    alb_tpm_prd.public.customer_teckpack_style_latest   (PRD)
 
+Changed 2026-09-03 (owner spec): reads `customer_teckpack_style_latest`, NOT
+`customer_teckpack_style_log` — the "latest" table pre-resolves the
+multi-version-per-style history the "log" table required this notebook to
+dedupe itself (see "Versioning" below for what that used to look like).
 Both catalogs are live-confirmed reachable directly from this workspace's
 Unity Catalog metastore (`SHOW CATALOGS` lists them) — no federation/JDBC
 setup needed, just `spark.table(...)`. NOTE the catalog naming is NOT
@@ -17,13 +21,13 @@ symmetric with `dtc_environment` ("uat"/"prod" elsewhere in this repo vs.
 "uat"/"prd" here) — `bom_catalog` is therefore its OWN widget, never derived
 from `dtc_environment`.
 
-Join (live-validated 2026-09-02 against the KONTOOR/Wrangler test data
+Join (live-validated 2026-09-02/03 against the KONTOOR/Wrangler test data
 already used throughout Phase 9a/9b — KTB-00016..KTB-00023 all appear in
 this table with style_season="Spring - 2028", matching
 `ktb_styles.season="Spring"` + `.year="2028"`):
 
-    ktb_styles.bp_style_number = customer_teckpack_style_log.style_no
-    AND (ktb_styles.season || " - " || ktb_styles.year) = customer_teckpack_style_log.style_season
+    ktb_styles.bp_style_number = customer_teckpack_style_latest.style_no
+    AND (ktb_styles.season || " - " || ktb_styles.year) = customer_teckpack_style_latest.style_season
 
 INNER JOIN only. `style_season` format varies WILDLY by customer in this
 shared table ("SS26", "SS 2027", "FH 2026", "Spring - 2028", ...) — this
@@ -32,39 +36,55 @@ the live-confirmed customer_name for Wrangler/Kontoor Brands data) purely as
 a scoping/performance optimization; the join keys alone are already
 customer-correct without it.
 
-Enrichment decision logic (pure, unit-tested in dtc/python/sync/bom.py;
-CORRECTED 2026-09-02 — an earlier iteration of this spec used "Body" instead
-of "Fabric" and `material_name` instead of `bom_detail_name`; see the
-decisions log in AGENTS.md):
+Enrichment decision logic — UPSERT semantics (pure, unit-tested in
+dtc/python/sync/bom.py; REVISED 2026-09-03, see the decisions log in
+AGENTS.md for the full history including the earlier all-or-nothing design):
   1. Parse `bom_unified` (JSON), keep only "Main Fabric" / "Fabric" segments
      (the ONLY two `bom_detail_name` values this phase cares about — live
      data also has "Stitch/Seam", "Trim", "Label", all ignored). By
      construction there is exactly ONE "Main Fabric" per style, and ZERO OR
-     MORE "Fabric" segments (live-confirmed: 3/16 KONTOOR styles genuinely
-     have one "Fabric" segment alongside "Main Fabric"; "Body" never
-     appears at all in this table).
-  2. A style's WIP rows are enriched ONLY if NONE of them already carry
-     real Fabric Group data (any one real value short-circuits the WHOLE
-     style to a no-op — see `bom.style_already_enriched`).
-  3. Every currently-placeholder ("MAIN MATERIAL CONTENT") row for that
-     style gets `Fabric Group` / `Placement` / `Mill Fabric Article #` set
-     from the "Main Fabric" segment.
-  4. For EACH "Fabric" segment found (0 or more), each such row is ALSO
-     duplicated into a new row carrying THAT "Fabric" segment's values
-     instead — i.e. an N-colorway style with 1 "Main Fabric" + M "Fabric"
-     segments produces N UPDATEs + N*M INSERTs.
-  5. IMPORTANT: `Fabric Group` is set to the segment's own `bom_detail_name`
-     (literally "Main Fabric" or "Fabric"), NOT `material_name`.
-     `Placement` / `Mill Fabric Article #` are unaffected by this — still
-     `placement` / `material_no`.
+     MORE "Fabric" segments.
+  2. The match key between a BOM segment and an existing WIP row is
+     (Fabric Group, Mill Fabric Article #) TOGETHER — `Placement` is
+     deliberately excluded from the key since it's the one field expected
+     to still legitimately change for an otherwise-unchanged assignment.
+  3. Per existing row: if its current (Fabric Group, Mill Fabric Article #)
+     matches a CURRENT BOM segment exactly, UPSERT `Placement` ONLY (and
+     only if it changed); if the row is still un-enriched (blank/
+     placeholder), apply "Main Fabric"'s full field set (first-time
+     enrichment, unchanged from the original design); otherwise (the row
+     carries some OTHER real value not in the current BOM data — e.g. a
+     "Fabric" segment that has since disappeared) leave it COMPLETELY
+     UNTOUCHED.
+  4. If `bom_unified` is missing/blank this run, or its "Main Fabric"
+     segment itself is absent: take ZERO actions for the WHOLE style —
+     NEVER revert or blank already-enriched DTC data. Live-confirmed real
+     trigger (2026-09-03): switching to `customer_teckpack_style_latest`
+     left `bom_unified` NULL for some previously-BOM-bearing test styles
+     (KTB-00016, KTB-00021) that had already been correctly enriched by an
+     earlier run — this rule is what keeps that data intact.
+  5. For each "Fabric" segment whose (Fabric Group, Mill Fabric Article #)
+     key isn't already represented by ANY existing row for the style, it's
+     genuinely new: duplicate every existing row once per such segment
+     (unchanged fan-out shape: N colorway rows x each new segment produces
+     N new INSERTs).
+  6. `Fabric Group` is set to the segment's own `bom_detail_name` (literally
+     "Main Fabric" or "Fabric"), NOT `material_name`. `Placement` / `Mill
+     Fabric Article #` map from `placement` / `material_no`.
 
-Versioning: `customer_teckpack_style_log` has a `current_version` column and
-can carry MULTIPLE rows per (style_no, style_season) over time (re-extracted
-techpacks). This notebook takes the row with the HIGHEST `current_version`
-(tie-broken by the most recent `timestamp_lf_captured`) per (style_no,
-style_season) — an explicit design choice, not confirmed against a live
-multi-version example (none exists yet in the KONTOOR test data, which has
-exactly one row per style).
+Versioning: the older `customer_teckpack_style_log` table had a
+`current_version` column and could carry MULTIPLE rows per (style_no,
+style_season) over time (re-extracted techpacks), requiring this notebook to
+dedupe by highest `current_version` (tie-broken by `timestamp_lf_captured`).
+`customer_teckpack_style_latest` pre-resolves this — it guarantees at most
+one row per (`style_no`, `customer_name`, `customer_department`,
+`style_season`), live-confirmed for `customer_name='KONTOOR'` (2026-09-03).
+NOTE `customer_department` IS part of that key even though it's a constant,
+non-null value for KONTOOR ("Wrangler Collaborations") in this environment —
+a defensive `row_number()` dedup (on the 3 style/season columns +
+`customer_department`, tie-broken by `timestamp_lf_captured`) is still
+applied as a near-zero-cost safety net in case that guarantee is ever
+violated for a customer/environment this notebook hasn't seen yet.
 
 Push mechanics: UPDATEs are sent as `sheetData` PATCH objects keyed by
 `rowId` (existing rows); INSERTs are sent keyed by `rowIndex` (new rows,
@@ -112,7 +132,7 @@ dbutils.widgets.text("dtc_workspace",   "KTB", "DTC Workspace")
 # not "_prod", so this must be its own parameter (see module docstring).
 dbutils.widgets.text("bom_catalog", "alb_tpm_uat", "BOM source catalog (alb_tpm_uat | alb_tpm_prd)")
 dbutils.widgets.text("bom_schema",  "public", "BOM source schema")
-dbutils.widgets.text("bom_table",   "customer_teckpack_style_log", "BOM source table")
+dbutils.widgets.text("bom_table",   "customer_teckpack_style_latest", "BOM source table")
 dbutils.widgets.text("bom_customer_name", "KONTOOR",
                      "Pre-filter customer_name (scoping/perf only -- the join keys alone are already correct without it)")
 dbutils.widgets.text("dry_run", "true", "Dry run (true/false) -- compute + log, skip the live DTC push")
@@ -179,30 +199,37 @@ styles = (spark.table(styles_table)
                  & F.col("season").isNotNull() & F.col("year").isNotNull()))
 print(f"  BeProduct styles with a valid season/year : {styles.count()}")
 
+# customer_teckpack_style_latest already pre-resolves the multi-version-per-
+# style history that the older customer_teckpack_style_log table required
+# this notebook to dedupe itself (current_version DESC / timestamp_lf_captured
+# tie-break) -- switched 2026-09-03 (owner spec). It guarantees at most one
+# row per (style_no, customer_name, customer_department, style_season);
+# customer_department IS part of that key even though it's a constant
+# non-null value for KONTOOR ("Wrangler Collaborations") in this environment
+# -- live-confirmed 0 duplicate groups for customer_name='KONTOOR' on the
+# full 4-column key (2026-09-03). A defensive row_number() dedup is still
+# applied (belt-and-suspenders, near-zero cost) in case that guarantee is
+# ever violated for a customer/environment this notebook hasn't seen yet;
+# it should always be a no-op today.
 bom_raw = (spark.table(bom_source)
            .where(F.col("customer_name") == bom_customer_name)
            .where(F.col("bom_unified").isNotNull()))
 
-# Multiple rows can exist per (style_no, style_season) over time (re-extracted
-# techpacks) -- keep only the highest current_version, tie-broken by the most
-# recent capture timestamp. Not live-validated against a real multi-version
-# example (none exists yet in the KONTOOR test data).
 from pyspark.sql import Window
-w = Window.partitionBy("style_no", "style_season").orderBy(
-    F.col("current_version").desc_nulls_last(),
+w = Window.partitionBy("style_no", "customer_department", "style_season").orderBy(
     F.col("timestamp_lf_captured").desc_nulls_last(),
 )
 bom_latest = (bom_raw
               .withColumn("_rn", F.row_number().over(w))
               .where(F.col("_rn") == 1)
-              .select("style_no", "style_season", "bom_unified"))
+              .select("style_no", "customer_department", "style_season", "bom_unified"))
 
 joined = (styles.join(
     bom_latest,
     on=(styles.bp_style_number == bom_latest.style_no)
        & (styles.style_season == bom_latest.style_season),
     how="inner",
-).select(styles.bp_style_number, bom_latest.bom_unified))
+).select(styles.bp_style_number, bom_latest.customer_department, bom_latest.bom_unified))
 
 matched = joined.collect()
 print(f"  Matched (style x BOM) pairs : {len(matched)}")
@@ -222,10 +249,12 @@ reg = {r["request_id"]: r.asDict()
 for r in spark.table(wip_table).where(F.col("bp_style_number").isin(list(matched_styles))).collect():
     wr = r.asDict()
     style = wr["bp_style_number"]
-    fabric_group = json.loads(wr["data_json"]).get("Fabric Group")
+    row_fields = json.loads(wr["data_json"])
     wip_rows_by_style.setdefault(style, []).append({
         "row_id": wr.get("row_id"),
-        "fabric_group": fabric_group,
+        "fabric_group": row_fields.get(bom.WIP_FIELD_FABRIC_GROUP),
+        "mill_fabric_article": row_fields.get(bom.WIP_FIELD_MILL_FABRIC_ARTICLE),
+        "placement": row_fields.get(bom.WIP_FIELD_PLACEMENT),
         "request_id": wr.get("request_id"),
         "data_json": wr.get("data_json"),
     })
@@ -239,11 +268,17 @@ print(f"  Styles with existing WIP rows : {len(wip_rows_by_style)}")
 # COMMAND ----------
 
 # ── Step 3: Plan enrichment per style (pure logic, dtc/python/sync/bom.py) ────
+# Upsert semantics (see bom.py module docstring, revised 2026-09-03): no more
+# whole-style "already enriched" gate -- bom.plan_style_enrichment() itself
+# decides, per existing row, whether to upsert Placement-only, apply
+# first-time full enrichment, insert a new "Fabric" segment row, or leave a
+# row completely untouched. A style with no "Main Fabric" segment this run
+# (BOM missing entirely, or Main Fabric itself vanished) always yields []
+# from plan_style_enrichment -- Phase 10 NEVER reverts existing DTC data.
 print("\nStep 3: Planning enrichment …")
 
 all_actions = []   # list of (request_id, sheet_id, view_id, bom.RowAction)
-skipped_already_enriched = 0
-skipped_no_segments = 0
+skipped_no_actions = 0
 skipped_no_wip_rows = 0
 
 for r in matched:
@@ -253,13 +288,9 @@ for r in matched:
         skipped_no_wip_rows += 1
         continue
 
-    if bom.style_already_enriched([row["fabric_group"] for row in existing_rows]):
-        skipped_already_enriched += 1
-        continue
-
     actions = bom.plan_style_enrichment(existing_rows, r["bom_unified"])
     if not actions:
-        skipped_no_segments += 1
+        skipped_no_actions += 1
         continue
 
     # An "update" action's request_id is looked up by its row_id; an
@@ -272,8 +303,8 @@ for r in matched:
         meta = wip_meta.get(request_id, {})
         all_actions.append((request_id, meta.get("sheet_id"), meta.get("view_id"), action))
 
-print(f"  Styles skipped (already enriched)      : {skipped_already_enriched}")
-print(f"  Styles skipped (no Main Fabric/Fabric) : {skipped_no_segments}")
+print(f"  Styles skipped (no upsert actions -- BOM missing/vanished, or fully")
+print(f"                  up to date already)      : {skipped_no_actions}")
 print(f"  Styles skipped (no WIP rows yet)        : {skipped_no_wip_rows}")
 print(f"  Total actions planned                   : {len(all_actions)}"
       f"  (updates: {sum(1 for *_, a in all_actions if a.kind == 'update')},"
@@ -296,6 +327,29 @@ if all_actions:
     by_sheet_inserts: dict = {}
     skipped_no_meta = 0
 
+    # Per-view_id cache of non-writable column names (see
+    # bom.compute_non_writable_cols's docstring). Live-discovered
+    # 2026-09-02: `isReadOnly` in the view definition is NOT reliable (it
+    # was `false` on every field DTC then rejected a write to); the real
+    # signals are `type == "contact"` (the image field) and a truthy
+    # `formula` key (computed/derived columns). Fetched once per distinct
+    # view_id, not once per insert, since dynamicFields is view-scoped.
+    non_writable_cache: dict = {}
+
+    def _exclude_cols_for(view_id: str) -> frozenset:
+        if view_id not in non_writable_cache:
+            try:
+                defn = dtc.get_view_definition(view_id)
+                non_writable_cache[view_id] = (
+                    bom.INSERT_EXCLUDE_COLS
+                    | bom.compute_non_writable_cols(defn.get("dynamicFields", []))
+                )
+            except Exception as e:
+                print(f"  ⚠️  get_view_definition({view_id}) failed: {e} "
+                      f"-- falling back to bom.INSERT_EXCLUDE_COLS only")
+                non_writable_cache[view_id] = bom.INSERT_EXCLUDE_COLS
+        return non_writable_cache[view_id]
+
     for request_id, sheet_id, view_id, action in all_actions:
         if not sheet_id or not view_id:
             skipped_no_meta += 1
@@ -306,10 +360,15 @@ if all_actions:
                 {**action.wip_fields, "rowId": action.row_id})
         else:  # insert
             base_fields = json.loads(action.base_row["data_json"])
-            # Full copy of the original row's fields, minus rowId/rowIndex
-            # (this is a NEW row), with the 3 BOM fields overridden.
-            new_row = {k: v for k, v in base_fields.items() if k not in ("rowId", "rowIndex")}
-            new_row.update(action.wip_fields)
+            # Full copy of the original row's fields, minus identity fields
+            # (rowId/rowIndex) and every column DTC itself marks as
+            # non-writable (image-type + formula fields) -- see
+            # bom.build_insert_row_payload / bom.compute_non_writable_cols.
+            # New duplicate rows get a blank Style Image cell (and blank
+            # formula-field cells, which DTC computes itself); phase3_images
+            # picks up the blank image on its next run like any other row.
+            new_row = bom.build_insert_row_payload(
+                base_fields, action.wip_fields, exclude_cols=_exclude_cols_for(view_id))
             by_sheet_inserts.setdefault(sheet_key, []).append(new_row)
 
     pushed_updates, pushed_inserts, push_errors = 0, 0, 0

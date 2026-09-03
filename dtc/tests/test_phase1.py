@@ -245,6 +245,26 @@ check("LF Style#" not in phase1.KEY_DTC_COLS, "'LF Style#' NOT in KEY_DTC_COLS (
 check("Supplier" in phase1.DEFAULT_FILL_COLS, "'Supplier' in DEFAULT_FILL_COLS")
 check("Gender" not in phase1.DEFAULT_FILL_COLS, "'Gender' NOT in DEFAULT_FILL_COLS (full overwrite)")
 
+print("\n[14] Fabric Group / Placement are DEFAULT_FILL_COLS (fixed 2026-09-03 -- see AGENTS.md decisions log)")
+check("Fabric Group" in phase1.DEFAULT_FILL_COLS and "Placement" in phase1.DEFAULT_FILL_COLS,
+      "'Fabric Group'/'Placement' in DEFAULT_FILL_COLS -- Phase 10 owns ongoing updates, not Phase 1")
+dtc_already_enriched = {"BP Style#": "S1", "Color / Wash": "Black", "Fabric Group": "Fabric", "Placement": "Body Front"}
+dtc_still_placeholder = {"BP Style#": "S1", "Color / Wash": "Black",
+                          "Fabric Group": "MAIN MATERIAL CONTENT", "Placement": "MAIN MATERIAL CONTENT"}
+bp_fabric_row = {"bp_style_number": "S1", "color": "Black", "brand": "Wrangler",
+                  "fabric_group": "MAIN MATERIAL CONTENT", "placement": "MAIN MATERIAL CONTENT"}
+allowed_fab = {"BP Style#", "Color / Wash", "Brand", "Fabric Group", "Placement"}
+diff_vs_enriched = diff_updatable_fields(dtc_already_enriched, bp_fabric_row, allowed_cols=allowed_fab)
+check("Fabric Group" not in diff_vs_enriched and "Placement" not in diff_vs_enriched,
+      "a scheduled Phase 1 UPDATE never reverts Phase 10's real enrichment back to the placeholder")
+diff_vs_placeholder = diff_updatable_fields(dtc_still_placeholder, bp_fabric_row, allowed_cols=allowed_fab)
+check("Fabric Group" not in diff_vs_placeholder and "Placement" not in diff_vs_placeholder,
+      "still-placeholder DTC row is ALSO left alone (norm() sees a non-blank value already) -- "
+      "Phase 10, not Phase 1, is what will later fill it for real")
+ins_fabric_payload = build_target_payload(bp_fabric_row, allowed_cols=allowed_fab, include_keys=True)
+check(ins_fabric_payload.get("Fabric Group") == "MAIN MATERIAL CONTENT",
+      "INSERT (brand-new row) still sets the placeholder -- Phase 10's is_unenriched() check depends on it")
+
 print("\n" + "=" * 70)
 if _failures:
     print(f"❌ {len(_failures)} FAILURE(S):")

@@ -559,3 +559,29 @@ This is fulfilling phase 1 left over: BOM data is missing from BeProduct API and
 ## checking DAG
 question is fill_bom_data, logically it should read from all BeProduct styles changes at the start of run, so it should see the image after original phase 1 complete: style x color (phase 3 image is optional). Then phase 10 logic read BOM to complete the style x color x material WIP master chart. Then phase 9 logic based on this to create costing chart.
 phase 3 while not a blocker, expects to fill all rows (style x color x material) with images, so effectively it should be after phase 10 but can be parallel to phase 9. Just that both phase 9 and phase 3 may be updating same set of rows, and given user may have edited the row in DTC, so each of phase 3 and phase 9 should be repulling the request before edit.
+
+## validating DAG (3/9/26)
+- validating customer_teckpack_style_log: 
+    - use table "customer_teckpack_style_latest", each style_no + customer_name + style_season returns at most 1 row 
+    - change of BOM_UNIFIED: base on Fabric_Group + Mill_Fabric_Article#, *upsert* only, if BOM disappeared or material removed, keep the DTC row untouch.
+    - basically the only potential field to be update in this area is "placement"
+    - note: "customer_department" is part of "customer_teckpack_style_latest" unique key. In Kontoor, this is always null.
+- rethinking sequence of whole job
+00. DTC -> BeProduct - factory / supplier masters (phase 0)
+10. BeProduct -> DTC - DTC contains rows style x color (phase 1 + 4 + 7)
+20. DTC -> BeProduct - BeProduct style x color take update from DTC (phase 2)
+30. TPM -> DTC  style x color x BOM (phase 10)
+40. DTC -> Costing_Chart style x BOM x LinePlan (phase 9a)
+50. Costing chart get enriched by OrbitDuty API (phase 9b)
+55. DTC rows get duty / tariff rates (phase 9b)
+60. DTC rows get images  (phase 3)
+
+- Known limitation : DTC block a browser user to 'save' if the on screen request bears an older "last_read" timestamp than the one server hosting.
+    - i.e. If multiple users open the same DTC request and make changes, the first who click 'save' will preserve, others will have their 'save' action rejected. They have to refresh the whole request to retry.
+    - the same if API updated / insert a row in a request while user of interactive session are making changes on the same request, user will lost changes they made silently.
+    - this is being addressed by DTC team to make "concurrent edit" 
+- would this make more sense:
+    - "DTC rows get duty / tariff rate" run as separate jobs. It does not read / rely on DTC request directly. It reads and update databricks costing_chart table only.
+        - likely split phase 9b into 2 tasks (50 & 55)
+    - "DTC rows get images" can also run separately, fill in missing images against DTC direcly (60).
+    - The main job handles 00-10-20-30-40-55 
