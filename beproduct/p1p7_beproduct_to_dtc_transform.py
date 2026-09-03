@@ -142,7 +142,7 @@ try:
     # Show sample
     print(f"\n   Sample source data:")
     df_source.select(
-        "bp_style_number", "lf_style_number", "season", "year", "brand", "brands", "main_material_content"
+        "bp_style_number", "lf_style_number", "season", "year", "brand", "main_material_content"
     ).show(3, truncate=50)
     
 except Exception as e:
@@ -455,7 +455,9 @@ try:
 
         # DTC columns
         col("brand"),                      # Phase 6: from brand_hk (key field)
-        col("brands"),                     # brands_multi (retained as metadata)
+        # "brands" (brands_multi) REMOVED 2026-09-03 (owner spec) -- "brand"
+        # (brand_hk) is now the ONLY brand field; brands_multi is no longer
+        # extracted into ktb_styles at all. See AGENTS.md decisions log.
         col("season"),
         col("year"),
         col("season_code"),

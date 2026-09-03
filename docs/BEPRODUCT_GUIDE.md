@@ -159,8 +159,9 @@ All under `lft.beproduct`.
 Extracted header fields (fieldId → column): `lf_style_number` (`header_number`),
 `description`, `team`, `season`, `year`, `product_status` (`style_status`),
 `customer_style_number`, `product_category`, `product_sub_category`, `division`,
-`brands` (`brands_multi`), `garment_finish`, `techpack_stage`, `lot_code`,
-`parent_vendor`, `factory`.
+`brand` (`brand_hk`) — `brands` (`brands_multi`) REMOVED 2026-09-03, `brand` is
+now the only brand field extracted —, `garment_finish`, `techpack_stage`,
+`lot_code`, `parent_vendor`, `factory`.
 
 Plus:
 - `id` — BeProduct style/header id

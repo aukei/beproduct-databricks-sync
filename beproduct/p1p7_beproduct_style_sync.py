@@ -153,10 +153,11 @@ INTERESTED_FIELDS = {
     "PRODUCT CATEGORY": "product_category",
     "PRODUCT SUB CATEGORY": "product_sub_category",
     "Division": "division",
-    # Phase 6: brand_hk single-value "Brand" field is the new composite-key brand.
-    # brands_multi ("BRANDS") is kept for reference but is no longer the key field.
-    "Brand": "brand",              # field_id brand_hk (NEW single-value key field)
-    "BRANDS": "brands",            # field_id brands_multi (kept as metadata)
+    # Phase 6: brand_hk single-value "Brand" field is the composite-key brand.
+    # brands_multi ("BRANDS") REMOVED 2026-09-03 (owner spec) -- "brand"
+    # (brand_hk) is now the ONLY brand field extracted/synced; brands_multi
+    # is no longer pulled into ktb_styles at all. See AGENTS.md decisions log.
+    "Brand": "brand",              # field_id brand_hk (single-value key field)
     "GARMENT FINISH": "garment_finish",
     "TECHPACK STAGE": "techpack_stage",
     "Lot Code": "lot_code",

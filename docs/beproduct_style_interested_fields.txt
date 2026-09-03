@@ -112,7 +112,7 @@ Lot#                       | Lot Code                       | drawing_number_wal
                            |                                |                          |                                                            | (not in current header schema; carries stale junk e.g. "2027").
 Main Vendor (Sampling)     | PARENT VENDOR                  | parent_vendor            | headerData.fields[id="parent_vendor"].value                | type PartnerDropDown
 Main Factory (Sampling)    | FACTORY                        | factory                  | headerData.fields[id="factory"].value                      | type PartnerDropDown
-Main Factory Customer ID   | (blank)                        | -                        | (not sourced from BeProduct)                               |
+Main Factory Customer ID   | Customer Factory Code          | customer_factory_code    | headerData.fields[id="customer_factory_code"].value        | DTC→BP (wired up 2026-09-03, was unsupported). `LockField: true` UI property does NOT block API writes (live-tested write+revert). Present in both KTB and TEST KTB folders.
 Fabric Group               | MAIN MATERIAL CONTENT          | core_main_material       | headerData.fields[id="core_main_material"].value           | INSERT-only placeholder now (default-fill, fixed 2026-09-03) -- Phase 10 (TPM/BOM data) owns real ongoing values; type LabelMaterial (value is structured, not a plain string)
 Placement                  | MAIN MATERIAL CONTENT          | core_main_material       | headerData.fields[id="core_main_material"].value           | same source field as Fabric Group; INSERT-only placeholder now (default-fill, fixed 2026-09-03) -- Phase 10 owns real ongoing values
 BP STYLE#                  | BP Style Number                | header_number            | headerData.fields[id="header_number"].value                | NEW DTC column to hold BP's style number. Populated BP→DTC. Same source as "BP Style#" match key column.
@@ -140,8 +140,11 @@ Phase 6 changes (2026-06-26, validated live):
      NUMBER"). Separate from header_number. Currently empty for most styles; will be
      populated by upstream integration. Pushed optionally to EXISTING DTC "LF Style#".
   5. New BeProduct field: brand_hk (field_id "brand_hk", name "Brand"). Single-value
-     string. Used as the Brand in the composite key. brands_multi ("BRANDS") is retained
-     in ktb_styles for reference but is no longer the key field.
+     string. Used as the Brand in the composite key. brands_multi ("BRANDS") was
+     retained in ktb_styles for reference at the time — REMOVED entirely 2026-09-03
+     (owner spec: "take out 'brands' from BP tables — use 'brand' (brand_hk) only
+     now"); no longer extracted into ktb_styles/staging at all. See AGENTS.md
+     decisions log.
   6. NO new BeProduct "Legacy Code" field. The existing customer_style_number
      (CUSTOMER STYLE NUMBER / PLM #) is the "Legacy Code" source. It will be populated
      by upstream integration; flows BP→DTC (was DTC→BP before Phase 6).

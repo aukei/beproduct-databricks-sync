@@ -111,7 +111,9 @@ INTERESTED_FIELDS = {
     "PRODUCT CATEGORY": "product_category",
     "PRODUCT SUB CATEGORY": "product_sub_category",
     "Division": "division",
-    "BRANDS": "brands",                        # MultiSelect (single value -> [value])
+    # "BRANDS": "brands" REMOVED 2026-09-03 (owner spec) -- "brand" (brand_hk,
+    # not in this script's field list before Phase 6 either) is now the only
+    # brand field the pipeline extracts/syncs; brands_multi is no longer used.
     "GARMENT FINISH": "garment_finish",
     "TECHPACK STAGE": "techpack_stage",
     "Lot Code": "lot_code",

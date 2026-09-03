@@ -203,8 +203,9 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
   (confirmed via `get_view_definition`) and has since been **confirmed
   correct by the project team** (2026-08-28).
 - **DTC → BeProduct**: Main Vendor (Sampling) (`parent_vendor`), Main Factory
-  (Sampling) (`factory`) [header]; Lot# (`drawing_number_walmart`) [colorway];
-  Main Factory Customer ID (no target → skipped).
+  (Sampling) (`factory`), Main Factory Customer ID (`customer_factory_code`,
+  wired up 2026-09-03 — see decisions log) [header]; Lot#
+  (`drawing_number_walmart`) [colorway].
   [REMOVED Phase 6]: "Legacy Code" DTC→BP. "Customer Style#" DTC column not created.
 - **Keys** (match, not overwritten): BP Style# (`header_number`), Color/Wash (`colorName`)
   [in-request]; [Customer, BP Style# (header_number), SeasonCode, Brand (brand_hk)]
@@ -402,7 +403,9 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
 - New field `brand_hk` (field_id: `brand_hk`, display name "Brand"): single-value string.
   Used as the Brand key in the composite key `[Customer, BP Style#, SeasonCode, Brand]`.
   Replaces `brands_multi` for request-routing and scope checks. `brands_multi` ("BRANDS")
-  is retained in ktb_styles as non-key metadata.
+  was retained in ktb_styles as non-key metadata at the time — **REMOVED entirely
+  2026-09-03** (owner spec: "take out 'brands' from BP tables — use 'brand'
+  (brand_hk) only now"); see decisions log.
 - Ignore field_id `brand` (display name "BRAND") — legacy, not the composite key Brand.
 - Composite key target: `[Customer, BP Style# (header_number), SeasonCode, Brand (brand_hk)]`
 - In-request match key target: `("BP Style#", "Color / Wash")` (was `("LF Style#", ...)`).
@@ -579,6 +582,48 @@ kept below for historical reference only (see decisions log):**
 
 ## Decisions on record
 
+- **`brands_multi` ("BRANDS") removed entirely from `ktb_styles`/staging
+  (2026-09-03, owner spec: "take out 'brands' from BP tables — use 'brand'
+  (brand_hk) only now").** Since Phase 6, `brand` (field_id `brand_hk`,
+  single-value) has been the composite-key Brand field; `brands_multi`
+  (`BRANDS`, multi-select) was kept alongside it purely as non-key metadata.
+  It is now removed from extraction entirely — `INTERESTED_FIELDS` in
+  `beproduct/p1p7_beproduct_style_sync.py` no longer includes `"BRANDS":
+  "brands"`, so `ktb_styles` stops gaining a `brands` column going forward
+  (existing historical rows/column are NOT retroactively dropped from
+  Delta — this only stops future population). `beproduct/
+  p1p7_beproduct_to_dtc_transform.py`'s staging `select(...)` and debug
+  `.show(...)` sample print both had their own `col("brands")` references
+  removed (the `.show()` one would otherwise crash once the column stops
+  existing on fresh rows). `standalone/beproduct_style_push.py` (a
+  manual/legacy push-back utility with its own independent, already-stale
+  copy of the field list) had its `"BRANDS": "brands"` entry removed too,
+  for consistency. `beproduct/p5utl_beproduct_master_data_sync.py`'s
+  `MASTER_DATA_FIELDS["brands"] = "brands_multi"` entry (a DIFFERENT
+  concept — the Brands MasterData CHOICE LIST, not a per-style value) and
+  `dtc_request_registry.brands` (parsed from the DTC request NAME string,
+  also unrelated) were deliberately left untouched — neither is the
+  per-style `brands_multi` field this change targets.
+- **BeProduct "Customer Factory Code" now the DTC->BeProduct target for
+  "Main Factory Customer ID" (2026-09-03, owner spec).** Previously
+  UNSUPPORTED (no BeProduct field had been identified — see the
+  `implement_prompts.txt` history: "Skip it for now"). Live-discovered
+  2026-09-03: BeProduct's `customer_factory_code` (display name "Customer
+  Factory Code", `fieldType: "Text"`, `MaxValueCharacters: 240`, tooltip
+  "Customer Factory SAP Code") is a real header-level field, present in
+  BOTH the "KTB" and "TEST KTB" folders (confirmed via `folder_schema` on
+  both, and present on live style records in both). Its `LockField: true`
+  UI property does **NOT** block API writes — live-tested via a
+  write-then-revert round-trip against a real KTB style
+  (`api.style.attributes_update(style_id, fields={"customer_factory_code":
+  ...})`): the write succeeded and persisted, then was cleanly reverted to
+  `None`. This is the same "declared read-only/locked flag is unreliable"
+  pattern already seen with DTC's `isReadOnly` (see `compute_non_writable_
+  cols`'s docstring in `sync/bom.py`) — BeProduct's `LockField` is
+  evidently also a UI-only lock, not an API-enforced one. Wired into
+  `sync/phase2.py`'s `REVERSE_HEADER_FIELDS` (moved out of the now-empty
+  `UNSUPPORTED_FIELDS` tuple, kept as an empty tuple rather than removed so
+  future unsupported columns have an obvious place to land).
 - **Costing chart key corrected to `material_no`, not `fabric_content`
   (2026-09-03, same-day owner correction).** An initial iteration keyed
   `COSTING_KEY` and the WIP-row disambiguation on `fabric_content`
@@ -1229,6 +1274,9 @@ kept below for historical reference only (see decisions log):**
   fieldId is provided. Live schema check (2026-06-18): `factory_id_no` is a
   read-only LabelText formula (`[factory]`); `customer_supplier_id` is a DropDown
   with only 2 predefined choices — neither is a suitable writable target.
+  **RESOLVED 2026-09-03**: wired up to `customer_factory_code` ("Customer
+  Factory Code") instead — a real, writable header field found live; see
+  decisions log for the full write-then-revert validation.
 - DTC blanks do not clear BeProduct unless `push_blanks=true`.
 - `customer_style_number` / DTC "Legacy Code" direction: **CHANGED in Phase 6
   (2026-06-26)** to **BeProduct → DTC** (optional; populated from BP's

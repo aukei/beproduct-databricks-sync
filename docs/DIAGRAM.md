@@ -164,7 +164,7 @@ flowchart TB
     G2      ==>|"true"| S6
     T_WIP   --> S6
     T_STAGING --> S6
-    S6      ==>|"attributes_update\nVendor/Factory/Lot#"| BP_API
+    S6      ==>|"attributes_update\nVendor/Factory/Customer Factory Code/Lot#"| BP_API
     S6      --> T_LOG2
     S5      -.->|"run_if=ALL_DONE"| S7
     DTC_WIP -->|"targeted re-pull\ninserted_ids from phase1_push"| S7
@@ -288,8 +288,8 @@ which sheet they came from. `PUSH_DIRECTORY` mode pushes only rows where
 |---|---|---|
 | `Main Vendor (Sampling)` | `parent_vendor` | header |
 | `Main Factory (Sampling)` | `factory` | header |
+| `Main Factory Customer ID` | `customer_factory_code` (wired up 2026-09-03) | header |
 | `Lot#` | `drawing_number_walmart` | colorway |
-| `Main Factory Customer ID` | — (skipped) | — |
 
 ### DTC FABRIC → Delta (Phase 8a) — ⚠️ RETIRED and DROPPED 2026-09-01
 

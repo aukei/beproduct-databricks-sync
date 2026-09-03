@@ -76,7 +76,7 @@ PHASE2_COLUMNS = [
     ("Lot#",                   "Lot code → BP drawing_number_walmart",    "existing"),
     ("Main Vendor (Sampling)", "Main vendor → BP parent_vendor",          "existing"),
     ("Main Factory (Sampling)","Main factory → BP factory",               "existing"),
-    ("Main Factory Customer ID","No BP target; logged and skipped",       "existing"),
+    ("Main Factory Customer ID","Main factory customer ID -> BP customer_factory_code", "existing"),
 ]
 
 

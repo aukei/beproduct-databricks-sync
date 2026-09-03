@@ -33,7 +33,7 @@ Each field syncs in exactly ONE direction. A field is never pushed both ways.
 | **Main Vendor (Sampling)**| **DTC → BeProduct**| header `parent_vendor`                        | |
 | **Main Factory (Sampling)**|**DTC → BeProduct**| header `factory`                              | |
 | **Lot#**                  | **DTC → BeProduct**| **colorway `drawing_number_walmart`**         | |
-| **Main Factory Customer ID**| DTC → BeProduct  | *no BeProduct field yet → skipped + logged*   | |
+| **Main Factory Customer ID**| **DTC → BeProduct**| header `customer_factory_code`               | Wired up 2026-09-03 (was unsupported) |
 | Style Image               | BeProduct → DTC (image only) | `front_image_url` (Phase 3, binary) | See `PHASE3_WORKFLOW.md` |
 | *Sample status columns (×6)* | BeProduct → DTC | sample apps `proto`/`preline`/`sms`/`fit`/`pp`/`top` | Phase 7; JSON list per app |
 
@@ -101,7 +101,9 @@ evaluated and chosen for simplicity and correctness (see point 4 of the design).
 5. `phase2.build_beproduct_updates()` → changed-only per-style payloads;
    `phase2.to_sdk_calls()` → `attributes_update(**call)`.
 6. Blank DTC values do **not** clear BeProduct unless `push_blanks=true`.
-7. `Main Factory Customer ID` is skipped (no target field) and logged.
+7. `UNSUPPORTED_FIELDS` is currently empty (`Main Factory Customer ID` was the last
+   entry, wired up to `customer_factory_code` 2026-09-03) — kept as an empty tuple
+   so future unsupported columns have an obvious place to land.
 8. Everything is logged to `lft.beproduct.dtc_to_beproduct_sync_log`. `dry_run=true`
    computes + logs without writing.
 

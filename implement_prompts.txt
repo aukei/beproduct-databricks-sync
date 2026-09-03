@@ -628,7 +628,7 @@ phase 3 while not a blocker, expects to fill all rows (style x color x material)
 - the check should be against "bp_style_no" + "lineplan_ref" + "material_no"
 - dtc.content: while it will be populated by DTC's own trigger, for our purpose we can bring BOM.material_name to populate it. Then phase9a will not be blocked.
 
-## check docs
 - take out 'brands' from BP tables - use 'brand' (brand_hk) only now
-
+- BeProduct "Customer Factory Code" should be populated with DTC "Main Factory Customer ID"
 - update docs
+

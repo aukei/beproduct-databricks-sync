@@ -10,14 +10,24 @@ partition these columns are NEVER pushed BeProduct -> DTC (see sync/phase1.py):
     Customer Style#             fieldId "customer_style_number"        header
     Main Vendor (Sampling)      fieldId "parent_vendor"                header
     Main Factory (Sampling)     fieldId "factory"                      header
+    Main Factory Customer ID    fieldId "customer_factory_code"        header
     Lot#                        fieldId "drawing_number_walmart"       colorway
-    Main Factory Customer ID    (no BeProduct field yet -> SKIPPED)    -
 
 Phase 6 update (2026-06-26):
     "Legacy Code" DTC column was REMOVED from REVERSE_HEADER_FIELDS. It is now
     a BeProduct->DTC field (populated from BP's customer_style_number in Phase 1).
     The new DTC column "Customer Style#" takes the DTC->BP role for
     customer_style_number.
+
+"Main Factory Customer ID" wired up 2026-09-03 (owner spec) — previously
+UNSUPPORTED (no BeProduct target had been identified). Live-confirmed the
+same day: BeProduct's `customer_factory_code` ("Customer Factory Code",
+`fieldType: "Text"`, tooltip "Customer Factory SAP Code") is a real,
+WRITABLE header field via `api.style.attributes_update` — its
+`LockField: true` UI property does NOT block API writes (live-tested:
+write succeeded and persisted, then reverted), the same pattern already
+seen with DTC's unreliable `isReadOnly` flag. Present in both the "KTB" and
+"TEST KTB" folders.
 
 The actual write uses the BeProduct SDK in one call per style:
 
@@ -68,6 +78,9 @@ REVERSE_HEADER_FIELDS: Dict[str, str] = {
     # -> DTC "Legacy Code" only.
     "Main Vendor (Sampling)": "parent_vendor",
     "Main Factory (Sampling)": "factory",
+    # Wired up 2026-09-03 (owner spec) -- previously UNSUPPORTED. Live-confirmed
+    # writable via attributes_update; see module docstring.
+    "Main Factory Customer ID": "customer_factory_code",
 }
 
 # Colorway-level fields: DTC column -> colorway fieldId.
@@ -76,7 +89,9 @@ REVERSE_COLORWAY_FIELDS: Dict[str, str] = {
 }
 
 # DTC columns with no BeProduct target yet: never written, reported if non-blank.
-UNSUPPORTED_FIELDS = ("Main Factory Customer ID",)
+# Empty as of 2026-09-03 (Main Factory Customer ID wired up above) -- kept as a
+# tuple (not removed) so future unsupported columns have an obvious place to land.
+UNSUPPORTED_FIELDS: Tuple[str, ...] = ()
 
 # NOTE: "Legacy Code" and "Customer Style#" are intentionally absent from all
 # Phase 2 dicts. "Legacy Code" is BeProduct->DTC only (see phase1.FIELD_MAPPING),

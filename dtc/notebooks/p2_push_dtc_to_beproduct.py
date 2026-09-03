@@ -10,12 +10,18 @@ DTC data back into the corresponding BeProduct style:
     Customer Style#             customer_style_number                  header
     Main Vendor (Sampling)      parent_vendor                          header
     Main Factory (Sampling)     factory                                header
+    Main Factory Customer ID    customer_factory_code                  header
     Lot#                        drawing_number_walmart                 colorway
-    Main Factory Customer ID    (no target yet -> skipped/logged)      -
 
 Phase 6 update (2026-06-26):
     "Legacy Code" replaced by "Customer Style#" as the DTC->BP vehicle for
     customer_style_number. "Legacy Code" is now BeProduct->DTC (Phase 1).
+
+"Main Factory Customer ID" wired up 2026-09-03 (owner spec) — previously had
+no BeProduct target and was skipped/logged. Live-confirmed BeProduct's
+`customer_factory_code` ("Customer Factory Code") is a real, writable
+header field; see `sync/phase2.py`'s module docstring for the live-test
+details.
 
 Inputs (already produced by the daily pipeline):
   - DTC pulled table:  lft.beproduct.dtc_wip_<customer>   (pull_masters_to_delta)

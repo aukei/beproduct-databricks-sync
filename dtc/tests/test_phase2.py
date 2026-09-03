@@ -11,6 +11,10 @@ Phase 6 update (2026-07-02):
   - No DTC->BP path for customer_style_number.
   - DTC->BP header fields are now only: Main Vendor (Sampling), Main Factory (Sampling).
   - "Lot#" (colorway) unchanged.
+
+2026-09-03 update:
+  - "Main Factory Customer ID" wired up to BeProduct fieldId "customer_factory_code"
+    (was UNSUPPORTED). UNSUPPORTED_FIELDS is now empty.
 """
 import sys
 from pathlib import Path
@@ -57,8 +61,10 @@ check(A.fields.get("factory") == "F1", "Main Factory -> factory")
 check("parent_vendor" not in A.fields, "unchanged vendor is a NOOP (not in payload)")
 check(A.colorways.get("c1", {}).get("drawing_number_walmart") == "100", "Lot# c1 -> colorway field")
 check("c2" not in A.colorways, "unchanged Lot# c2 is a NOOP")
-check(s["skipped_unsupported"] == 1, "Main Factory Customer ID skipped (no BeProduct target)")
-check(any(e.reason == "unsupported_field" for e in plan.exceptions), "unsupported logged")
+check(A.fields.get("customer_factory_code") == "CUST9",
+      "Main Factory Customer ID -> customer_factory_code (wired up 2026-09-03, was unsupported)")
+check(s["skipped_unsupported"] == 0, "UNSUPPORTED_FIELDS is now empty -- nothing skipped")
+check(not any(e.reason == "unsupported_field" for e in plan.exceptions), "no unsupported-field exceptions logged")
 
 print("\n[2] header value conflict within one style")
 rows2 = [
