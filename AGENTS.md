@@ -623,6 +623,40 @@ kept below for historical reference only (see decisions log):**
 
 ## Decisions on record
 
+- **Phase 3 sibling-copy: two live-discovered bugs, both fixed 2026-09-04
+  (owner-reported: "KTB SS28 Wrangler Collaborations" rows stayed blank
+  after a phase3_images run despite sibling rows already having images).**
+  1. **Silent dedup skip.** `compute_image_uploads()` had a "only act once
+     per (BP Style#, Color / Wash) key" dedup predating Phase 10 — Phase 10
+     can create MULTIPLE physical WIP rows sharing the exact same (style,
+     color) key (one "Main Fabric" row + one duplicate per "Fabric"
+     segment). The dedup treated the SECOND such row as "already handled"
+     the instant it saw the FIRST row's key — even when the first had a
+     real image and the second was genuinely blank — silently skipping it
+     with NO upload and NO skip record at all (invisible in every
+     summary/log; this is why rows 9/10 of the affected request never even
+     appeared as attempted). **Fixed** by removing the key-based dedup
+     entirely — every physical row is now evaluated independently by its
+     own `rowId`/`rowIndex`, which the "already imaged" / sibling-copy /
+     missing-`rowIndex` checks already operate on anyway. 2 new unit tests
+     (`test_phase3.py` `[15e]`-`[15f]`).
+  2. **401 Unauthorized downloading a sibling-copy source URL.** Unlike
+     BeProduct CDN URLs (self-contained SAS token in the query string),
+     DTC's own image-hosting URLs (returned after our own earlier uploads,
+     used as the sibling-copy source) require the SAME `x-api-key` auth as
+     every other DTC API call — `download_image()`'s anonymous
+     `requests.get` returned 401 for every sibling-copy attempt, live
+     visible as `sync_log.reason='download_failed'`. **Fixed** in
+     `p3_beproduct_to_dtc_images.py`: `download_image()` now attaches
+     `x-api-key` when-and-only-when the URL's host matches the DTC
+     connector's own `base_url` host (BeProduct CDN downloads stay
+     anonymous/unchanged).
+  **Live-reverified same day** against the exact reported request
+  (`6a8fb9fed0062ee92c1f7d31`, "KTB SS28 Wrangler Collaborations"): before
+  the fix, the plan showed only 3 of 5 blank rows even attempted (2 hidden
+  by the dedup bug) and all 3 attempted uploads failed (401); after the
+  fix, the plan correctly showed all 5 blank rows, and all 5 uploads
+  succeeded — every row in the request now has a Style Image.
 - **`brands_multi` ("BRANDS") removed entirely from `ktb_styles`/staging
   (2026-09-03, owner spec: "take out 'brands' from BP tables — use 'brand'
   (brand_hk) only now").** Since Phase 6, `brand` (field_id `brand_hk`,

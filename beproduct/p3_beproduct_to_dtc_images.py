@@ -72,6 +72,7 @@ import io
 import json
 import uuid
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 import requests
 from PIL import Image
@@ -184,9 +185,23 @@ def log(rows, name, request_id, operation, key, status, reason="", detail="", pa
                  (json.dumps(payload) if payload is not None else None)))
 
 
+# Sibling-copy uploads (see phase3.compute_image_uploads) source from a DTC-
+# hosted image URL (returned by our own earlier upload to this SAME DTC
+# environment) rather than BeProduct's CDN. Live-discovered 2026-09-04:
+# unlike BeProduct CDN URLs (self-contained SAS token in the query string),
+# DTC's own image URLs require the SAME x-api-key auth as every other DTC
+# API call -- an anonymous GET returns 401 Unauthorized. Detected by
+# comparing the URL's host against the connector's own base_url host, so
+# the same x-api-key already used for this run's DTC calls is attached
+# ONLY for DTC-hosted URLs (BeProduct CDN downloads stay anonymous/unchanged).
+_dtc_host = urlparse(connector.client.base_url).netloc
+
+
 def download_image(url, timeout):
-    """Fetch image bytes from the BeProduct CDN; return (bytes, content_type)."""
-    resp = requests.get(url, timeout=timeout)
+    """Fetch image bytes from the BeProduct CDN or a DTC-hosted sibling-copy
+    URL (see module comment above); return (bytes, content_type)."""
+    headers = {"x-api-key": api_key} if urlparse(url).netloc == _dtc_host else None
+    resp = requests.get(url, timeout=timeout, headers=headers)
     resp.raise_for_status()
     ctype = (resp.headers.get("Content-Type") or "").split(";")[0].strip() or None
     return resp.content, ctype

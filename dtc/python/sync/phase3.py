@@ -255,16 +255,25 @@ def compute_image_uploads(
                 sibling_image_by_style[style_no] = existing_url
 
     plan = ImagePlan()
-    seen: set = set()
 
     for r in dtc_rows:
         key = _match_key(r, lf_col, color_col)
         if key == (None, None):
             continue  # blank/placeholder DTC row
-        if key in seen:
-            continue  # only act once per key (sheet dupes ignored here)
-        seen.add(key)
 
+        # NOTE: deliberately NO "only act once per (style, color) key" dedup
+        # here (removed 2026-09-04, live-discovered bug) -- Phase 10 can
+        # create MULTIPLE physical WIP rows sharing the exact same (BP
+        # Style#, Color / Wash) key (one "Main Fabric" row + one duplicate
+        # per "Fabric" segment, see sync/bom.py), each with its OWN
+        # Style Image cell/rowIndex. The old dedup treated the SECOND such
+        # row as "already handled" the moment it saw the FIRST row's key --
+        # even when the first row had a real image and the second was
+        # genuinely blank -- silently skipping it with no upload AND no
+        # skip record at all (invisible in every summary/log). Every
+        # physical row is now evaluated independently by its own
+        # rowId/rowIndex, which is what the "already imaged" / sibling-copy
+        # / rowIndex checks below already operate on anyway.
         if is_image_populated(r):
             continue  # already has an image -> nothing to do (idempotent)
 

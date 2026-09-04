@@ -196,6 +196,36 @@ check(len(plan.uploads) == 0 and len(plan.skips) == 1
       and plan.skips[0].reason == "missing_row_index",
       "missing rowIndex still blocks a sibling-copy upload, same as a normal one")
 
+print("  [15e] live-discovered bug (2026-09-04): TWO rows sharing the SAME (BP Style#, Color) "
+      "key -- e.g. Phase 10's Main Fabric + Fabric-segment duplicate rows -- must each be "
+      "evaluated independently by their OWN rowId/rowIndex, not silently skipped once the "
+      "FIRST row's key has been seen")
+dtc_rows = [
+    {"BP Style#": "S6", "Color / Wash": "RedGingham", "rowId": "r9", "rowIndex": 5,
+     "Style Image": "https://dtc-api.example.net/api/v1/images/s6-main.png"},   # Main Fabric row, imaged
+    {"BP Style#": "S6", "Color / Wash": "RedGingham", "rowId": "r10", "rowIndex": 9},  # Fabric-segment duplicate, BLANK
+]
+plan = compute_image_uploads(dtc_rows, [])
+check(len(plan.uploads) == 1, "the SECOND row (same key, blank image) is NOT silently skipped")
+check(plan.uploads[0].row_id == "r10" and plan.uploads[0].row_index == 9,
+      "upload targets the blank duplicate row specifically, by its own rowId/rowIndex")
+check(plan.uploads[0].image_url == "https://dtc-api.example.net/api/v1/images/s6-main.png"
+      and plan.uploads[0].source == "sibling_copy",
+      "copies from the SAME-style sibling row (which happens to also share Color here) via sibling-copy")
+
+print("  [15f] same dedup scenario, but the SECOND row is a genuinely different colorway "
+      "(not a material duplicate) -- also must not be skipped")
+dtc_rows = [
+    {"BP Style#": "S7", "Color / Wash": "Pink", "rowId": "r11", "rowIndex": 7,
+     "Style Image": "https://dtc-api.example.net/api/v1/images/s7.png"},
+    {"BP Style#": "S7", "Color / Wash": "Sweet Taffy", "rowId": "r12", "rowIndex": 12},  # blank, different color
+]
+plan = compute_image_uploads(dtc_rows, [])
+check(len(plan.uploads) == 1 and plan.uploads[0].row_id == "r12",
+      "different-colorway blank row still gets the sibling-copy upload (was never affected by the "
+      "(style,color)-key dedup bug since its key genuinely differs -- confirms the fix doesn't "
+      "regress the already-passing case)")
+
 # ---------------------------------------------------------------------------
 print("\n" + "=" * 60)
 if _failures:

@@ -52,19 +52,27 @@ read. See `AGENTS.md`'s decisions log for the full job-split rationale.
    job last ran, or whether it's running concurrently with this job right now.
 2. Matches each DTC row to its BeProduct staging row on the in-request key
    `(BP Style#, Color / Wash)` (Phase 6; was `LF Style#`).
-3. **Sibling-copy check (added 2026-09-03, owner spec)**: for every
-   blank-image row, first checks whether ANY OTHER row with the SAME `BP
-   Style#` in this request already has a real Style Image (a style's front
-   image is a HEADER-level BeProduct attribute — one per style, not per
-   colorway — so every colorway is expected to carry the same image). If a
-   sibling has one, its own already-uploaded DTC-hosted image URL is reused
-   as the source — no BeProduct CDN download at all for this row.
+3. **Sibling-copy check (added 2026-09-03, owner spec)**: for EVERY
+   blank-image row (each evaluated independently by its own `rowId`/
+   `rowIndex` — deliberately NO dedup by `(BP Style#, Color / Wash)`, fixed
+   2026-09-04 after Phase 10's material-duplicate rows exposed a silent-skip
+   bug in an earlier version, see AGENTS.md decisions log), first checks
+   whether ANY OTHER row with the SAME `BP Style#` in this request already
+   has a real Style Image (a style's front image is a HEADER-level
+   BeProduct attribute — one per style, not per colorway — so every
+   colorway is expected to carry the same image). If a sibling has one, its
+   own already-uploaded DTC-hosted image URL is reused as the source — no
+   BeProduct CDN download at all for this row. Downloading that DTC-hosted
+   URL requires the SAME `x-api-key` auth as every other DTC call (fixed
+   2026-09-04 — an anonymous download returned 401; BeProduct CDN downloads
+   still need no extra auth, they carry their own SAS token).
 4. Otherwise (no sibling has an image yet), falls back to the original path:
    for a row that is **blank-image AND** whose BeProduct staging row has a
    **valid `front_image_url`**: downloads the image from the BeProduct CDN,
    classifies it, transcodes if needed, then POSTs it to the DTC image
    endpoint. (Both paths POST via the same multipart upload mechanics —
-   only WHICH url is downloaded differs; see `ImageUploadOp.source`.)
+   only WHICH url is downloaded differs, and whether `x-api-key` is
+   attached; see `ImageUploadOp.source`.)
 5. Logs every decision (uploaded / converted / skipped / failed) to
    `lft.beproduct.beproduct_to_dtc_sync_log` with `stage='images'`.
 
