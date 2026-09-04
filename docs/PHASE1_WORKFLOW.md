@@ -236,6 +236,9 @@ request are marked. Core: `phase1.compute_orphan_marks`, wired in
 - Allowed columns come from the **view definition** (`GET /v1/views/{viewId}`,
   `DTCConnector.get_view_column_names`); payloads are filtered to it so a PATCH never
   trips `'<col>' is not found in the mapping`.
+- **PATCH bodies must be LEAN** (DTC developer advice) — see `AGENTS.md` Ground
+  rule #6 for the complete, canonical allow-list across all 3 WIP-PATCH call
+  sites (Phase 1/10/9b) and why each is already structurally scoped to it.
 
 Full endpoint detail + the BeProduct/DTC data model live in `docs/ARCHITECTURE.md`
 and `docs/DTC_GUIDE.md`.

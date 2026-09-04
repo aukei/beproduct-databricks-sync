@@ -620,6 +620,12 @@ phase 3 while not a blocker, expects to fill all rows (style x color x material)
     - Fabric_Group
     - Placement
     - Mill_Fabric_Article
+    - Gender
+    - Supplier (hardcode "Supplier")
+    - Content 
+    - * HTS Code
+    - * Duty Rate
+    - * Tariff
   do not include other fields in PATCH body.
 
 ## Costing_chart clarifications

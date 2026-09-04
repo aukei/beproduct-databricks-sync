@@ -89,6 +89,8 @@ tariff_rate            | NULL         | Phase 9b: NT Orbit Duty Tools API (not y
 updated_at             | derived      | current_timestamp() at build time
 
 WIP HTS / Duty field names (exact DTC column names, confirmed 2026-07-17)
+-- this IS the canonical Phase 9b allow-list referenced in AGENTS.md's
+Ground rule #6 (lean sheetData PATCH bodies) --
 --------------------------------------------------------------------------
   Main Factory HTS Code           Main Factory Duty Rate (US/CA/MX)
   Factory 1 - HTS code            Factory 1 - Duty Rate (US/CA/MX)

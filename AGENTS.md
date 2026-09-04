@@ -169,9 +169,15 @@ fieldId, JSONPath, sync direction. Always update it first, then the code constan
 | BeProduct sample-app status (title → column prefix) | `SAMPLE_APPS` | `beproduct/p1p7_beproduct_style_sync.py` + `beproduct/00_init_style_app_registry.py` |
 | BeProduct sample submits → DTC (Phase 7) | `SAMPLE_SUBMIT_FIELDS` + `format_sample_field` | `dtc/python/sync/samples.py` (+ `phase1.FIELD_MAPPING`, transform staging) |
 | BeProduct → DTC transform (denormalize) | `FIELD_MAPPING` + staging `select` | `beproduct/p1p7_beproduct_to_dtc_transform.py` |
+| DTC WIP costing/duty push | `duty.WIP_HTS_COL` / `duty.WIP_DUTY_COL` / `duty.WIP_TARIFF_COL` | `dtc/python/sync/duty.py` |
 
 Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
 `dtc/tests/test_phase3.py`, `dtc/tests/test_samples.py`.
+
+**Every one of the above is also a WIP `sheetData` PATCH allow-list** — see
+Ground rule #6 for the complete, canonical field set and the lean-PATCH-body
+requirement (each payload builder above is the sole source of PATCH keys, so
+this stays true by construction; verify it stays true after any change).
 
 ### Current direction partition
 
@@ -258,6 +264,41 @@ Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
 5. **In-request match key = (BP Style#, Color/Wash)**; season+brand are fixed per
    request. Brand is one-per-request and agrees with the request name. (Phase 6:
    was (LF Style#, Color/Wash). Composite key uses brand_hk, not brands_multi.)
+6. **Every DTC WIP `sheetData` PATCH body must be LEAN** — include only fields
+   from the canonical allow-list below (a subset per call is fine; never
+   anything outside it), per explicit DTC-developer advice that PATCH bodies
+   should be as small as possible. Batch multiple field-changes for the SAME
+   row into ONE PATCH object whenever they're computed in the same pass
+   (never issue two separate PATCH calls for one row when they could be
+   merged) — see `phase1.chunked()` usage in all three sites below.
+   Live-confirmed 2026-09-04 that all three current WIP-PATCH call sites are
+   already structurally compliant (the payload builder itself is the only
+   source of keys, so nothing else can leak in):
+
+   **Phase 1 + Phase 10 fields** (`phase1.FIELD_MAPPING` / `bom.to_wip_fields()`
+   — style×color×material data, written at Steps 10/30):
+   `Product Status`, `Style Description`, `Class`, `Sub Class`, `Division`,
+   `Brand`, `Color / Wash`, `Garment Finish`, `Tech Pack Stage`, `BP Style#`,
+   `LF Style#`, `Legacy Code`, `Gender`, `Supplier` (hardcoded prefill
+   default-fill value, not sourced from BeProduct), `Fabric Group`,
+   `Placement`, `Mill Fabric Article #`, `Content` (Phase 10 writes this
+   from BOM `material_name` — see decisions log), `Proto Sample - Sample
+   Status`, `Pre-line Sample - Status`, `SMS - Sample Status`, `2nd Fit
+   Sample Approval Status`, `PP Sample Submission Approval Status`, `TOP
+   Sample Approval Status`. `Style Image` is explicitly EXCLUDED from every
+   sheetData PATCH (image cells can ONLY be set via Phase 3's separate
+   multipart `/images` endpoint — DTC rejects any sheetData write to it).
+
+   **Phase 9b fields** (`duty.WIP_HTS_COL` / `duty.WIP_DUTY_COL` /
+   `duty.WIP_TARIFF_COL` — costing/duty data, written at Step 55, a
+   SEPARATE PATCH call from Phase 1/10's): per vendor slot (`Main`/`1`/`2`/`3`)
+   — `"<slot> Factory HTS Code"` (`"Main Factory HTS Code"` for Main),
+   `"<slot> Factory Duty Rate (US/CA/MX)"`. Tariff Rate columns
+   (`"<slot> Factory Tariff rate"`) are DEFINED in code
+   (`duty.WIP_TARIFF_COL`) but NOT YET LIVE in the WIP view
+   (`duty.WIP_TARIFF_COLS_LIVE = False`, confirmed 2026-07-17) — tariff_rate
+   currently stays `costing_chart`-only; flip that flag once DTC adds the
+   columns, no other code change needed.
 
 ## Verified discoveries log (append-dated; do not delete)
 

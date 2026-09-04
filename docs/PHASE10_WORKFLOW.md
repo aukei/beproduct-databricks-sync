@@ -203,11 +203,16 @@ Delta `col_*` normalized names):
 ## Push mechanics
 
 UPDATEs are sent as `sheetData` PATCH objects keyed by `rowId` (existing
-rows); INSERTs are sent keyed by `rowIndex` (new rows, built by copying the
-FULL original row's fields from `data_json` and overriding just the 3 BOM
-fields) — matches the established "cannot mix `rowId` and `rowIndex` in one
-PATCH call" contract (`DTCConnector.patch_rows`; see Phase 9b's own
-`repull_dtc_bom`/PATCH-batching notes and `AGENTS.md`'s `create_sheet` note).
+rows, carrying ONLY the fields actually being upserted — see AGENTS.md
+Ground rule #6); INSERTs are sent keyed by `rowIndex` (new rows, built by
+copying the original row's fields from `data_json` via
+`bom.build_insert_row_payload`, MINUS identity fields and any column DTC
+marks non-writable — `type=="contact"` or a truthy `formula`, see
+`bom.compute_non_writable_cols` — then overriding the 4 BOM fields: Fabric
+Group / Placement / Mill Fabric Article # / Content) — matches the
+established "cannot mix `rowId` and `rowIndex` in one PATCH call" contract
+(`DTCConnector.patch_rows`; see Phase 9b's own `repull_dtc_bom`/
+PATCH-batching notes and `AGENTS.md`'s `create_sheet` note).
 
 This notebook never mutates the local Delta `dtc_wip_ktb` table directly —
 it pushes to the LIVE DTC sheet only. `repull_dtc_bom` (a full
