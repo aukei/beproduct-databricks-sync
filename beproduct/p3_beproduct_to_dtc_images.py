@@ -13,11 +13,23 @@ EXISTING row:
     body: multipart/form-data, image bytes as a file part   -> (status TBD)
 
 Because the endpoint targets an existing row by rowIndex, this MUST run AFTER
-beproduct_to_dtc_push (Phase 1), which creates/updates the rows. The orchestrator
-runs a fresh DTC pull (pull_masters_to_delta) just before this so dtc_wip_<cust>
-reflects the rows Phase 1 just inserted; this notebook itself ALSO re-reads each
-sheet live (connector.get_sheet) so it sees the freshest rowIndex + Style Image
-state and never acts on stale data.
+beproduct_to_dtc_push (Phase 1), which creates/updates the rows.
+
+**Runs as its OWN independent Databricks job** (`BeProduct_DTC_sync_images`,
+split out 2026-09-03 from the main pipeline — see AGENTS.md decisions log),
+not sequenced after any repull step. It does NOT read `dtc_wip_<customer>`
+(the Delta WIP table) at all -- instead, for every in-scope request, it
+re-reads that sheet LIVE (`connector.get_sheet`) right before deciding what
+to upload, so the actual row/image state is always fresh regardless of when
+the main job last ran or whether this job runs concurrently with it. What it
+DOES still depend on from Delta -- and does NOT refresh itself -- are
+`dtc_request_mapping` (sheet_id/view_id per in-scope request, written by the
+main job's `request_manager`) and the staging table (`front_image_url` per
+row, written by the main job's `transform`); both reflect whatever the main
+job's most recent run last left there. A brand-new request/style created
+since the main job last ran therefore won't be picked up until the main job
+runs again -- everything about EXISTING requests' image state, however, is
+always current via the live `get_sheet` call.
 
 Workflow (per in-scope resolved request):
   1. Reload the sheet live and note, per row, whether "Style Image" is populated.

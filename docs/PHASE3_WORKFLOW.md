@@ -27,21 +27,29 @@ untouched, so re-runs are idempotent.
 
 ---
 
-## Flow
+## Flow — runs as its own independent job (changed 2026-09-03)
 
-```
-(after p1p7_beproduct_to_dtc_push, Phase 1)
-1. Refresh dtc_wip_<customer>           dtc/notebooks/p1_pull_masters_to_delta.py
-   (so it reflects rows Phase 1 inserted)
-2. Image upload                         beproduct/p3_beproduct_to_dtc_images.py
-   → DTC "Style Image" cell (blank cells only)
-```
+`phase3_images` (`beproduct/p3_beproduct_to_dtc_images.py`) runs as the
+**`BeProduct_DTC_sync_images`** job — fully independent of the main
+pipeline (`BeProduct_DTC_sync_dag`), not sequenced after any repull step at
+all. It does NOT read `dtc_wip_<customer>` (the Delta WIP table) — the
+freshness of each row's Style Image state comes entirely from step 1 below
+(a live per-request DTC read), not from any Delta snapshot. It still
+depends on two Delta tables it does NOT refresh itself:
+`dtc_request_mapping` (sheet_id/view_id per request, written by the main
+job's `request_manager`) and the staging table (`front_image_url` per row,
+written by the main job's `transform`) — both reflect whatever the main
+job's most recent run last left there. A brand-new request/style created
+since then won't be picked up until the main job runs again; everything
+about an EXISTING request's image state is always current via step 1's live
+read. See `AGENTS.md`'s decisions log for the full job-split rationale.
 
 `p3_beproduct_to_dtc_images.py`, per in-scope resolved request:
 
-1. **Reloads the sheet live** (`connector.get_sheet`) for the freshest `rowIndex`
-   and current Style Image state (it therefore also sees rows Phase 1 just
-   inserted, independent of step 1's table refresh).
+1. **Reloads the sheet live** (`connector.get_sheet`) for the freshest
+   `rowIndex` and current Style Image state — this is what makes the
+   row/image state always current, independent of whether/when the main
+   job last ran, or whether it's running concurrently with this job right now.
 2. Matches each DTC row to its BeProduct staging row on the in-request key
    `(BP Style#, Color / Wash)` (Phase 6; was `LF Style#`).
 3. **Sibling-copy check (added 2026-09-03, owner spec)**: for every
