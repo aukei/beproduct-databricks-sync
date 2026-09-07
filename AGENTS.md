@@ -712,16 +712,28 @@ kept below for historical reference only (see decisions log):**
   silently ignored/never persists (same non-obvious-rejection class as the
   formula/image fields found earlier — `isReadOnly: false` here too,
   equally unreliable). This does not affect correctness of the Phase 2
-  read-and-forward logic (reading a DTC-computed lookup value and pushing
-  it elsewhere is fine, mechanically identical to `parent_vendor`/
-  `factory`) — it only means a genuine non-null value can't be manufactured
-  by hand for testing; it only appears once a row's assigned factory has a
-  populated "Customer Factory ID" in the real XTS Factory Master data
-  (the same source Phase 0 already syncs into `beproduct_directory`). No
-  current KTB WIP row has both a real `BP Style#` and a populated "Main
-  Factory Customer ID" simultaneously, so full end-to-end validation with
-  a real non-null value is deferred until live production data provides
-  one.
+   read-and-forward logic (reading a DTC-computed lookup value and pushing
+   it elsewhere is fine, mechanically identical to `parent_vendor`/
+   `factory`) — it only means a genuine non-null value can't be manufactured
+   by hand for testing; it only appears once a row's assigned factory has a
+   populated "Customer Factory ID" in the real XTS Factory Master data.
+   **Correction**: NOT the same data Phase 0 syncs into `beproduct_directory`
+   — `xts_master.py` deliberately maps only Factory Code -> `directory_id`;
+   "Customer Factory ID" is a distinct XTS field left unmapped (available in
+   `dtc_xts_master_ktb.data_json` only), so `beproduct_directory` cannot be
+   used to manufacture/inspect a test value either.
+   **Live-validated end-to-end 2026-09-04** (owner-reported: DTC showed
+   "132" for `KTB-00016` / factory "SUPPLIER HSDJHK" but a live re-read
+   initially returned `None`) — confirmed via `dtc_xts_master_ktb.data_json`
+   that "132" is genuinely present at the XTS Factory Master source; a
+   second live re-read minutes later returned `"132"` on the WIP row itself
+   (the DTC lookup had simply not resolved yet on the first read — same
+   latency class as `Content`/`Fabric Type`, not a pipeline bug). Re-running
+   `phase2_push` immediately picked it up: sync log payload
+   `{"customer_factory_code": "132", ...}`, and `api.style.attributes_get`
+   confirmed BeProduct's `KTB-00016` header now genuinely holds
+   `customer_factory_code = 132`. No code change was needed — the mapping
+   works correctly the moment DTC's lookup has resolved.
 - **Costing chart key corrected to `material_no`, not `fabric_content`
   (2026-09-03, same-day owner correction).** An initial iteration keyed
   `COSTING_KEY` and the WIP-row disambiguation on `fabric_content`
