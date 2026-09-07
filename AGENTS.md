@@ -623,6 +623,81 @@ kept below for historical reference only (see decisions log):**
 
 ## Decisions on record
 
+- **Costing chart completeness filters hardened + NT Orbit lookup scope
+  widened (2026-09-07, owner spec, live-discovered while validating a
+  reported stale `tariff_rate=null` on `KTB-00023`/`WV-0063`/BD).**
+  1. **`p9a_build_costing_chart.py` Step 1b gained two more exclusions**
+     (in addition to the existing `material_no IS NOT NULL` filter):
+     `bp_style_no IS NULL` (legacy "(BACKUP)"-request pollution — confirmed
+     4 such rows were reaching `costing_chart` before this fix, now 0) and
+     `fabric_content IS NULL OR fabric_content = "Main Fabric"` (guards
+     against a WIP row whose `Content` field is still literally the
+     `Fabric Group` placeholder-like string — the live-confirmed root cause
+     of the original bad classification, see next entries).
+  2. **`color_name` added to `duty.PRODUCT_DESCRIPTION_COLS`** — REVERSES
+     the earlier design intent (`cache_key()`'s old docstring explicitly
+     said multiple colors of the same style/slot should share one NT Orbit
+     cache entry, since color doesn't affect HS classification). Owner
+     decision: a new row now only reuses a previous NT Orbit result when
+     `style_description`, `color_name`, `fabric_content`, `gender`,
+     `class_name`, AND `sub_class` all match exactly — different colors
+     always get their own lookup/cache entry now. Since
+     `PRODUCT_DESCRIPTION_COLS` feeds both the actual NT Orbit request text
+     and the persistent cache key (derived from the same string), this one
+     change achieves both. New tests: `test_duty.py [2b]`.
+  3. **Live-confirmed NT Orbit IS reproducible**: a fresh call with the
+     CURRENT (post-`Content`-fix) product description returns identical
+     `hts_code=6202407511`/`duty_rate=0.277`/`tariff_rate=0.1` for BOTH
+     BD and IN origins — the previously-observed BD/IN asymmetry in
+     `costing_chart` was a data-staleness artifact, not an API
+     non-determinism issue (see next entry).
+  4. **Root cause of the stale BD row — a self-reinforcing loop via the
+     WIP "fallback" mechanism**: `p9a_build_costing_chart.py` re-reads
+     `hts_code`/`duty_rate_us/ca/mx` FROM THE LIVE WIP ROW'S own per-slot
+     columns on every rebuild ("NT Orbit fallback" — whatever was
+     previously pushed there persists across rebuilds), while `tariff_rate`
+     always resets to `NULL` (no live WIP column exists for it yet,
+     `WIP_TARIFF_COLS_LIVE=False`). A pre-`Content`-fix run had pushed a bad
+     classification (from a nonsensical `"... Main Fabric ..."` product
+     description) onto the live WIP row's "Main Factory HTS Code"/"Main
+     Factory Duty Rate (US)" cells. Every subsequent rebuild re-adopted
+     those stale values as non-blank, so `duty.markets_needing_lookup()`
+     (which only checks whether `duty_rate_us` itself is blank) always
+     considered the US market "already done" — the US market was never
+     re-queried, so `tariff_rate` (no WIP fallback, always reset to NULL)
+     could never be filled again. **Fixed** by manually clearing the stale
+     "Main Factory HTS Code"/"Main Factory Duty Rate (US/CA/MX)" and
+     "Factory 1 - HTS code"/"Factory 1 - Duty Rate (US/CA/MX)" cells on the
+     live WIP row (`patch_rows` with `null` values), breaking the loop.
+  5. **Live-discovered a related, more general job-sequencing gap while
+     re-validating the fix**: `push_duty_rates` (Step 55) ALWAYS runs
+     immediately after its OWN main-job run's `build_costing_chart` (Step
+     40) — with nothing in between. Since `costing_chart` is fully
+     rebuilt by every `build_costing_chart` run (wiping every field except
+     the WIP fallback), any value the SEPARATE `duty_compute` job filled in
+     BETWEEN two main-job runs is wiped again the instant the NEXT main-job
+     run's `build_costing_chart` executes — `push_duty_rates` (same run,
+     immediately after) can only ever see the POST-wipe state. This means a
+     freshly-computed value can only survive to be pushed if `duty_compute`
+     happens to run in the exact window between a `build_costing_chart` run
+     and ITS OWN `push_duty_rates` — which cannot be guaranteed across two
+     independently-scheduled jobs. **Workaround used to unstick the BD row**:
+     `w.jobs.run_now(job_id=294837488757511, only=["push_duty_rates"])` —
+     the Jobs API's task-selective run support, which runs ONLY the named
+     task (all others report `DISABLED`, not skipped) against whatever is
+     CURRENTLY in `costing_chart`, without triggering `build_costing_chart`
+     first. Re-running `duty_compute` then immediately `only=
+     ["push_duty_rates"]` (no rebuild in between) is the reliable manual
+     recipe until this sequencing gap is addressed structurally (e.g. by
+     having `push_duty_rates` itself trigger/wait on a fresh `duty_compute`
+     pass, or reordering the two jobs' relationship) — not yet implemented,
+     flagged here for a future decision.
+  **Live-reverified end-to-end**: after clearing the stale WIP cells,
+  `duty_compute` correctly recomputed BD with `tariff_rate=0.1` (matching
+  IN and the direct fresh-API-call check), and the task-selective
+  `push_duty_rates` run correctly wrote `Main Factory HTS Code=6202407511`,
+  `Main Factory Duty Rate (US/CA/MX)=0.277/0.18/0.35` back onto the live
+  WIP row — confirmed via a direct `get_sheet()` read.
 - **Phase 3 sibling-copy: two live-discovered bugs, both fixed 2026-09-04
   (owner-reported: "KTB SS28 Wrangler Collaborations" rows stayed blank
   after a phase3_images run despite sibling rows already having images).**

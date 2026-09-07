@@ -69,8 +69,19 @@ MARKET_COLUMNS: Dict[str, str] = {
 
 # costing_chart columns concatenated (in order) to build product_description.
 # Spec: Style Description (C) + Content (I) + Gender (J) + Class (K) + Sub Class (L).
+# "color_name" added 2026-09-07 (owner spec) -- REVERSES the earlier design
+# intent (see cache_key()'s docstring, which used to say "multiple colors of
+# the same style/slot" should share one cache entry/API call, since color
+# doesn't affect HS classification). Owner decision: a NEW row landing on
+# costing_chart should only reuse a previous result when style_description,
+# color_name, fabric_content, gender, class_name, AND sub_class all match
+# exactly -- different colors of an otherwise-identical style now get their
+# OWN NT Orbit call/cache entry, never share one. Since PRODUCT_DESCRIPTION_
+# COLS feeds BOTH the actual NT Orbit request text (build_product_
+# description) AND the persistent cache key (cache_key(), derived from the
+# same description string), this single change achieves both at once.
 PRODUCT_DESCRIPTION_COLS: Tuple[str, ...] = (
-    "style_description", "fabric_content", "gender", "class_name", "sub_class",
+    "style_description", "color_name", "fabric_content", "gender", "class_name", "sub_class",
 )
 
 GENERAL_DUTY_LINE_NAME = "General Duty"
@@ -199,15 +210,22 @@ def cache_key(row: Dict[str, Any], import_country_code: str) -> Tuple[str, Optio
     """
     Dedup key for caching NT Orbit calls across costing_chart rows that would
     produce an identical request (same product description + origin + target
-    market — e.g. multiple colors of the same style/slot). This is the SAME
-    key used for both the in-run dict cache AND the persistent
-    ``nt_orbit_duty_cache`` Delta table (its 3-column primary key is
-    ``DUTY_CACHE_KEY_COLS``, in this same order) — the two are meant to be
+    market). This is the SAME key used for both the in-run dict cache AND the
+    persistent ``nt_orbit_duty_cache`` Delta table (its 3-column primary key
+    is ``DUTY_CACHE_KEY_COLS``, in this same order) — the two are meant to be
     used together: seed the in-run cache from the persistent table at the
     start of a run, and write new/refreshed entries back to the persistent
     table at the end, so a cost-visible NT Orbit call is only ever made once
     per unique key, EVER (until it goes stale — see DEFAULT_CACHE_TTL_DAYS),
     not once per run.
+
+    A NEW row reuses a previous result only when `style_description`,
+    `color_name`, `fabric_content`, `gender`, `class_name`, AND `sub_class`
+    all match exactly (owner spec, 2026-09-07 — REVERSES the earlier design
+    intent, which deliberately shared one cache entry across "multiple
+    colors of the same style/slot" since color doesn't affect HS
+    classification; different colors of an otherwise-identical style now
+    each get their OWN lookup/cache entry). See `PRODUCT_DESCRIPTION_COLS`.
     """
     return (
         build_product_description(row),

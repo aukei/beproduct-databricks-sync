@@ -638,3 +638,12 @@ phase 3 while not a blocker, expects to fill all rows (style x color x material)
 - BeProduct "Customer Factory Code" should be populated with DTC "Main Factory Customer ID"
 - update docs
 
+# validate OrbitDuty calls
+in databricks lft.beproduct.costing_chart, hts_code = 6202407511 and material_no = 'WV-0063'
+- production_country = BD: tariff_rate is null
+- production_country = IN: tariff_rate is 0.1
+
+so that
+- Style (WIP) lines with Fabric_content = "Main Fabric" or null should NOT get into costing chart
+- Style with bp_style_no is null should NOT get into costing chart
+- when a new row land onto costing chart, look up previous results with exact same style_description + color_name + fabric_content + gender + class_name + subcass

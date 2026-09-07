@@ -74,6 +74,21 @@ check(
     "cache_key differs per market",
 )
 
+print("\n[2b] color_name is part of both product_description AND cache_key (2026-09-07 owner spec)")
+row_black = {**row, "color_name": "Black", "production_country": "BD"}
+row_red = {**row, "color_name": "Red", "production_country": "BD"}
+check(build_product_description(row_black)
+      == "Cotton t-shirt with printed design Black 100% Cotton Mens Tops T-Shirts",
+      "color_name is inserted right after style_description")
+check(build_product_description(row_black) != build_product_description(row_red),
+      "different colors -> different product_description text")
+check(cache_key(row_black, "US") != cache_key(row_red, "US"),
+      "different colors -> DIFFERENT cache entries (REVERSES the earlier "
+      "'colors can share a cache entry' design -- see cache_key()'s docstring)")
+check(build_product_description(row) == build_product_description({**row, "color_name": None}),
+      "a blank/missing color_name is skipped, same as any other blank field "
+      "(existing rows without color_name are unaffected)")
+
 print("\n[3] markets_needing_lookup() / row_needs_any_lookup()")
 blank_row = {**row2, "hts_code": None, "duty_rate_us": None, "duty_rate_ca": None, "duty_rate_mx": None}
 check(set(markets_needing_lookup(blank_row)) == {"US", "CA", "MX"},

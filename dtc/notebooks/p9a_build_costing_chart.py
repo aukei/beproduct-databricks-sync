@@ -245,16 +245,42 @@ print(f"  WIP columns extracted: {len(wip.columns)}")
 # 2026-09-03: gates on material_no now, not Content/Fabric Type -- Phase 10
 # writes Content itself now, but material_no is the real signal AND the new
 # costing-chart key component, see "Costing chart key" above).
-print("\nStep 1b: Filtering out WIP rows with no material_no (Mill Fabric Article #) yet …")
+#
+# Two more exclusions added 2026-09-07 (owner spec, live-discovered while
+# investigating a stale tariff_rate on a KTB-00023/WV-0063 row):
+#   - `bp_style_no IS NULL`: these rows trace to legacy "(BACKUP)"-named WIP
+#     requests (pre-existing data-quality pollution, documented in AGENTS.md
+#     -- 199/227 dtc_wip_ktb rows with null bp_style_number all trace to
+#     those), never real production/test data. They must never reach
+#     costing_chart or NT Orbit at all.
+#   - `fabric_content IN (NULL, "Main Fabric")`: `fabric_content` (WIP
+#     "Content") must hold a genuine material composition description (e.g.
+#     "100% Recycled Nylon Shell"), never the literal Fabric Group value
+#     "Main Fabric" -- live-confirmed root cause of a real bug: an OLDER,
+#     pre-fix version of this notebook sourced `fabric_content` from
+#     "Fabric Group" instead of "Content" (see AGENTS.md decisions log,
+#     "fabric_content was reading the WRONG WIP column"), so a WIP row that
+#     was enriched by Phase 10 back then could have a Content value that's
+#     still just the literal "Main Fabric" placeholder-like string, or a row
+#     never touched by Phase 10 at all still has Content genuinely blank.
+#     Either way, that row's product_description sent to NT Orbit would be
+#     nonsensical (literally "... Main Fabric ..." instead of the real
+#     material) and must be excluded rather than produce a misleading
+#     duty/HTS classification.
+print("\nStep 1b: Filtering out WIP rows with no material_no, no bp_style_no, "
+      "or a placeholder-like fabric_content …")
 wip_before_fabric_filter = wip.count()
 wip = wip.filter(
     F.col("material_no").isNotNull() & (F.trim(F.col("material_no")) != "")
+    & F.col("bp_style_no").isNotNull() & (F.trim(F.col("bp_style_no")) != "")
+    & F.col("fabric_content").isNotNull() & (F.trim(F.col("fabric_content")) != "")
+    & (F.trim(F.col("fabric_content")) != "Main Fabric")
 )
 dropped_incomplete_fabric = wip_before_fabric_filter - wip.count()
 print(f"  WIP rows before filter : {wip_before_fabric_filter}")
 print(f"  WIP rows after filter  : {wip.count()}")
-print(f"  Dropped (material_no still blank -- Phase 10 hasn't enriched this "
-      f"row yet): {dropped_incomplete_fabric}")
+print(f"  Dropped (material_no blank, bp_style_no blank -- legacy '(BACKUP)' "
+      f"pollution, or fabric_content blank/'Main Fabric'): {dropped_incomplete_fabric}")
 
 # COMMAND ----------
 
@@ -431,7 +457,7 @@ print("SUMMARY")
 print(f"{'='*72}")
 print(f"  WIP input rows        : {wip_raw.count()}")
 print(f"  LinePlan input rows   : {lp_raw.count()}")
-print(f"  WIP rows w/o material_no (dropped, not yet Phase-10-enriched) : {dropped_incomplete_fabric}")
+print(f"  WIP rows dropped (no material_no/bp_style_no, or fabric_content blank/'Main Fabric') : {dropped_incomplete_fabric}")
 print(f"  WIP rows w/o Lineplan Ref # (dropped) : {dropped_no_ref}")
 print(f"  WIP rows matched to LinePlan (INNER)  : {joined_count}")
 print(f"  Costing chart rows    : {total_costing}")
