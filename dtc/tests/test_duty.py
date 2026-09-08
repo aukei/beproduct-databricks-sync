@@ -19,7 +19,7 @@ from sync.duty import (
     markets_needing_lookup, row_needs_any_lookup, extract_duty_fields,
     merge_lookup_into_row, build_wip_patch_fields, DutyLookupResult,
     is_cache_entry_stale, build_cache_row, cache_row_to_result,
-    DUTY_CACHE_KEY_COLS, DEFAULT_CACHE_TTL_DAYS,
+    DUTY_CACHE_KEY_COLS, DEFAULT_CACHE_TTL_DAYS, COSTING_KEY,
 )
 
 _failures = []
@@ -90,13 +90,15 @@ check(build_product_description(row) == build_product_description({**row, "color
       "(existing rows without color_name are unaffected)")
 
 print("\n[3] markets_needing_lookup() / row_needs_any_lookup()")
-blank_row = {**row2, "hts_code": None, "duty_rate_us": None, "duty_rate_ca": None, "duty_rate_mx": None}
+blank_row = {**row2, "hts_code": None, "duty_rate_us": None, "duty_rate_ca": None, "duty_rate_mx": None,
+             "tariff_rate": None}
 check(set(markets_needing_lookup(blank_row)) == {"US", "CA", "MX"},
       "all 3 markets needed when everything is blank")
-partially_filled = {**blank_row, "duty_rate_us": 0.165}
+# US genuinely fully done (duty_rate_us AND tariff_rate both filled) -- only CA/MX still needed.
+partially_filled = {**blank_row, "duty_rate_us": 0.165, "tariff_rate": 0.1}
 check(set(markets_needing_lookup(partially_filled)) == {"CA", "MX"},
-      "already-filled market is skipped")
-fully_filled = {**blank_row, "hts_code": "6109100012",
+      "already-filled market (duty_rate + tariff_rate both present) is skipped")
+fully_filled = {**blank_row, "hts_code": "6109100012", "tariff_rate": 0.1,
                 "duty_rate_us": 0.165, "duty_rate_ca": 0.1, "duty_rate_mx": 0.05}
 check(markets_needing_lookup(fully_filled) == [], "no lookups needed when everything is filled")
 no_country = {**blank_row, "production_country": None}
@@ -104,6 +106,17 @@ check(markets_needing_lookup(no_country) == [],
       "no production_country -> no lookups possible (API requires it)")
 check(row_needs_any_lookup(blank_row) is True, "row_needs_any_lookup True when gaps exist")
 check(row_needs_any_lookup(fully_filled) is False, "row_needs_any_lookup False when nothing missing")
+
+print("\n[3b] markets_needing_lookup() — US re-queried when ONLY tariff_rate is blank (2026-09-07 fix)")
+duty_us_filled_no_tariff = {**blank_row, "duty_rate_us": 0.165, "duty_rate_ca": 0.1, "duty_rate_mx": 0.05,
+                            "hts_code": "6109100012", "tariff_rate": None}
+check(markets_needing_lookup(duty_us_filled_no_tariff) == ["US"],
+      "US alone is re-queried when duty_rate_us/hts_code are already filled but tariff_rate isn't -- "
+      "live bug: p9a's WIP 'fallback' keeps duty_rate_us/hts_code permanently non-blank across rebuilds, "
+      "which used to make markets_needing_lookup() think the US market was already fully done forever, "
+      "even though tariff_rate (no WIP fallback exists for it) was still genuinely blank")
+check(row_needs_any_lookup(duty_us_filled_no_tariff) is True,
+      "row_needs_any_lookup is True purely because of the blank tariff_rate")
 
 print("\n[4] extract_duty_fields() — spec example response")
 example_response = {
@@ -199,6 +212,13 @@ try:
     check(False, "unknown factory_slot should raise")
 except ValueError:
     check(True, "unknown factory_slot raises ValueError")
+
+print("\n[6b] COSTING_KEY — shared costing_chart match/MERGE key (moved here 2026-09-07)")
+check(COSTING_KEY == (
+    "customer", "season_code", "brand", "bp_style_no", "lf_style_no",
+    "color_name", "lineplan_ref", "material_no", "supplier_type", "supplier", "factory",
+), "COSTING_KEY is the exact key p9a_build_costing_chart.py's tariff_rate "
+   "carry-forward join and p9b1_compute_duty_rates.py's MERGE both share")
 
 print("\n[7] Persistent cross-run cache — is_cache_entry_stale() / build_cache_row() / cache_row_to_result()")
 now = datetime(2026, 9, 1, tzinfo=timezone.utc)

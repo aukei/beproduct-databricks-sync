@@ -242,6 +242,15 @@ check(plan_style_enrichment([already_enriched_row], json.dumps([{"part": "BOM", 
     {"bom_detail_name": "Trim", "material_name": "x"},
 ]}])) == [], "no Main Fabric/Fabric segments at all -> no-op, row untouched")
 
+print("  [6e2] no BeProduct fallback for Content (REVERSED 2026-09-07, project team decision: "
+      "'keep DTC WIP true to BOM extraction'): BOM missing entirely -> ZERO actions, even for an "
+      "already-enriched row with blank Content -- Content stays exactly as-is, no matter what "
+      "BeProduct's own core_main_material field might hold")
+already_enriched_no_content = {"row_id": "r1", "fabric_group": "Main Fabric",
+                                "mill_fabric_article": "WV-0064", "placement": "bodice", "content": None}
+check(plan_style_enrichment([already_enriched_no_content], None) == [],
+      "no bom_unified -> zero actions regardless of blank Content (no fallback source consulted at all)")
+
 print("  [6f] Fabric segment(s) present but NO Main Fabric -> ZERO actions (not insert-only anymore)")
 fabric_only_bom = [{"part": "BOM", "details": [
     {"bom_detail_name": "Fabric", "material_no": "FB-999", "placement": "yoke"},

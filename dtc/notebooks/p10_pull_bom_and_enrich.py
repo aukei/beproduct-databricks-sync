@@ -29,12 +29,32 @@ this table with style_season="Spring - 2028", matching
     ktb_styles.bp_style_number = customer_teckpack_style_latest.style_no
     AND (ktb_styles.season || " - " || ktb_styles.year) = customer_teckpack_style_latest.style_season
 
-INNER JOIN only. `style_season` format varies WILDLY by customer in this
-shared table ("SS26", "SS 2027", "FH 2026", "Spring - 2028", ...) — this
-notebook pre-filters `customer_name = bom_customer_name` (default "KONTOOR",
-the live-confirmed customer_name for Wrangler/Kontoor Brands data) purely as
-a scoping/performance optimization; the join keys alone are already
-customer-correct without it.
+INNER JOIN only (reverted from a same-week LEFT JOIN experiment 2026-09-07
+— see next paragraph). `style_season` format varies WILDLY by customer in
+this shared table ("SS26", "SS 2027", "FH 2026", "Spring - 2028", ...) —
+this notebook pre-filters `customer_name = bom_customer_name` (default
+"KONTOOR", the live-confirmed customer_name for Wrangler/Kontoor Brands
+data) purely as a scoping/performance optimization; the join keys alone are
+already customer-correct without it.
+
+**No BeProduct fallback for `Content` (decided 2026-09-07, project team
+decision)**: "keep DTC WIP true to BOM extraction" — if techpack
+(`customer_teckpack_style_latest`) has no/null `bom_unified` for a style,
+`Content` is left exactly as-is (typically blank), even though BeProduct's
+own `core_main_material` header field ("MAIN MATERIAL CONTENT",
+`ktb_styles.bom_material_1`) may hold a plausible value (live-confirmed:
+KTB-00016/KTB-00021 have exactly this situation — real `core_main_material`
+values but no current `bom_unified` match). A same-day-earlier attempt to
+use `core_main_material` as a fallback source (LEFT JOIN + a
+`fallback_content` parameter on `bom.plan_style_enrichment()`) was
+implemented, live-validated, then EXPLICITLY REVERSED per this decision —
+see AGENTS.md's decisions log for the full history. As long as a style's
+Product Status is not in `("Finalized", "Drop")` (see `EXCLUDED_STATUSES` in
+`p1p7_beproduct_style_sync.py`), its BOM extraction is expected to keep
+being updated over time, so a currently-missing techpack match is not
+treated as a permanent gap — the style will start flowing through again
+once its techpack data appears, consistent with the existing "never revert"
+semantics below.
 
 Enrichment decision logic — UPSERT semantics (pure, unit-tested in
 dtc/python/sync/bom.py; REVISED 2026-09-03, see the decisions log in

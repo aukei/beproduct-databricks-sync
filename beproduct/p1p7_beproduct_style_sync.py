@@ -173,7 +173,11 @@ INTERESTED_FIELDS = {
 # Styles with this Product Status are excluded from all DTC sync processing.
 # They are still written to ktb_styles (full picture), but filtered out in the
 # transform so they never appear in staging or reach DTC.
-EXCLUDED_STATUSES = frozenset({"Finalized"})
+# "Drop" added 2026-09-07 (owner spec, project team decision): a style is
+# only "subject to update" (BOM/costing_chart included) as long as its
+# Product Status is NOT in (Finalized, Drop) -- both are terminal states.
+# Exact choice-list value confirmed live via folder_schema: "Drop" (code "DR").
+EXCLUDED_STATUSES = frozenset({"Finalized", "Drop"})
 
 # BOM and Material fields (extracted by field ID from headerData)
 # Per requirements: colorways, BOM materials, material category/content, front image
@@ -518,9 +522,10 @@ print(f"\n   Checking data...")
 print(f"   styles list length: {len(styles)}")
 
 # ---------------------------------------------------------------------------
-# Filter out styles whose Product Status is in EXCLUDED_STATUSES ("Finalized").
-# Applied BEFORE app enrichment so no app_get API calls are wasted on excluded
-# styles. The full raw list (all_styles) is unchanged for reporting purposes.
+# Filter out styles whose Product Status is in EXCLUDED_STATUSES
+# ("Finalized", "Drop"). Applied BEFORE app enrichment so no app_get API
+# calls are wasted on excluded styles. The full raw list (all_styles) is
+# unchanged for reporting purposes.
 # ---------------------------------------------------------------------------
 def _get_style_status(style: dict) -> str:
     """Extract product_status value (field_id style_status) from a raw style record."""

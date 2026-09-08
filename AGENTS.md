@@ -623,6 +623,86 @@ kept below for historical reference only (see decisions log):**
 
 ## Decisions on record
 
+- **Project team decisions (2026-09-07, same day as the entry below,
+  REVERSING part of it): (1) no BeProduct fallback for `Content` after
+  all; (2) only "Main Fabric" rows enter `costing_chart`.**
+  1. **"Keep DTC WIP true to BOM extraction."** The `fallback_content`
+     mechanism added earlier the same day (next entry below) was explicitly
+     REVERSED after project team discussion: if techpack
+     (`customer_teckpack_style_latest`) has no/null `bom_unified` for a
+     style, `Content` is left exactly as-is (typically blank) — even though
+     BeProduct's own `core_main_material` header field may hold a plausible
+     value. `bom.plan_style_enrichment()`'s `fallback_content` parameter and
+     all associated logic were removed; `p10_pull_bom_and_enrich.py`'s Step
+     1 join reverted from LEFT back to INNER (a style with no BOM match
+     again simply never reaches the per-style loop at all). The Content
+     values my earlier fix had pushed to KTB-00016/KTB-00021's live WIP
+     rows were manually cleared back to blank to match this decision.
+     Clarifying note from the team: as long as a style's Product Status is
+     NOT in `("Finalized", "Drop")`, its BOM extraction is expected to keep
+     being updated over time — so a style missing techpack data today is
+     not a permanent gap, it'll start flowing through again once techpack
+     data appears for it. `"Drop"` was added to `EXCLUDED_STATUSES` in
+     `p1p7_beproduct_style_sync.py` (previously only `"Finalized"`) to match
+     — exact choice-list spelling confirmed live via `folder_schema`
+     (`"Drop"`, code `"DR"`).
+  2. **Only `Fabric Group == "Main Fabric"` rows enter `costing_chart`.**
+     The "Fabric" segment duplicate rows Phase 10 creates (one extra
+     physical WIP row per "Fabric" segment — see `sync/bom.py`) are now
+     EXCLUDED entirely from `costing_chart` via a new filter in
+     `p9a_build_costing_chart.py` Step 1b (`fabric_group` newly extracted
+     via `jcol` for this purpose). Consequently, Duty/Tariff rate/HTS Code
+     (Phase 9b) are only ever computed and pushed back to WIP for "Main
+     Fabric" rows — "Fabric" segment rows never receive them, by design.
+  **Live-reverified end-to-end** after both changes: `costing_chart`
+  correctly dropped back to only `KTB-00023`'s rows (KTB-00016/KTB-00021
+  excluded again, Content confirmed blank on their live WIP rows), and of
+  KTB-00023's own two materials (`WV-0063` "Main Fabric", `WV-0047`
+  "Fabric"), only the `WV-0063` "Main Fabric" rows remain — the `WV-0047`
+  row is gone. The unrelated `tariff_rate` carry-forward fix (see below)
+  was reconfirmed still intact through this same rebuild. Test changes:
+  removed `test_bom.py [6e2]`-`[6e5]` (the now-reverted fallback_content
+  tests), replaced with a single `[6e2]` confirming zero actions with no
+  fallback consulted at all.
+- **Phase 10 gained a BeProduct-sourced `Content` fallback for styles with
+  no current TPM/BOM match (2026-09-07, owner spec: "KTB-00016 should have
+  Content = '97% Cotton, 3% Spandex', KTB-00021 = '100% Cotton'").**
+  Follow-up to the completeness-filter hardening above: with `fabric_content`
+  now REQUIRED to be non-blank, `KTB-00016`/`KTB-00021` (no current
+  `bom_unified` match — see earlier entry) were permanently excluded from
+  `costing_chart`, even though they'd been correctly enriched by Phase 10 in
+  the past (real `Fabric Group`/`Placement`/`Mill Fabric Article #`) and had
+  factory data assigned. Live-discovered: BeProduct's OWN header field
+  `core_main_material` ("MAIN MATERIAL CONTENT") holds the exact correct
+  values for both styles — and was ALREADY being correctly extracted into
+  `ktb_styles.bom_material_1` by `p1p7_beproduct_style_sync.py`'s
+  `BOM_MATERIAL_FIELDS`, just never consumed by anything downstream. (Also
+  discovered in passing: the OTHER entry in that same dict,
+  `"main_material_content": "main_material_content"`, references a
+  non-existent BeProduct fieldId — always returns null; `bom_material_1`
+  via fieldId `core_main_material` is the one that actually works. Left
+  as-is, not in scope of this fix.)
+  **Implementation**: `bom.plan_style_enrichment()` gained a new
+  `fallback_content` parameter — consulted ONLY when `build_target_segments()`
+  returns `None` (no current TPM/BOM data at all), and even then ONLY
+  backfills a currently-blank `Content` on rows that are ALREADY enriched
+  (real `Fabric Group`); never touches a genuinely never-enriched
+  (placeholder) row, since first-time enrichment still needs real BOM
+  segment data this fallback can't provide. `p10_pull_bom_and_enrich.py`'s
+  Step 1 join changed from INNER to LEFT (a style with no BOM match must
+  still flow through with `bom_unified=NULL` so this fallback gets a
+  chance to run — an INNER JOIN silently dropped it before ever reaching
+  the per-style loop) and now selects `ktb_styles.bom_material_1` as
+  `fallback_content`, passed through to `plan_style_enrichment()`. 5 new
+  unit tests (`test_bom.py [6e2]`-`[6e5]`).
+  **Live-validated end-to-end**: `fill_bom_data` correctly pushed
+  `Content="97% Cotton, 3% Spandex"` / `"100% Cotton"` to both styles' live
+  WIP rows (both physical requests); `repull_dtc_bom` (needed to refresh
+  Delta's `dtc_wip_ktb` snapshot before `build_costing_chart` could see the
+  live push — a repull is always required between any live WIP write and
+  the next chart rebuild) + `build_costing_chart` then correctly produced
+  `costing_chart` rows for all 3 styles (`KTB-00016`, `KTB-00021`,
+  `KTB-00023`) with the right `fabric_content` on each.
 - **Costing chart completeness filters hardened + NT Orbit lookup scope
   widened (2026-09-07, owner spec, live-discovered while validating a
   reported stale `tariff_rate=null` on `KTB-00023`/`WV-0063`/BD).**
@@ -698,6 +778,45 @@ kept below for historical reference only (see decisions log):**
   `push_duty_rates` run correctly wrote `Main Factory HTS Code=6202407511`,
   `Main Factory Duty Rate (US/CA/MX)=0.277/0.18/0.35` back onto the live
   WIP row — confirmed via a direct `get_sheet()` read.
+- **`tariff_rate` was being wiped by every `build_costing_chart` run —
+  structurally fixed 2026-09-07 (same-day follow-up; owner-reported "now
+  costing_chart.tariff_rate is null across all 5 rows" within hours of the
+  fix above).** Confirmed via `DESCRIBE HISTORY`: a routine SCHEDULED
+  main-job run (not a manual trigger) had rebuilt `costing_chart` and
+  wiped `tariff_rate` back to `NULL` — proving the item 5 workaround above
+  (`only=["push_duty_rates"]`) was never going to be durable, since the job
+  runs on a real 3x/day cron and every run's OWN `build_costing_chart`
+  unconditionally resets `tariff_rate` to `NULL` (line `.withColumn(
+  "tariff_rate", F.lit(None))`) with no fallback, unlike `hts_code`/
+  `duty_rate_us/ca/mx` which persist via the live-WIP-row fallback.
+  **Two structural fixes, both required together**:
+  1. `p9a_build_costing_chart.py` Step 4b (new): before the final write,
+     reads the EXISTING `costing_chart` table's own prior `tariff_rate`
+     (keyed by the newly-shared `duty.COSTING_KEY` — moved out of
+     `p9b1_compute_duty_rates.py`'s local copy into `sync/duty.py` so both
+     notebooks use the identical definition) and carries it forward via
+     `COALESCE(new, old)` — mirroring the WIP-fallback semantics Step 4
+     already uses for the other duty fields, without needing a live WIP
+     column.
+  2. `duty.markets_needing_lookup()` — a SECOND, independent bug this
+     exposed: once `duty_rate_us` is filled (which, per the item 4 root
+     cause, is ALWAYS true after the very first push, since it persists via
+     the WIP fallback), the US market was considered "already done"
+     forever, so `duty_compute` would never even attempt a fresh lookup to
+     backfill a genuinely-blank `tariff_rate` — confirmed live: a
+     `duty_compute` run reported "Rows needing at least one NT Orbit
+     lookup: 0" immediately after fix #1 alone, despite `tariff_rate`
+     being blank on every row. Fixed: `markets_needing_lookup()` now ALSO
+     adds `"US"` to the needed-lookups list whenever `tariff_rate` itself
+     is blank, independent of whether `duty_rate_us` already has a value.
+  **Live-reverified end-to-end** after both fixes: `duty_compute` correctly
+  re-queried US (hit the persistent cache, no new API cost) and filled
+  `tariff_rate=0.1` on all 5 rows; an ISOLATED `build_costing_chart`-only
+  run (`only=["build_costing_chart"]`) confirmed `tariff_rate` now SURVIVES
+  a full rebuild; a subsequent full main-job run (all 20 tasks `SUCCESS`)
+  reconfirmed it stays intact end-to-end. New tests: `test_duty.py [3b]`
+  (US re-queried on blank `tariff_rate` alone) and `[6b]` (shared
+  `COSTING_KEY`).
 - **Phase 3 sibling-copy: two live-discovered bugs, both fixed 2026-09-04
   (owner-reported: "KTB SS28 Wrangler Collaborations" rows stayed blank
   after a phase3_images run despite sibling rows already having images).**

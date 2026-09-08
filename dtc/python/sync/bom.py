@@ -72,12 +72,17 @@ all-or-nothing `style_already_enriched` design this replaces):
         bullet for the even more common trigger of this rule.
   * If the style's `bom_unified` is entirely missing/blank THIS RUN, or its
     "Main Fabric" segment itself is absent (parses to no "Main Fabric" at
-    all): treat the WHOLE STYLE as "nothing to upsert" and take ZERO
-    actions — never revert. Live-confirmed real trigger (2026-09-03):
-    switching the source table to `customer_teckpack_style_latest` (see
-    below) left `bom_unified` NULL for some previously-BOM-bearing test
-    styles (KTB-00016, KTB-00021) — this rule is what keeps their earlier,
-    correct Phase 10 enrichment intact rather than silently wiping it.
+    all): NO Fabric Group/Placement/Mill Fabric Article #/Content action is
+    taken for the whole style — never revert, and NO BeProduct fallback for
+    `Content` either (decided 2026-09-07, project team: "keep DTC WIP true
+    to BOM extraction" — see `plan_style_enrichment()`'s docstring for the
+    full rationale, including why this is not a permanent gap for
+    non-Finalized/non-Drop styles). Live-confirmed real trigger
+    (2026-09-03): switching the source table to `customer_teckpack_style_
+    latest` (see below) left `bom_unified` NULL for some previously-BOM-
+    bearing test styles (KTB-00016, KTB-00021) — this rule is what keeps
+    their earlier, correct Phase 10 enrichment intact rather than silently
+    wiping it.
   * For each "Fabric" segment (0 or more) whose (Fabric Group, Mill Fabric
     Article #) key is NOT already represented by ANY existing row for this
     style: it's genuinely new — duplicate every existing row once per such
@@ -367,6 +372,18 @@ def plan_style_enrichment(
     `content` field. Pass `content_key=None` to disable this check entirely
     if the caller doesn't track the row's current Content value.
 
+    NO BeProduct fallback for `Content` (decided 2026-09-07, project team
+    decision, REVERSES a same-week same-day earlier attempt — see AGENTS.md
+    decisions log): "keep DTC WIP true to BOM extraction" — if techpack
+    (`customer_teckpack_style_latest`) has no/null `bom_unified` for a
+    style, `Content` (and everything else) is left exactly as-is (typically
+    blank), even though BeProduct's own `core_main_material` header field
+    may hold a plausible value. As long as a style's Product Status is not
+    in `("Finalized", "Drop")`, its BOM extraction is expected to keep being
+    updated over time, so this is not a permanent gap — a style with
+    currently-missing techpack data will start flowing through again once
+    its techpack data appears.
+
     Args:
         existing_rows: the style's current WIP rows (one dict per colorway
             row), each containing at least `fabric_group_key` (current
@@ -392,7 +409,11 @@ def plan_style_enrichment(
     target_segments = build_target_segments(bom_unified)
     if target_segments is None:
         # No Main Fabric this run (BOM missing entirely, or Main Fabric
-        # itself vanished) -- never revert existing DTC data. No-op.
+        # itself vanished) -- never revert existing Fabric Group/Placement/
+        # Mill Fabric Article # data. No BeProduct fallback for Content
+        # either (see docstring above) -- techpack extraction is the sole
+        # source of truth; a missing/null techpack means Content stays
+        # exactly as-is (typically blank).
         return []
     main_target, fabric_targets = target_segments[0], target_segments[1:]
 

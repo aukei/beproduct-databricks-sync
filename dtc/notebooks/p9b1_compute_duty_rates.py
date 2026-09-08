@@ -210,15 +210,16 @@ chart_df = spark.table(costing_table)
 chart_rows = [r.asDict() for r in chart_df.collect()]
 print(f"  Total costing_chart rows: {len(chart_rows)}")
 
-# COSTING_KEY mirrors docs/costing_interested_fields.txt "Costing chart key".
-# "supplier_type" (renamed from "factory_slot" 2026-09-01) is the single
-# "Main"|"1"|"2"|"3" flag generated from WIP structure -- see
-# p9a_build_costing_chart.py's module docstring.
-#
-# "material_no" added 2026-09-03 (REVISED same day from an initial
-# "fabric_content" attempt -- owner correction: "multiple material_no can
-# have same content, and multiple style could share a lineplan", so the key
-# must be [bp_style_no, lineplan_ref, material_no], not fabric_content/
+# COSTING_KEY now lives in sync/duty.py (moved 2026-09-07 so
+# p9a_build_costing_chart.py can share the identical definition for its own
+# tariff_rate carry-forward join -- see that notebook's Step 5). Mirrors
+# docs/costing_interested_fields.txt "Costing chart key". "supplier_type"
+# (renamed from "factory_slot" 2026-09-01) is the single "Main"|"1"|"2"|"3"
+# flag generated from WIP structure -- see p9a_build_costing_chart.py's
+# module docstring. "material_no" added 2026-09-03 (REVISED same day from an
+# initial "fabric_content" attempt -- owner correction: "multiple material_no
+# can have same content, and multiple style could share a lineplan", so the
+# key must be [bp_style_no, lineplan_ref, material_no], not fabric_content/
 # lineplan_ref alone). Required because Phase 10 can produce MULTIPLE WIP
 # rows sharing the SAME lineplan_ref/bp_style_no/color_name/supplier/factory
 # (one "Main Fabric" row + one duplicate per "Fabric" segment -- see
@@ -227,10 +228,7 @@ print(f"  Total costing_chart rows: {len(chart_rows)}")
 # MERGE's ON clause could match multiple source rows to the same
 # costing_chart row (ambiguous MERGE / wrong-row clobbering) once a style
 # has both a Main Fabric and a Fabric-segment costing entry.
-COSTING_KEY = [
-    "customer", "season_code", "brand", "bp_style_no", "lf_style_no",
-    "color_name", "lineplan_ref", "material_no", "supplier_type", "supplier", "factory",
-]
+COSTING_KEY = list(duty.COSTING_KEY)
 
 needing = [r for r in chart_rows if duty.row_needs_any_lookup(r)]
 print(f"  Rows needing at least one NT Orbit lookup: {len(needing)}")

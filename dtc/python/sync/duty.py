@@ -102,6 +102,17 @@ DUTY_CACHE_KEY_COLS: Tuple[str, str, str] = (
     "product_description", "origin_country_code", "import_country_code",
 )
 
+# ``costing_chart``'s own MERGE/match key (moved here 2026-09-07 from a
+# previously-duplicated local constant in p9b1_compute_duty_rates.py, so
+# p9a_build_costing_chart.py can share the identical definition -- see next
+# use). "material_no" (2026-09-03) disambiguates Phase 10's Main-Fabric +
+# Fabric-segment duplicate rows; "supplier_type" ("Main"|"1"|"2"|"3",
+# generated from WIP structure) disambiguates the 4 transposed vendor slots.
+COSTING_KEY: Tuple[str, ...] = (
+    "customer", "season_code", "brand", "bp_style_no", "lf_style_no",
+    "color_name", "lineplan_ref", "material_no", "supplier_type", "supplier", "factory",
+)
+
 # How long a cached lookup is trusted before being treated as stale and
 # re-queried. Tariffs/duty rates DO change (trade policy shifts), so this is
 # not cached forever - but a several-month TTL avoids re-paying the ~30s/call
@@ -329,6 +340,17 @@ def markets_needing_lookup(row: Dict[str, Any]) -> List[str]:
 
     A market is skipped entirely when the row has no production_country
     (origin/export country is required by the API and cannot be inferred).
+
+    US is ALSO independently re-queried when `tariff_rate` is still blank,
+    even if `duty_rate_us` is already filled (fixed 2026-09-07,
+    live-discovered bug): `tariff_rate` is only ever set from a US-market
+    response, but before this fix a market was considered "done" purely
+    based on its own `duty_rate_*` column. Since `p9a_build_costing_chart.py`
+    re-adopts `duty_rate_us`/`hts_code` from the live WIP row as a
+    "fallback" on every rebuild (so they're essentially NEVER blank once
+    pushed there once), the US market was permanently treated as
+    already-done and `tariff_rate` — which has no WIP fallback at all — could
+    never be (re-)computed again, even when it was genuinely still blank.
     """
     if _blank(row.get("production_country")):
         return []
@@ -337,6 +359,8 @@ def markets_needing_lookup(row: Dict[str, Any]) -> List[str]:
         for duty_col, country_code in MARKET_COLUMNS.items()
         if _blank(row.get(duty_col))
     ]
+    if "US" not in needed and _blank(row.get("tariff_rate")):
+        needed.append("US")
     if not needed and _blank(row.get("hts_code")):
         # Rare edge case: every duty_rate_* column is already filled but
         # hts_code somehow still isn't (e.g. manually cleared). Make one US

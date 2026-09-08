@@ -122,6 +122,14 @@ traceability, but is NOT part of the filter or the NT Orbit description
 string (unaffected by this revision) — it remains solely DTC-trigger-
 populated and may still be blank in practice.
 
+**"Main Fabric" only (added 2026-09-07, project team decision)**: ONLY a
+style's "Main Fabric" WIP row (`fabric_group == "Main Fabric"`) enters
+costing_chart at all. The "Fabric" segment duplicate rows Phase 10 creates
+(one extra physical WIP row per "Fabric" segment — see `sync/bom.py`) are
+EXCLUDED entirely, never reaching costing_chart or NT Orbit. Consequently,
+Duty/Tariff rate/HTS Code (Phase 9b) are only ever computed and pushed back
+to WIP for "Main Fabric" rows — "Fabric" segment rows never receive them.
+
 Phase 9b hook
 -------------
   After this notebook runs, Phase 9b will:
@@ -140,6 +148,7 @@ sys.path.append("/Workspace/Repos/beproduct-sync/DTC/python")
 from functools import reduce
 from datetime import datetime, timezone
 
+from sync import duty
 from pyspark.sql import functions as F, DataFrame
 from pyspark.sql.types import StringType, StructType, StructField, TimestampType, LongType
 
@@ -194,6 +203,7 @@ wip = wip_raw.select(
     jcol("data_json", "Content",           "fabric_content"),   # corrected 2026-09-03 (was "Fabric Group")
     jcol("data_json", "Fabric Type",       "fabric_type"),      # new 2026-09-03 -- traceability only, NOT the filter/key
     jcol("data_json", "Mill Fabric Article #", "material_no"),  # new 2026-09-03 -- the real costing-chart key + filter column
+    jcol("data_json", "Fabric Group",      "fabric_group"),     # new 2026-09-07 -- the "Main Fabric" only filter, see Step 1b
     jcol("data_json", "Gender",            "gender"),
     jcol("data_json", "Class",             "class_"),           # avoid Python keyword
     jcol("data_json", "Sub Class",         "sub_class"),
@@ -267,20 +277,30 @@ print(f"  WIP columns extracted: {len(wip.columns)}")
 #     nonsensical (literally "... Main Fabric ..." instead of the real
 #     material) and must be excluded rather than produce a misleading
 #     duty/HTS classification.
+#
+# THIRD exclusion added 2026-09-07 (owner spec, project team decision):
+# `fabric_group != "Main Fabric"` -- ONLY a style's "Main Fabric" WIP row
+# (Phase 10's own Fabric Group value) enters costing_chart at all. The
+# "Fabric" segment duplicate rows Phase 10 creates (see sync/bom.py --
+# one extra physical WIP row per "Fabric" segment) are EXCLUDED entirely,
+# never reaching costing_chart or NT Orbit. Consequently, Duty/Tariff
+# rate/HTS Code (Phase 9b) are only ever computed and pushed back to WIP
+# for "Main Fabric" rows -- "Fabric" segment rows never receive them.
 print("\nStep 1b: Filtering out WIP rows with no material_no, no bp_style_no, "
-      "or a placeholder-like fabric_content …")
+      "a placeholder-like fabric_content, or a non-'Main Fabric' fabric_group …")
 wip_before_fabric_filter = wip.count()
 wip = wip.filter(
     F.col("material_no").isNotNull() & (F.trim(F.col("material_no")) != "")
     & F.col("bp_style_no").isNotNull() & (F.trim(F.col("bp_style_no")) != "")
     & F.col("fabric_content").isNotNull() & (F.trim(F.col("fabric_content")) != "")
     & (F.trim(F.col("fabric_content")) != "Main Fabric")
+    & (F.trim(F.col("fabric_group")) == "Main Fabric")
 )
 dropped_incomplete_fabric = wip_before_fabric_filter - wip.count()
 print(f"  WIP rows before filter : {wip_before_fabric_filter}")
 print(f"  WIP rows after filter  : {wip.count()}")
-print(f"  Dropped (material_no blank, bp_style_no blank -- legacy '(BACKUP)' "
-      f"pollution, or fabric_content blank/'Main Fabric'): {dropped_incomplete_fabric}")
+print(f"  Dropped (material_no/bp_style_no blank, fabric_content blank/'Main Fabric', "
+      f"or fabric_group != 'Main Fabric' -- i.e. a 'Fabric' segment row): {dropped_incomplete_fabric}")
 
 # COMMAND ----------
 
@@ -437,6 +457,43 @@ total_costing = costing_chart.count()
 print(f"  Costing chart rows after transpose: {total_costing}")
 print(f"  Breakdown by slot:")
 costing_chart.groupBy("supplier_type").count().orderBy("supplier_type").show()
+
+# COMMAND ----------
+
+# ── Step 4b: Carry forward tariff_rate from the table's OWN prior state ──────
+# Live-discovered 2026-09-07: `hts_code`/`duty_rate_us/ca/mx` survive a full
+# rebuild via the WIP "fallback" (Step 4 above re-reads them from the live
+# WIP row's own per-slot columns, which persist across rebuilds once
+# `push_duty_rates` has written them there once). `tariff_rate` has NO such
+# fallback -- no live WIP column exists for it yet (`duty.WIP_TARIFF_COLS_
+# LIVE = False`) -- so every Step 4 slot-build hardcodes it to `NULL`
+# (unconditionally, regardless of any prior value). Since `build_costing_
+# chart` runs on a REGULAR SCHEDULE (3x/day, same job as everything else),
+# this wiped out every NT Orbit-computed `tariff_rate` within hours of it
+# ever being filled by the separate `duty_compute` job -- confirmed live: a
+# routine scheduled run erased a `tariff_rate` that had just been correctly
+# computed and pushed minutes earlier. Fixed the same way `hts_code`/
+# `duty_rate_*` are protected: read the EXISTING `costing_chart` table's OWN
+# prior `tariff_rate` (keyed by `duty.COSTING_KEY`, the same key `duty_
+# compute`'s MERGE uses) and carry it forward via `COALESCE(new, old)` --
+# `new` here is always NULL from Step 4, so this is effectively "keep
+# whatever was already there", exactly mirroring the WIP-fallback semantics
+# for the other duty fields, without requiring a live WIP column.
+print("\nStep 4b: Carrying forward tariff_rate from the table's own prior state …")
+try:
+    prior_tariff = (spark.table(output_table)
+        .select(*duty.COSTING_KEY, F.col("tariff_rate").alias("_prior_tariff_rate"))
+        .dropDuplicates(list(duty.COSTING_KEY)))
+    costing_chart = (costing_chart
+        .join(prior_tariff, on=list(duty.COSTING_KEY), how="left")
+        .withColumn("tariff_rate", F.coalesce(F.col("tariff_rate"), F.col("_prior_tariff_rate")))
+        .drop("_prior_tariff_rate"))
+    carried = costing_chart.filter(F.col("tariff_rate").isNotNull()).count()
+    print(f"  tariff_rate carried forward for {carried} row(s) (prior table existed)")
+except Exception as e:
+    print(f"  ⚠️  No prior {output_table} to carry tariff_rate forward from "
+          f"(first-ever run, or read failed: {e}) -- tariff_rate stays NULL, "
+          f"will be filled by the next duty_compute run.")
 
 # COMMAND ----------
 

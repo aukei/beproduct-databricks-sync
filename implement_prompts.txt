@@ -646,4 +646,11 @@ in databricks lft.beproduct.costing_chart, hts_code = 6202407511 and material_no
 so that
 - Style (WIP) lines with Fabric_content = "Main Fabric" or null should NOT get into costing chart
 - Style with bp_style_no is null should NOT get into costing chart
-- when a new row land onto costing chart, look up previous results with exact same style_description + color_name + fabric_content + gender + class_name + subcass
+- when a new row land onto costing chart, look up previous results with exact same style_description + color_name + fabric_content + gender + class_name + subclass
+
+- there are only 5 rows (KTB-00023/ LF Style# s234160)  in costing chart. There are 3 styles (BP_STYLE_NO KTB-00023/00016/00021) with factory data, so costing chart ought to have records from 3 styles.
+- the photo of KTB-00021.
+
+After discussion with project team, the decision is to keep DTC WIP true to BOM extraction. I.e. even if BeProduct contains a valid "Main Material Content", if there is no data or null data from techpack "customer_techpack_log_latest", then we take Techpack as final, which in this case we left material / content empty. Note for a style, as long as  its "PRODUCT STAUS" are not in (FINALIZED, DROP), its corresponding BOM are subject to update, thus its costing chart rows are subject to update.
+
+2nd decision is for costing chart, only Fabric_content = "Main Fabric" should enter that chart. "Fabric" rows are not going into costing_chart. Consequently in DTC WIP, only "Main Fabric" rows will eventually receive Duty / Tariff rate / HS_Code.
