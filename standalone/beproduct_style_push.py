@@ -117,8 +117,16 @@ INTERESTED_FIELDS = {
     "GARMENT FINISH": "garment_finish",
     "TECHPACK STAGE": "techpack_stage",
     "Lot Code": "lot_code",
-    "PARENT VENDOR": "parent_vendor",
-    "FACTORY": "factory",
+    # "PARENT VENDOR": "parent_vendor" / "FACTORY": "factory" REMOVED
+    # 2026-09-08 (found via a full-pipeline conflict scan) -- these two
+    # fieldIds are Phase 2's EXCLUSIVE write direction (DTC -> BeProduct,
+    # see phase2.REVERSE_HEADER_FIELDS). This tool pushing them too (sourced
+    # from local ktb_styles edits, a completely different trigger than
+    # Phase 2's DTC-driven pushback) directly contradicted this file's own
+    # documented intent (standalone/README.md: "kept separate so it can't
+    # accidentally fight the field-ownership partition that Phases 1/2
+    # enforce") -- the field list itself never actually honored that intent
+    # until now.
 }
 
 # Create reverse mapping: column_name → beproduct_field_name

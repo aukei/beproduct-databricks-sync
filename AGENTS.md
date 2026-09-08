@@ -623,6 +623,121 @@ kept below for historical reference only (see decisions log):**
 
 ## Decisions on record
 
+- **Lifecycle gating implemented for the `EXCLUDED_STATUSES`/`ktb_styles`
+  gap flagged below (2026-09-08, same-day follow-up), live-validated where
+  possible.** Resolves the "Found but NOT fixed" item in the conflict-scan
+  entry immediately below: `ktb_styles` now always retains every style
+  regardless of Product Status (fixed in `p1p7_beproduct_style_sync.py` —
+  `styles`, the full unfiltered list, is what's written; a separate
+  `styles_for_enrichment` list is used only to skip wasted `app_get()` calls
+  for Finalized/Drop styles). The actual Finalized/Drop staging exclusion
+  moved to `p1p7_beproduct_to_dtc_transform.py`'s new Step 6b, backed by a
+  new pure-Python module `dtc/python/sync/lifecycle.py`
+  (`dtc/tests/test_lifecycle.py`, 20 assertions): while a style's Product
+  Status is terminal (`Finalized`/`Drop`) and the DTC WIP row's OWN current
+  "Product Status" hasn't caught up yet, one last push still goes through
+  (so the terminal status itself reaches DTC); once WIP's own value matches,
+  every future run leaves that row alone; a REACTIVATED style (moved back to
+  a non-terminal status) resumes syncing automatically, no special-casing.
+  Step 6b reads last run's `dtc_wip_<customer>` snapshot (this notebook runs
+  in PARALLEL with `pull_dtc`, so there's an intentional one-run lag before
+  a freshly-pushed terminal status is recognized as "caught up" — not a
+  bug). Fails OPEN (skips the filter, doesn't raise) if the WIP table is
+  unreadable, e.g. first-ever deployment run.
+  **Live-validated** (via a local Databricks SQL warehouse connection, proxy
+  connectivity restored the same day): `get_json_object(data_json,
+  "$['Product Status']")` matches the table's own flattened
+  `col_Product_Status` column exactly on every sampled row; the exact join
+  keys (`bp_style_number`, `color`/`color_wash`) achieve a 100% match rate
+  against the real, already-populated `beproduct_to_dtc_staging` table (11/11
+  rows); 8 real (bp_style_number, color_wash) identities have multiple
+  physical WIP rows (Phase 10 material duplicates) and every one agrees on a
+  single Product Status value, confirming the `groupBy` + `first(ignorenulls)`
+  dedup is safe; running the real `should_include_in_staging()` against all
+  11 live staging rows' actual (BeProduct status, WIP status) pairs returns
+  `include=True` for 100% of them (expected — no live style currently holds
+  a terminal status, so this is a no-regression check, not a terminal-status
+  transition check).
+  **NOT live-validated** (no real terminal-status data exists yet to exercise
+  it): the actual "one last push, then leave WIP alone" transition itself,
+  and reactivation. Both are unit-tested only.
+  **A second, DTC-only mechanism — a WIP `"Active / Dropped"` column hard-
+  stop (`is_wip_row_dropped()`) — was wired in as a deliberate SAFE NO-OP**,
+  per owner decision, despite failing live verification: `GET
+  /v1/views/{id}` still 403s at the Azure Application Gateway (a
+  previously-documented intermittent issue with this specific endpoint); a
+  full `sheetData` scan across all 84 active KTB WIP requests (168 unique
+  populated columns) found zero column matching `active`/`drop` — the
+  closest candidate, a flattened `col_Vendor_Active` column, is 100% NULL
+  across all 237 WIP rows and is very likely an unrelated per-vendor field,
+  not this flag. `is_wip_row_dropped()` defaults to "not dropped" on a
+  missing/blank value, so this mechanism simply never fires today; it
+  activates automatically once the real column name is confirmed (correct
+  `lifecycle.WIP_FIELD_ACTIVE_DROPPED` first, if it turns out to differ from
+  the project-team-supplied `"Active / Dropped"`).
+  **Found in passing, NOT fixed (new gap, flag for a follow-up decision)**:
+  `lifecycle.py`'s original docstring incorrectly claimed
+  `p9a_build_costing_chart.py`'s Step 1b already excludes terminal-status
+  WIP rows from `costing_chart` — live-checked, no such filter exists there.
+  A Finalized/Drop style's WIP row can therefore still enter `costing_chart`
+  today (the docstring has been corrected to note this rather than assert
+  it's handled).
+  Also fixed in the same pass: `scripts/check_dtc_view.py` and
+  `implement_prompts.txt` no longer hardcode the (private) proxy address —
+  proxy config is environment-only (`HTTPS_PROXY`/`HTTP_PROXY`), never
+  committed to a tracked file.
+
+- **Full-pipeline conflict scan (2026-09-08)** — found and fixed 3 real
+  issues, confirmed the rest clean:
+  1. **`run_phase3` was a dead job parameter** since the 2026-09-03 3-job
+     split — `phase3_images` moved to its own `images` job but never got a
+     `run_phase3` widget wired up, so the parameter had zero effect (the
+     task always ran unconditionally). Fixed by adding the same
+     no-op-exit pattern already used for `run_phase1`/`run_phase10`
+     (`beproduct/p3_beproduct_to_dtc_images.py`), wired into
+     `build_images_tasks()` in `scripts/deploy_job.py`.
+  2. **`push_duty_to_wip` was a genuinely redundant dead parameter** —
+     superseded by `run_phase9b`, which already gates the whole
+     `push_duty_rates` task (its only job post-split). Removed from
+     `JOB_PARAMS`.
+  3. **`standalone/beproduct_style_push.py` duplicated Phase 2's write
+     targets** — its `INTERESTED_FIELDS` still included `PARENT VENDOR`/
+     `FACTORY` (fieldIds `parent_vendor`/`factory`), which are Phase 2's
+     EXCLUSIVE DTC→BeProduct write direction (`phase2.REVERSE_HEADER_
+     FIELDS`). This directly contradicted the tool's own documented intent
+     (`standalone/README.md`: "kept separate so it can't accidentally
+     fight the field-ownership partition"). Removed both entries — this
+     tool is manual/legacy and not part of the automated pipeline, so this
+     was a latent risk (only triggered if someone runs it manually), not
+     an active conflict.
+  Also **re-verified clean**: no new Phase 1/10/9b DTC WIP column
+  ownership conflicts (the one overlap, `Fabric Group`/`Placement` via
+  `DEFAULT_FILL_COLS`, is the documented intentional 2026-09-03 design);
+  no dangling `deploy_job.py` task dependencies; `p9a_build_costing_chart.py`
+  and `p10_pull_bom_and_enrich.py` fully consistent with the latest
+  2026-09-07 decisions; no other live notebook duplicates `duty.COSTING_KEY`/
+  `PRODUCT_DESCRIPTION_COLS`/`DUTY_CACHE_KEY_COLS` (the retired
+  `p9b_fill_duty_rates.py` has its own pre-2026-09-07 stale copy of
+  `COSTING_KEY`, but it's explicitly banner-marked superseded and not
+  scheduled).
+  **Found but NOT fixed (flagged for a decision)**: `EXCLUDED_STATUSES`
+  (`{"Finalized", "Drop"}`) is applied to the SAME `styles` list that
+  becomes `ktb_styles`'s write payload in `p1p7_beproduct_style_sync.py`
+  — meaning a style transitioning to Finalized/Drop actually DISAPPEARS
+  from `ktb_styles` entirely on the next FULL sync, contradicting the
+  code's own comment ("still written to ktb_styles (full picture), but
+  filtered out in the transform") — no such compensating filter exists in
+  `p1p7_beproduct_to_dtc_transform.py`. Downstream, `p10_pull_bom_and_
+  enrich.py` joins directly against `ktb_styles`, so this also silently
+  drops such a style from Phase 10 enrichment. Not fixed pending a design
+  decision: should `ktb_styles` genuinely retain the full historical
+  picture (requiring the filter to move into the transform step, with a
+  separate exclusion list for the app-enrichment API-call-avoidance
+  purpose), or is disappearing from `ktb_styles` actually acceptable/
+  intended for terminal-status styles?
+  Also updated `docs/DIAGRAM.md` comprehensively (see next entries) and
+  `scripts/deploy_job.py`'s own top-of-file docstring (stale since the
+  3-job split — still described one unified job's DAG).
 - **Project team decisions (2026-09-07, same day as the entry below,
   REVERSING part of it): (1) no BeProduct fallback for `Content` after
   all; (2) only "Main Fabric" rows enter `costing_chart`.**
@@ -1676,6 +1791,7 @@ python3 dtc/tests/test_registry.py      # request-registry pure-function unit te
 python3 dtc/tests/test_xts_master.py    # Phase 0 XTS Master pure-function unit tests
 python3 dtc/tests/test_duty.py          # Phase 9b NT Orbit Duty Tools pure-function unit tests (fixture-based)
 python3 dtc/tests/test_bom.py           # Phase 10 BOM enrichment pure-function unit tests (upsert semantics)
+python3 dtc/tests/test_lifecycle.py     # Style/WIP-row lifecycle gating pure-function unit tests (Finalized/Drop + Active/Dropped)
 python3 dtc/tests/test_entra_auth.py    # Phase 9b Entra OAuth2 URL-building / callback-parsing pure-function unit tests
 python3 dtc/tests/test_phase1_live.py   # live reversible DTC write test (needs UAT)
 python3 dtc/tests/test_nt_orbit_live.py # LIVE Entra OAuth2 + real NT Orbit API call (needs NT_ORBIT_* env + RUN_NT_ORBIT_LIVE_TEST=true; skips cleanly otherwise)

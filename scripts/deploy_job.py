@@ -16,59 +16,85 @@ now retired) with one job whose pipeline steps are first-class tasks. Benefits:
   * A root `wait_cluster` task absorbs the cold-start latency so that its
     duration in the run graph shows cluster warm-up separately from Step 1/3.
 
-DAG
----
+Jobs (split into 3, 2026-09-03 — see AGENTS.md decisions log)
+--------------------------------------------------------------
+Motivated by DTC's known concurrent-edit limitation (a browser user's save is
+silently rejected/lost against a stale server-side "last_read" timestamp,
+including when this pipeline edits the same request while a user has it
+open): minimizing which jobs touch live DTC, and for how long, reduces that
+contention surface. Splitting also removes Phase 9b's NT Orbit compute
+(~30s/call, serial) from blocking everything else.
+
+  * **`main`** → `BeProduct_DTC_sync_dag` (unchanged job ID) — see DAG below.
+  * **`duty_compute`** → `BeProduct_DTC_sync_duty_compute` — single root task
+    `compute_duty_rates` (`p9b1_compute_duty_rates.py`): NT Orbit lookups →
+    `costing_chart` ONLY. Zero DTC dependency of any kind.
+  * **`images`** → `BeProduct_DTC_sync_images` — single root task
+    `phase3_images` (`p3_beproduct_to_dtc_images.py`), unchanged notebook.
+    Needs nothing from the main job's SAME run to be correct — it reads
+    `dtc_request_mapping`/`beproduct_to_dtc_staging` (left behind by
+    whichever main-job run most recently populated them) and does its own
+    live `DTCConnector.get_sheet()` read immediately before writing.
+
+Select which to build/deploy with `--job {main,duty_compute,images,all}`
+(see `JOB_SPECS`); all 3 share the same `JOB_PARAMS` definitions (each job's
+tasks only reference the subset they need via `P(...)`) and the same
+Instance Pool (see below), but are otherwise fully independent — separate
+schedules, separate clusters per run, separate job IDs.
+
+`main` DAG
+----------
     wait_cluster ─► gate_phase0 ─► phase0_pull ─► phase0_upsert ─► phase0_push ─┬─► bp_style_sync ─► transform ─┐
-                                                                                │                                └─► request_manager ─► phase1_push ─► repull_dtc ─┬─► gate_phase3 ─► phase3_images
-                                                                                ├─► pull_master_dtc ─┬─────────────────────────────────────────────────────────┘   │
-                                                                                │                    └─► gate_phase2 ─► phase2_push                                  └─► fill_bom_data ─► repull_dtc_bom ─┐
-                                                                                │                                                                                       (run_if=ALL_DONE)                  │
-                                                                                └─► gate_phase9a ─► pull_lineplan_dtc ─────────────────────────────────────────────────────────────────────────────────────┴─► build_costing_chart ─► gate_phase9b ─► fill_duty_rates
+                                                                                │                                └─► request_manager ─► phase1_push ─► repull_dtc ─► fill_bom_data ─► repull_dtc_bom ─┐
+                                                                                ├─► pull_master_dtc ─┬─────────────────────────────────────────────────────────┘   (run_if=ALL_DONE)                  │
+                                                                                │                    └─► gate_phase2 ─► phase2_push                                                                    │
+                                                                                └─► gate_phase9a ─► pull_lineplan_dtc ───────────────────────────────────────────────────────────────────────────────┴─► build_costing_chart ─► gate_phase9b ─► push_duty_rates
 
 Neither `phase1_push` nor `fill_bom_data` sit behind a `gate_phase1`/
-`gate_phase10` condition task (unlike `gate_phase0/2/3/9a/9b`) — DELIBERATE,
+`gate_phase10` condition task (unlike `gate_phase0/2/9a/9b`) — DELIBERATE,
 see AGENTS.md decisions log. Databricks propagates a condition-task's
 EXCLUDED outcome to EVERY downstream dependent UNCONDITIONALLY, ignoring
-run_if entirely; since the ENTIRE Phase 3/9/10 chain now transitively depends
-on `phase1_push`, and the entire Phase 9 chain transitively depends on
-`fill_bom_data`, gating either one at the DAG level would silently exclude
-everything behind it whenever its `run_phase*` flag defaults/is set to
-false. Both tasks instead always run and check their own `run_phase1`/
-`run_phase10` widget INSIDE the notebook, `dbutils.notebook.exit(...)`-ing as
-a genuine no-op SUCCESS when disabled.
+run_if entirely; since the ENTIRE Phase 9/10 chain now transitively depends
+on `phase1_push` (via `repull_dtc`) and `fill_bom_data`, gating either one at
+the DAG level would silently exclude everything behind it whenever its
+`run_phase*` flag defaults/is set to false. Both tasks instead always run
+and check their own `run_phase1`/`run_phase10` widget INSIDE the notebook,
+`dbutils.notebook.exit(...)`-ing as a genuine no-op SUCCESS when disabled.
 
-`repull_dtc` (changed 2026-09-02) is a SHARED, unconditional prerequisite for
-both `phase3_images` and `fill_bom_data` — it makes `phase1_push`'s
-newly-created style x color rows visible in `dtc_wip_<customer>` /
-`dtc_request_registry`, which Phase 10 needs to enrich the COMPLETE
-post-Phase-1 state (not `pull_master_dtc`'s pre-Phase-1 snapshot). Only
-`phase3_images` itself is gated by `run_phase3` (via `gate_phase3[true]`);
-`repull_dtc` runs regardless so Phase 10 is never held hostage to whether
-images are wanted.
+`repull_dtc` is `fill_bom_data`'s unconditional prerequisite — it makes
+`phase1_push`'s newly-created style x color rows visible in
+`dtc_wip_<customer>`/`dtc_request_registry`, which Phase 10 needs to enrich
+the COMPLETE post-Phase-1 state (not `pull_master_dtc`'s pre-Phase-1
+snapshot). It is NOT gated by anything (no longer shared with `phase3_images`
+either, since that task moved to its own `images` job entirely on 2026-09-03).
 
 Phase 10 (BOM enrichment from externally-processed techpack extraction, see
 `docs/PHASE10_WORKFLOW.md`) is placed BEFORE `build_costing_chart` (owner
-decision 2026-09-02): Fabric Group/Placement/Mill Fabric Article # values it
-fills in must reach `costing_chart`'s `fabric_content` (part of
-`product_description`) BEFORE Phase 9b calls NT Orbit, or the duty
-classification would be computed against stale/placeholder material data.
-Since Phase 10 only pushes to the LIVE DTC sheet (never mutates Delta
-directly), `repull_dtc_bom` re-pulls `dtc_wip_<customer>` afterward so
-`build_costing_chart` sees the enrichment; `build_costing_chart` depends on
-`repull_dtc_bom`, NOT `pull_master_dtc` directly. `repull_dtc_bom` runs
-unconditionally (`run_if=ALL_DONE` on `fill_bom_data`, no gate of its own) so
-a disabled/skipped/failed Phase 10 never blocks Phase 9a — it just becomes an
-extra, harmless full re-pull in that case.
+decision 2026-09-02): Fabric Group/Placement/Mill Fabric Article #/Content
+values it fills in must reach `costing_chart`'s `fabric_content` BEFORE the
+`duty_compute` job calls NT Orbit, or the duty classification would be
+computed against stale/placeholder material data. Since Phase 10 only pushes
+to the LIVE DTC sheet (never mutates Delta directly), `repull_dtc_bom`
+re-pulls `dtc_wip_<customer>` afterward so `build_costing_chart` sees the
+enrichment; `build_costing_chart` depends on `repull_dtc_bom`, NOT
+`pull_master_dtc` directly. `repull_dtc_bom` runs unconditionally
+(`run_if=ALL_DONE` on `fill_bom_data`, no gate of its own) so a
+disabled/skipped/failed Phase 10 never blocks Phase 9a.
 
-`phase3_images` (image upload) and `fill_duty_rates` (Phase 9b HTS/Duty WIP
-PATCH) are the two parallel, optional, WIP-mutating leaf branches off this
-shared prerequisite chain. They write through disjoint DTC surfaces —
-`phase3_images` uses the binary multipart `/images` endpoint (keyed by
-`rowindex`, touches only the image cell, re-reads the live sheet itself right
-before writing); `fill_duty_rates` uses the JSON `sheetData` PATCH (keyed by
-`rowId`, touches only HTS/Duty/Tariff columns, sourced from Delta as of
-`repull_dtc_bom`) — so running them concurrently is safe without either
-needing to repull immediately before its own write.
+`build_costing_chart` (2026-09-07 additions, see AGENTS.md decisions log):
+only WIP rows with `Fabric Group == "Main Fabric"` enter `costing_chart` at
+all — Phase 10's "Fabric" segment duplicate rows are excluded entirely, so
+Duty/Tariff/HTS Code are only ever computed/pushed for "Main Fabric" rows.
+Also carries `tariff_rate` forward from the table's own PRIOR state (keyed
+by `duty.COSTING_KEY`) before every overwrite, since no live WIP column
+exists yet to "fall back" to the way `hts_code`/`duty_rate_*` do.
+
+`push_duty_rates` (Phase 9b's DTC WIP push half only — the NT Orbit compute
+half lives in the separate `duty_compute` job) reads whatever `costing_chart`
+state the `duty_compute` job's most recent (independently scheduled) run
+left behind and diffs each target field against the current DTC WIP cell
+before PATCHing, so it's correct regardless of run ordering between the 2
+jobs.
 
 Phase 8a/8b (DTC FABRIC → Delta → BeProduct Material Master) are RETIRED
 (2026-09-01): confirmed by the project team to be replaced by a separate
@@ -91,24 +117,31 @@ doesn't deadlock the rest of the DAG).
 
 Cluster
 -------
-One SHARED single-node, NON-Photon job cluster (Classic Preview mode, matching the
-live cluster kind). This workload is tiny-data + driver/IO-bound (≈145 styles,
-≈420 rows); Photon and extra workers add cost without benefit. A shared cluster
-also means ONE cold start for the whole run, measured by `wait_cluster`.
+Each job (main / duty_compute / images) gets its OWN single-node, NON-Photon
+job cluster (Classic Preview mode, matching the original live cluster kind)
+— fully independent, no shared running cluster across jobs. All 3 draw from
+the SAME Instance Pool (`INSTANCE_POOL_ID`, `Standard_D4as_v5`, created
+2026-09-03) purely to cut cold-start from ~5-7 min to ~1-2 min; this is a
+warm-VM optimization only, not a coupling mechanism. This workload is
+tiny-data + driver/IO-bound (≈145 styles, ≈420 rows); Photon and extra
+workers add cost without benefit.
 
 Schedule / log destination
 --------------------------
-These are live-deployed settings retrieved from job 294837488757511 on 2026-06-20
-and encoded here so future `--reset-existing` runs preserve them automatically.
+JOB_SCHEDULE/CLUSTER_LOG_DEST originate from job 294837488757511's
+live-deployed settings (retrieved 2026-06-20) and are shared by all 3 job
+specs so future `--reset-existing`/create runs preserve them automatically.
 Edit JOB_SCHEDULE / CLUSTER_LOG_DEST below to change them; set JOB_SCHEDULE=None
 to deploy without a schedule (safe for brand-new jobs before UAT).
 
 Usage
 -----
-    python scripts/deploy_job.py --dry-run        # print the task graph + settings
-    python scripts/deploy_job.py                  # CREATE a new (unscheduled) job
-    python scripts/deploy_job.py --reset-existing 294837488757511
+    python scripts/deploy_job.py --job all                             # preview all 3 (dry-run only)
+    python scripts/deploy_job.py --job main --dry-run                   # print one job's task graph + settings
+    python scripts/deploy_job.py --job main                             # CREATE a new (unscheduled) job
+    python scripts/deploy_job.py --job main --reset-existing 294837488757511
                                                   # overwrite an existing job in place
+                                                  # (--job duty_compute / --job images for the other 2)
 
 Requires DATABRICKS_HOST + DATABRICKS_PAT (.env).
 """
@@ -201,7 +234,7 @@ JOB_PARAMS = {
     "xts_document": "XTS Master",    # DTC document name for Phase 0 (XTS Master → Directory)
     "run_phase1": "true",
     "run_phase2": "true",
-    "run_phase3": "true",
+    "run_phase3": "true",             # Phase 3: front image upload -- checked INSIDE the notebook (images job), not a DAG gate; see build_images_tasks()
     # Phase 8a/8b RETIRED (2026-09-01): confirmed by the project team to be
     # replaced by a separate "MaterialLib" application. run_phase8a /
     # include_test_sheets / fabric_document removed from the DAG entirely
@@ -217,7 +250,6 @@ JOB_PARAMS = {
     "run_phase10": "true",            # Phase 10: BOM enrichment from techpack extraction (flipped true 2026-09-03 -- extensively live-validated: upsert semantics, Content backfill, material_no key, 0 errors across multiple runs)
     "bom_catalog": "alb_tpm_uat",      # Phase 10: BOM source catalog (alb_tpm_uat | alb_tpm_prd -- NOT derived from dtc_environment, suffix differs)
     "bom_customer_name": "KONTOOR",    # Phase 10: pre-filter customer_name in the shared multi-customer BOM table (scoping/perf only)
-    "push_duty_to_wip": "true",      # Phase 9b: also PATCH filled values back to DTC WIP
     "push_blanks": "false",
     "img_http_timeout": "30",
     "img_max_uploads": "0",
@@ -571,6 +603,7 @@ def build_images_tasks():
         "catalog": CAT, "schema": SCH, "staging_table": "beproduct_to_dtc_staging",
         "dtc_environment": ENV, "dtc_workspace": WS, "dry_run": DRY,
         "http_timeout": P("img_http_timeout"), "max_uploads": P("img_max_uploads"),
+        "run_phase3": P("run_phase3"),
     })]
 
 

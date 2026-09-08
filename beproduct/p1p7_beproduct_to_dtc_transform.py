@@ -40,10 +40,10 @@ print("=" * 80)
 from pyspark.sql.functions import (
     explode, col, lit, concat, concat_ws, current_timestamp, 
     current_date, array, when, coalesce, upper, trim, size, right, substring,
-    from_json, udf
+    from_json, udf, get_json_object, first as F_first
 )
 from pyspark.sql.types import (
-    StructType, StructField, StringType, TimestampType, ArrayType
+    StructType, StructField, StringType, TimestampType, ArrayType, BooleanType
 )
 import logging, sys
 
@@ -57,6 +57,7 @@ for _p in ("/Workspace/Repos/beproduct-sync/DTC/python",
     if _p not in sys.path:
         sys.path.append(_p)
 from sync.samples import format_sample_field, SAMPLE_SUBMIT_FIELDS
+from sync import lifecycle
 
 # Spark UDF wrapper: raw {prefix}_sample_json (JSON string) -> DTC status string.
 format_sample_udf = udf(format_sample_field, StringType())
@@ -513,6 +514,94 @@ try:
 except Exception as e:
     print(f"❌ Failed to map fields: {e}")
     raise
+
+# COMMAND ----------
+
+# ============================================================================
+# CELL 7b: Lifecycle gating (Finalized/Drop "last push then leave WIP alone",
+# reactivation, DTC-only "Active / Dropped" hard-stop)
+# ============================================================================
+# Owner spec, 2026-09-08 -- see dtc/python/sync/lifecycle.py's module
+# docstring for full rationale. Resolves the live-discovered bug where
+# EXCLUDED_STATUSES used to filter ktb_styles's OWN write payload (fixed
+# separately in p1p7_beproduct_style_sync.py, 2026-09-08) -- the actual
+# Finalized/Drop staging exclusion belongs HERE instead, comparing BeProduct's
+# CURRENT Product Status against the DTC WIP row's OWN current Product Status
+# (read from last run's dtc_wip_<customer> snapshot -- this notebook runs in
+# PARALLEL with pull_dtc, so there is an intentional one-run lag: a status
+# pushed THIS run is only recognized as "caught up" on the NEXT run, once
+# pull_dtc has re-pulled it -- consistent with should_include_in_staging()'s
+# semantics, not a bug).
+#
+# The "Active / Dropped" WIP-only hard-stop is WIRED IN as a safe no-op per
+# owner decision (2026-09-08): the column name could not be live-verified
+# (GET /v1/views/{id} 403s at the gateway; a full sheetData scan across all
+# 84 active KTB WIP requests found zero column matching "active"/"drop" in
+# 168 unique populated columns). is_wip_row_dropped() defaults to "not
+# dropped" on a missing/blank value, so this simply never fires today --
+# it activates automatically once the real column name is confirmed and, if
+# different, WIP_FIELD_ACTIVE_DROPPED is corrected in lifecycle.py.
+print("\n" + "=" * 80)
+print("Step 6b: Lifecycle gating (Finalized/Drop + Active/Dropped hard-stop)")
+print("=" * 80)
+
+try:
+    wip_table_full = f"{catalog}.{schema}.dtc_wip_{customer_code.lower()}"
+    print(f"   Reading current WIP status from {wip_table_full} …")
+
+    def jcol(json_col, field_name, alias):
+        """get_json_object wrapper using bracket notation (handles spaces + '/' etc.)."""
+        return get_json_object(col(json_col), f"$['{field_name}']").alias(alias)
+
+    wip_status = (spark.table(wip_table_full)
+        .select(
+            col("bp_style_number").alias("_wip_bp_style_number"),
+            col("color_wash").alias("_wip_color_wash"),
+            jcol("data_json", "Product Status", "wip_product_status"),
+            jcol("data_json", lifecycle.WIP_FIELD_ACTIVE_DROPPED, "wip_active_dropped"),
+        )
+        .where(col("_wip_bp_style_number").isNotNull())
+        # Multiple physical WIP rows can share (bp_style_number, color_wash)
+        # (Phase 10 material duplicates) -- Product Status/Active-Dropped are
+        # header-level, so any one of them reflects the same current value;
+        # first() picks one deterministically enough for this gating purpose.
+        .groupBy("_wip_bp_style_number", "_wip_color_wash")
+        .agg(
+            F_first("wip_product_status", ignorenulls=True).alias("wip_product_status"),
+            F_first("wip_active_dropped", ignorenulls=True).alias("wip_active_dropped"),
+        ))
+    wip_status_count = wip_status.count()
+    print(f"   WIP style×color identities read: {wip_status_count}")
+
+    _should_include_udf = udf(lifecycle.should_include_in_staging, BooleanType())
+    _is_dropped_udf = udf(lifecycle.is_wip_row_dropped, BooleanType())
+
+    before_lifecycle_filter = staging_count
+    df_staging = (df_staging
+        .join(wip_status,
+              on=(df_staging.bp_style_number == wip_status._wip_bp_style_number)
+                 & (df_staging.color == wip_status._wip_color_wash),
+              how="left")
+        .withColumn("_include", _should_include_udf(col("product_status"), col("wip_product_status")))
+        .withColumn("_dropped", _is_dropped_udf(col("wip_active_dropped")))
+        .where(col("_include") & ~col("_dropped"))
+        .drop("_wip_bp_style_number", "_wip_color_wash",
+              "wip_product_status", "wip_active_dropped", "_include", "_dropped"))
+    after_lifecycle_filter = df_staging.count()
+
+    print(f"   Rows before lifecycle filter : {before_lifecycle_filter}")
+    print(f"   Rows after lifecycle filter  : {after_lifecycle_filter}")
+    print(f"   Excluded (Finalized/Drop already caught up in WIP, or WIP "
+          f"'{lifecycle.WIP_FIELD_ACTIVE_DROPPED}' == 'Dropped'): "
+          f"{before_lifecycle_filter - after_lifecycle_filter}")
+    staging_count = after_lifecycle_filter
+
+except Exception as e:
+    # Fail OPEN, not closed: a missing/unreadable WIP table (e.g. very first
+    # deployment run, before pull_dtc has ever populated it) must not block
+    # the whole Phase 1/7 push -- skip the lifecycle filter entirely rather
+    # than raise, leaving df_staging/staging_count unchanged from Step 6.
+    print(f"⚠️  Lifecycle gating skipped (WIP status unavailable): {e}")
 
 # COMMAND ----------
 

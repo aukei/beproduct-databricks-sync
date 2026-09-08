@@ -12,8 +12,12 @@ Run:
     python3 scripts/check_dtc_view.py
 
 Requirements:
-    - Proxy must be reachable: http://100.64.0.7:8888
     - dtc/python must be on the path (handled automatically below)
+    - If your network requires a proxy to reach the DTC API, set the
+      standard HTTPS_PROXY / HTTP_PROXY environment variables in your shell
+      (or local .env) before running this script -- `requests` picks them up
+      automatically. This script never hardcodes a proxy address; none is
+      set here if the variables are absent.
 """
 
 import os
@@ -21,11 +25,16 @@ import sys
 import time
 
 # ── Proxy ──────────────────────────────────────────────────────────────────────
-PROXY = "http://100.64.0.7:8888"
-os.environ["https_proxy"] = PROXY
-os.environ["HTTPS_PROXY"] = PROXY
-os.environ["http_proxy"]  = PROXY
-os.environ["HTTP_PROXY"]  = PROXY
+# No proxy is configured or defaulted here -- this is environment/deployment
+# config, not script config. `requests` already honors HTTPS_PROXY/HTTP_PROXY
+# (or lowercase) from the environment automatically for the `DTCConnector`
+# calls below; PROXIES is only built explicitly for the one raw `requests.get`
+# call in Step 2, which doesn't go through the connector.
+PROXIES = {}
+for _scheme in ("https", "http"):
+    _val = os.environ.get(f"{_scheme.upper()}_PROXY") or os.environ.get(f"{_scheme}_proxy")
+    if _val:
+        PROXIES[_scheme] = _val
 
 # ── Path ───────────────────────────────────────────────────────────────────────
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -100,7 +109,7 @@ header("DTC WIP_ITS_USE VIEW COLUMN CHECKER  —  Phase 6 readiness")
 print(f"  Workspace : {DTC_WORKSPACE}")
 print(f"  Document  : {DTC_DOCUMENT}")
 print(f"  Env       : {DTC_ENV}")
-print(f"  Proxy     : {PROXY}")
+print(f"  Proxy     : {'configured via HTTPS_PROXY/HTTP_PROXY env var' if PROXIES else 'none set'}")
 
 # ── Step 1: connect ────────────────────────────────────────────────────────────
 section("Step 1 — Connect to DTC")
@@ -123,7 +132,7 @@ try:
     resp = requests.get(
         f"https://dtc-api.lfuat.net/api/v1/views/{DOC_VIEW_ID}",
         headers={"x-api-key": DTC_API_KEY, "Content-Type": "application/json"},
-        proxies={"https": PROXY, "http": PROXY},
+        proxies=PROXIES or None,
         timeout=15,
     )
     if resp.status_code == 200:
@@ -271,7 +280,7 @@ if not VIEW_DEF_COLS:
     print()
     print("  4. View definition access — GET /v1/views/{viewId} is not accessible.")
     print(f"       Correct KTB WIP_ITS_USE view ID: {DOC_VIEW_ID!r}")
-    print("       Ensure proxy http://100.64.0.7:8888 is set when running this script.")
+    print("       If your network requires a proxy, ensure HTTPS_PROXY/HTTP_PROXY are set.")
 
 hr("═")
 print("  Check complete.")

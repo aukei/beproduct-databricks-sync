@@ -1,11 +1,20 @@
 # BeProduct ⇄ DTC Sync — Pipeline Data-Flow Diagram
 
-> Databricks-centred view of all implemented sync pipelines.
-> `BeProduct_DTC_sync_dag` — job 294837488757511, 24 tasks. Updated 2026-09-02
-> to reflect the current repo: Phase 0 (XTS Master → Directory), Phase 9b
-> (NT Orbit Duty Tools), and Phase 10 (BOM enrichment, runs on SERVERLESS
-> compute, placed BEFORE the costing chart) added; Phase 8a/8b (FABRIC →
-> Material Master) removed — retired, superseded by a separate "MaterialLib"
+> Databricks-centred view of all implemented sync pipelines. Updated
+> 2026-09-08 to reflect the current repo: the pipeline is **3 independent
+> Databricks jobs** (split 2026-09-03 — see AGENTS.md decisions log):
+> `BeProduct_DTC_sync_dag` (main, unchanged job ID 294837488757511, 20 tasks
+> — Phase 0/1/2/10/9a + Phase 9b's DTC WIP push), `BeProduct_DTC_sync_duty_compute`
+> (single task, NT Orbit → `costing_chart` only, zero DTC dependency), and
+> `BeProduct_DTC_sync_images` (single task, Phase 3 image upload only). All 3
+> share a Databricks Instance Pool for fast cluster warm-up while remaining
+> fully independent — separate schedules, separate clusters per run. Also
+> reflects: `customer_teckpack_style_latest` (not `_log`) as Phase 10's BOM
+> source; Phase 10's `Content` field; the "Main Fabric" only filter on
+> `costing_chart` (2026-09-07); `tariff_rate` carry-forward across rebuilds;
+> `EXCLUDED_STATUSES = {"Finalized", "Drop"}`; and `gate_phase1`/`gate_phase10`
+> removal (checked inside their notebooks instead). Phase 8a/8b (FABRIC →
+> Material Master) remain retired, superseded by a separate "MaterialLib"
 > application. Gate (`gate_phase*`) tasks and control/audit tables are shown
 > explicitly.
 >
@@ -39,7 +48,7 @@ flowchart TB
 
     subgraph LAKEBASE ["⚡  alb_tpm_uat / alb_tpm_prd  (Lakebase, Unity Catalog)"]
         direction TB
-        BOM_SRC(["customer_teckpack_style_log\nbom_unified JSON\nSERVERLESS compute ONLY"])
+        BOM_SRC(["customer_teckpack_style_latest\nbom_unified JSON\nSERVERLESS compute ONLY"])
     end
 
 %% ─── Azure Databricks ────────────────────────────────────────────────────────
@@ -59,7 +68,7 @@ flowchart TB
 
             subgraph DELTA_WIP ["Phases 1 / 2 / 3 / 7"]
                 direction TB
-                T_STYLES[("ktb_styles\nbp_style_number  lf_style_number\nbrand  gender  customer_style_number\n6 × sample_json  colorways_json\nFINALIZED excluded")]
+                T_STYLES[("ktb_styles\nbp_style_number  lf_style_number\nbrand  gender  customer_style_number\n6 × sample_json  colorways_json\nFinalized+Drop excluded")]
                 T_APPREG[("beproduct_style_app_registry\n6 sample-app IDs  per folder")]
                 T_SEASON[("dtc_seasoncode_mapping")]
                 T_STAGING[("beproduct_to_dtc_staging\nbp_style_number ← key\nbrand  season_code  color\n6 × sample status cols\nsupplier='Supplier'\ncolorway_id  beproduct_style_id")]
@@ -73,13 +82,13 @@ flowchart TB
                 direction TB
                 T_LP[("dtc_lineplan_ktb\nlineplan_ref  projected_volume\ntarget_ldp  target_fob\ninternal_sourced")]
                 T_LPREG[("dtc_lineplan_registry")]
-                T_CC[("costing_chart\nStyle × Color × Slot\nhts_code  duty_rate_*  tariff_rate\nFULL OVERWRITE each Phase 9a run")]
+                T_CC[("costing_chart\nStyle × Color × Material × Slot\nmaterial_no in COSTING_KEY\nhts_code/duty_rate_* via WIP fallback\ntariff_rate carried fwd from PRIOR table state\nMain Fabric rows ONLY (2026-09-07)")]
                 T_CACHE[("nt_orbit_duty_cache\nPERSISTENT, never wiped\nkey: description+origin+market\nttl 180d")]
                 T_OAUTH[("nt_orbit_oauth_state\nrotated refresh_token\n(dbutils.secrets is read-only)")]
             end
         end
 
-        subgraph DAG ["BeProduct_DTC_sync_dag  (daily, 24 tasks)"]
+        subgraph DAG ["🔵 BeProduct_DTC_sync_dag  (MAIN job, 294837488757511, 20 tasks)"]
             direction TB
 
             SW["wait_cluster\ncold-start sentinel"]
@@ -92,18 +101,16 @@ flowchart TB
                 P0X["phase0_push\np5utl_..._sync\nmode=PUSH_DIRECTORY"]
             end
 
-            subgraph DAG_WIP ["Phases 1 / 2 / 3 / 7"]
+            subgraph DAG_WIP ["Phases 1 / 2 / 7"]
                 direction TB
-                S1["bp_style_sync\nexcl. Finalized\n+ sample enrichment"]
+                S1["bp_style_sync\nexcl. Finalized+Drop\n+ sample enrichment"]
                 S2["transform\nbrand=brand_hk\nsample UDFs (Phase 7)"]
                 S3["pull_master_dtc\n+ registry refresh"]
                 S4["request_manager\ncreate + share"]
                 S5["phase1_push\nBP→DTC Phases 1+7\nrun_phase1 checked INSIDE\n(no gate task -- see note)"]
                 G2{{"gate_phase2\nrun_phase2"}}
                 S6["phase2_push\nDTC→BP vendor/factory/lot"]
-                S7["repull_dtc\nSHARED prereq for Phase 3 + 10\nunconditional (no gate)"]
-                G3{{"gate_phase3\nrun_phase3"}}
-                S8["phase3_images\nfront image binary"]
+                S7["repull_dtc\nprereq for Phase 10 ONLY\n(unconditional, no gate)"]
             end
 
             subgraph DAG_10 ["Phase 10 (BEFORE costing chart)"]
@@ -112,14 +119,24 @@ flowchart TB
                 S10B["repull_dtc_bom\nunconditional re-pull"]
             end
 
-            subgraph DAG_CC ["Phases 9a / 9b"]
+            subgraph DAG_CC ["Phase 9a + Phase 9b (push half only)"]
                 direction TB
                 G9A{{"gate_phase9a\nrun_phase9a"}}
                 S9A1["pull_lineplan_dtc"]
-                S9A2["build_costing_chart\nWIP × LinePlan join\n4-slot transpose"]
+                S9A2["build_costing_chart\nWIP × LinePlan join\n4-slot transpose\nMain Fabric rows ONLY\ntariff_rate carry-fwd"]
                 G9B{{"gate_phase9b\nrun_phase9b"}}
-                S9B["fill_duty_rates\ncache-first, ~30s/call\npush_to_wip"]
+                S9B2["push_duty_rates\np9b2_push_duty_to_wip\ndiff-checked PATCH"]
             end
+        end
+
+        subgraph JOB_DUTY ["🟣 BeProduct_DTC_sync_duty_compute  (independent job, 1 task)"]
+            direction TB
+            S9B1["compute_duty_rates\np9b1_compute_duty_rates\nNT Orbit → costing_chart ONLY\nzero DTC dependency"]
+        end
+
+        subgraph JOB_IMG ["🟢 BeProduct_DTC_sync_images  (independent job, 1 task)"]
+            direction TB
+            S8["phase3_images\nfront image binary\nrun_phase3 checked INSIDE\n(no gate task, own job)"]
         end
     end
 
@@ -169,12 +186,17 @@ flowchart TB
     S5      -.->|"run_if=ALL_DONE"| S7
     DTC_WIP -->|"targeted re-pull\ninserted_ids from phase1_push"| S7
     S7      --> T_WIP
-    S4      --> G3
-    G3      ==>|"true"| S8
-    S7      --> S8
-    T_WIP   --> S8
-    T_STAGING --> S8
-    S8      ==>|"POST images\nmultipart  blank cells only"| DTC_WIP
+
+%% ─── Phase 3 images — INDEPENDENT job, no task-graph edges to the main job ──
+%% Split out 2026-09-03 (own job, BeProduct_DTC_sync_images). Needs nothing
+%% from the main job's SAME run: reads T_REG/T_STAGING (left behind by
+%% whichever main-job run most recently populated them) and does its own
+%% live DTC get_sheet() read immediately before writing. run_phase3 is
+%% checked INSIDE the notebook (2026-09-08 fix -- was a dead job parameter
+%% for several days after the 2026-09-03 split left it unwired).
+    T_REG     -.->|"left behind by main job's\nmost recent request_manager run"| S8
+    T_STAGING -.->|"left behind by main job's\nmost recent transform run"| S8
+    S8      ==>|"POST images\nmultipart  blank cells only\n(live get_sheet read first)"| DTC_WIP
     S8      --> T_LOG1
 
 %% ─── Phase 8a/8b RETIRED 2026-09-01 (superseded by MaterialLib) ─────────────
@@ -189,19 +211,21 @@ flowchart TB
 %% task on phase1_push / fill_bom_data, unlike every other phase -- a
 %% condition-gated task becomes EXCLUDED (not skipped) when its run_phase*
 %% flag is false, and Databricks propagates EXCLUDED downstream
-%% UNCONDITIONALLY (ignoring run_if), breaking the whole Phase 3/9/10 chain
+%% UNCONDITIONALLY (ignoring run_if), breaking the whole Phase 9/10 chain
 %% behind it. Both flags are instead checked INSIDE their notebook
 %% (dbutils.notebook.exit as a no-op). fill_bom_data depends on repull_dtc
 %% (S7), NOT pull_master_dtc (S3) directly -- it must enrich the COMPLETE
 %% post-Phase-1 style x color state, which only repull_dtc makes visible in
-%% Delta (S3's snapshot predates phase1_push).
+%% Delta (S3's snapshot predates phase1_push). NO BeProduct fallback for
+%% Content (reversed 2026-09-07, project team: "keep DTC WIP true to BOM
+%% extraction") -- a missing/null bom_unified means zero action, period.
     S7        ==> S10A
     BOM_SRC   ==>|"INNER JOIN\nstyle_no + style_season"| S10A
-    S10A      ==>|"PATCH update / INSERT new row\n(no-op + exit if run_phase10=false)"| DTC_WIP
+    S10A      ==>|"PATCH update / INSERT new row\nFabric Group/Placement/Mill Fabric Article #/Content\n(no-op + exit if run_phase10=false)"| DTC_WIP
     S10A      -.->|"run_if=ALL_DONE"| S10B
     S10B      ==> T_WIP
 
-%% ─── Phase 9a/9b — Costing chain (parallel with WIP chain) ─────────────────
+%% ─── Phase 9a — Costing chain (parallel with WIP chain) ────────────────────
     P0X     -.->|"run_if=ALL_DONE"| G9A
     G9A     ==>|"true"| S9A1
     DTC_LP  ==>|"search+get_sheet\nFull view fallback"| S9A1
@@ -209,17 +233,32 @@ flowchart TB
     S9A1    ==> T_LPREG
     T_LP    --> S9A2
     S10B    --> S9A2
-    S9A2    ==> T_CC
+    T_CC    -.->|"read own PRIOR state\nfor tariff_rate carry-fwd"| S9A2
+    S9A2    ==>|"overwrite\n(Main Fabric rows only)"| T_CC
     S9A2    --> G9B
-    G9B     ==>|"true"| S9B
-    T_CC    --> S9B
-    T_CACHE --> S9B
-    T_OAUTH --> S9B
-    ORBIT_API ==>|"POST /calculate/single/\nonly for cache misses/stale"| S9B
-    S9B     ==>|"MERGE  write-once"| T_CC
-    S9B     ==>|"MERGE  new/refreshed entries"| T_CACHE
-    S9B     -->|"rotated refresh_token"| T_OAUTH
-    S9B     -.->|"push_to_wip=true\nPATCH HTS/Duty (no Tariff col yet)"| DTC_WIP
+
+%% ─── Phase 9b, part 1/2 — NT Orbit compute, INDEPENDENT job ────────────────
+%% BeProduct_DTC_sync_duty_compute: single root task, own schedule, ZERO DTC
+%% dependency of any kind. Reads/writes ONLY costing_chart + the persistent
+%% cache -- never touches live DTC. Not gated by run_phase9b (that param now
+%% only controls the main job's push half); pause/resume this job's own
+%% schedule to control it instead.
+    T_CC      --> S9B1
+    T_CACHE   --> S9B1
+    T_OAUTH   --> S9B1
+    ORBIT_API ==>|"POST /calculate/single/\nonly for cache misses/stale"| S9B1
+    S9B1      ==>|"MERGE  COALESCE(new,old)\nper column"| T_CC
+    S9B1      ==>|"MERGE  new/refreshed entries"| T_CACHE
+    S9B1      -->|"rotated refresh_token"| T_OAUTH
+
+%% ─── Phase 9b, part 2/2 — DTC WIP push, back in the MAIN job ───────────────
+%% p9b2_push_duty_to_wip.py: reads whatever costing_chart state the
+%% duty_compute job's most recent (independently scheduled) run left behind;
+%% diffs each target field against the CURRENT DTC WIP cell before PATCHing,
+%% so it's correct regardless of run ordering between the 2 jobs.
+    G9B     ==>|"true"| S9B2
+    T_CC    --> S9B2
+    S9B2    -.->|"PATCH HTS/Duty (US/CA/MX)\n(Tariff Rate: no live WIP col yet,\nstays costing_chart-only)"| DTC_WIP
 
 %% ─── Parallel hints ──────────────────────────────────────────────────────────
     S1 -.->|"parallel"| S3
@@ -235,8 +274,8 @@ flowchart TB
 
     class BP,DTC,ORBIT,LAKEBASE ext
     class T_XTS,T_XTSREG,T_DIR,T_STYLES,T_APPREG,T_SEASON,T_STAGING,T_WIP,T_REG,T_LOG1,T_LOG2,T_LP,T_LPREG,T_CC,T_CACHE,T_OAUTH table
-    class SW,P0P,P0U,P0X,S1,S2,S3,S4,S5,S6,S7,S8,S9A1,S9A2,S9B,S10A,S10B step
-    class G0,G2,G3,G9A,G9B gate
+    class SW,P0P,P0U,P0X,S1,S2,S3,S4,S5,S6,S7,S8,S9A1,S9A2,S9B1,S9B2,S10A,S10B step
+    class G0,G2,G9A,G9B gate
     class P0X_DONE done
 ```
 
@@ -268,8 +307,8 @@ which sheet they came from. `PUSH_DIRECTORY` mode pushes only rows where
 | `division` | `Division` | 1 |
 | `garment_finish` | `Garment Finish` | 1 |
 | `techpack_stage` | `Tech Pack Stage` | 1 |
-| `fabric_group` | `Fabric Group` | 1 |
-| `placement` | `Placement` | 1 |
+| `fabric_group` | `Fabric Group` (default-fill, INSERT-only — Phase 10 owns ongoing updates) | 1 |
+| `placement` | `Placement` (default-fill, INSERT-only — Phase 10 owns ongoing updates) | 1 |
 | `gender` | `Gender` | 6 |
 | `lf_style_number` | `LF Style#` (optional) | 6 |
 | `customer_style_number` | `Legacy Code` (optional) | 6 |
@@ -281,6 +320,16 @@ which sheet they came from. `PUSH_DIRECTORY` mode pushes only rows where
 | `pp_sample_status` | `PP Sample Submission Approval Status` (was `2nd Fit ...`) | 7 |
 | `top_sample_status` | `TOP Sample Approval Status` | 7 |
 | `front_image_url` | `Style Image` (Phase 3, binary) | 3 |
+
+**Default-fill columns** (`Supplier`, `Fabric Group`, `Placement`): written on
+INSERT only (new row creation); NEVER re-pushed on UPDATE once the DTC cell
+already holds ANY value (placeholder or real) — `diff_updatable_fields()`
+skips them once non-blank. `Fabric Group`/`Placement` are Phase 10's fields
+going forward (sourced from TPM/BOM data, not BeProduct) — this was a
+live-discovered bug fix (2026-09-03): before it, a scheduled Phase 1 run
+silently reverted Phase 10's real enrichment back to the placeholder on
+every run. `Content` (new DTC WIP column, written by Phase 10 — see below)
+is NOT a Phase 1 field at all and does not appear in this table.
 
 ### DTC → BeProduct (Phase 2)
 
@@ -302,42 +351,102 @@ history only): `LF Material ID` → `lf_material_id` (BP Material Master key);
 Class`, `Fabric Type`, `Mill Fabric Article #`, `Mill Name`, `KB Fabric Code
 (SAP Code)`.
 
-### `alb_tpm_<env>` BOM → DTC WIP `Fabric Group`/`Placement`/`Mill Fabric Article #` (Phase 10)
+### `alb_tpm_<env>` BOM → DTC WIP `Fabric Group`/`Placement`/`Mill Fabric Article #`/`Content` (Phase 10)
 
-Join key: `ktb_styles.bp_style_number = customer_teckpack_style_log.style_no`
-AND `(ktb_styles.season || " - " || ktb_styles.year) = style_season`. Parses
-`bom_unified` JSON for "Main Fabric" (exactly 1) and "Fabric" (0+) segments;
-`Fabric Group` = the segment's own `bom_detail_name`, not `material_name`.
-Runs on **serverless compute** (source is a Lakebase database) and BEFORE
-Phase 9a's costing chart build, so up-to-date material names reach Phase
-9b's NT Orbit calls. See `docs/PHASE10_WORKFLOW.md`.
+Source table changed 2026-09-03: `customer_teckpack_style_latest`, NOT
+`customer_teckpack_style_log` — pre-resolves the multi-version-per-style
+history the old table required this notebook to dedupe itself. Join key:
+`ktb_styles.bp_style_number = customer_teckpack_style_latest.style_no` AND
+`(ktb_styles.season || " - " || ktb_styles.year) = style_season` (**INNER
+JOIN** — reverted from a same-week LEFT JOIN experiment on 2026-09-07, see
+next paragraph). Parses `bom_unified` JSON for "Main Fabric" (exactly 1) and
+"Fabric" (0+) segments; `Fabric Group` = the segment's own `bom_detail_name`,
+not `material_name`; `Content` (added 2026-09-03) = the segment's
+`material_name`. Runs on **serverless compute** (source is a Lakebase
+database) and BEFORE Phase 9a's costing chart build, so up-to-date material
+data reaches the `duty_compute` job's NT Orbit calls. Upsert semantics: a
+row matching a CURRENT segment gets only `Placement`/blank-`Content`
+upserted; an un-enriched row gets the full field set (first-time
+enrichment); a row with unrecognized real data is left untouched; each new
+"Fabric" segment duplicates every existing row once. See
+`docs/PHASE10_WORKFLOW.md`.
+
+**No BeProduct fallback for `Content`** (decided 2026-09-07, project team:
+"keep DTC WIP true to BOM extraction") — if `bom_unified` is missing/null
+for a style, `Content` (and everything else) is left exactly as-is, even
+though BeProduct's own `core_main_material` header field may hold a
+plausible value. A same-day-earlier LEFT-JOIN + `fallback_content` attempt
+was implemented, live-validated, then explicitly reversed. As long as a
+style's Product Status is not in `("Finalized", "Drop")` (see
+`EXCLUDED_STATUSES` in `p1p7_beproduct_style_sync.py`), its BOM extraction
+is expected to keep updating over time, so a currently-missing techpack
+match is not a permanent gap.
 
 ### DTC LinePlan + WIP × LinePlan → Costing Chart (Phase 9a)
 
-Join key: WIP `"Lineplan Ref #"` = LinePlan `"Lineplan Ref #"`.
-Transpose: Main / Vendor 1 / Vendor 2 / Vendor 3 slots → one row each per vendor.
-`costing_chart` is FULLY OVERWRITTEN every Phase 9a run (no incremental).
-`build_costing_chart` depends on `repull_dtc_bom` (Phase 10's re-pull), not
-`pull_master_dtc` directly.
+Join key: WIP `"Lineplan Ref #"` = LinePlan `"Lineplan Ref #"` (INNER,
+2026-09-01). Step 1b completeness filter drops a WIP row if `material_no`
+(Mill Fabric Article #), `bp_style_no`, or `fabric_content` (Content) is
+blank, if `fabric_content == "Main Fabric"` (guards a historical
+mis-sourcing bug), OR — **added 2026-09-07, project team decision** — if
+`fabric_group != "Main Fabric"`: Phase 10's "Fabric" segment duplicate rows
+are excluded from `costing_chart` entirely, so Duty/Tariff/HTS are only
+ever computed for "Main Fabric" rows. Transpose: Main / Vendor 1 / Vendor 2
+/ Vendor 3 slots → one row each per vendor. `costing_chart`'s match/MERGE
+key (`duty.COSTING_KEY`, shared with the `duty_compute` job) is
+`[customer, season_code, brand, bp_style_no, lf_style_no, color_name,
+lineplan_ref, material_no, supplier_type, supplier, factory]` —
+`material_no` was added 2026-09-03 since Phase 10 can produce multiple WIP
+rows per style×color (Main Fabric + Fabric duplicates) that would otherwise
+collide on this key. `costing_chart` is FULLY OVERWRITTEN every Phase 9a
+run for `hts_code`/`duty_rate_*` (falls back to whatever's on the live WIP
+row, so effectively persists once pushed once) — but `tariff_rate` has NO
+live WIP fallback, so as of 2026-09-07 it's explicitly carried forward from
+the table's OWN prior state (`COALESCE(new, old)` keyed by `COSTING_KEY`)
+instead of being wiped every run. `build_costing_chart` depends on
+`repull_dtc_bom` (Phase 10's re-pull), not `pull_master_dtc` directly.
 
-### costing_chart → NT Orbit Duty Tools → costing_chart / DTC WIP (Phase 9b)
+### costing_chart → NT Orbit Duty Tools → costing_chart (Phase 9b, part 1 —
+### independent `duty_compute` job) / costing_chart → DTC WIP (part 2 —
+### `push_duty_rates`, back in the main job)
 
-`product_description` = Style Description + Content + Gender + Class + Sub
-Class (concatenated); `origin_country_code` = `export_country_code` =
-`production_country`; one call per still-blank market (US/CA/MX).
-`duty_rate_xx` = response's "General Duty" line rate (NOT the combined
-`data.duty_rate`, which also includes tariff+fees); `tariff_rate` = sum of
-other `type="duty"` lines, only ever set from a US-market call. The
-PERSISTENT `nt_orbit_duty_cache` table (never wiped by Phase 9a, unlike
-`costing_chart`) is checked FIRST — a hit within `cache_ttl_days` (default
-180) skips the ~30s API call entirely. `push_to_wip=true` PATCHes HTS/Duty
-Rate back to the live WIP per-slot columns; Tariff Rate has no WIP column
+Split into 2 notebooks/jobs 2026-09-03: `p9b1_compute_duty_rates.py`
+(`BeProduct_DTC_sync_duty_compute` job — NT Orbit + cache only, ZERO DTC
+dependency) and `p9b2_push_duty_to_wip.py` (`push_duty_rates` task, back in
+the MAIN job — reads whatever `costing_chart` state the `duty_compute` job's
+most recent run left behind, diffs each target field against the CURRENT
+DTC WIP cell before PATCHing, correct regardless of run ordering between
+the 2 jobs).
+
+`product_description` = Style Description + Color/Wash + Content + Gender +
+Class + Sub Class (concatenated; `color_name` added 2026-09-07 — REVERSES
+the earlier design that deliberately shared one cache entry across colors,
+since color doesn't affect HS classification — different colors now always
+get their own lookup/cache entry); `origin_country_code` =
+`export_country_code` = `production_country`; a market needs a call when
+its own `duty_rate_xx` is blank, OR (added 2026-09-07, fixes a real bug)
+when `tariff_rate` itself is still blank even if `duty_rate_us` is already
+filled (previously, once `duty_rate_us` persisted via the WIP fallback, the
+US market was considered "already done" forever and `tariff_rate` could
+never be backfilled). `duty_rate_xx` = response's "General Duty" line rate
+(NOT the combined `data.duty_rate`, which also includes tariff+fees);
+`tariff_rate` = sum of other `type="duty"` lines, only ever set from a
+US-market call. The PERSISTENT `nt_orbit_duty_cache` table (never wiped,
+unlike `costing_chart`) is checked FIRST — a hit within `cache_ttl_days`
+(default 180) skips the ~30s API call entirely. `push_duty_rates` PATCHes
+HTS/Duty Rate back to the live WIP per-slot columns; Tariff Rate has no WIP column
 yet, so it stays in `costing_chart` only.
 
 ---
 
-> ❶ Pending DTC admin action: `BP Style#`, `Gender`, `Supplier` columns confirmed
-> present in WIP_ITS_USE view (204 fields as of the 2026-08-28 restructure,
-> up from 198) but were last confirmed blank as of 2026-07-02 — need data
-> migration from `LF Style#` for `BP Style#` before the match-key switch can
-> activate. Re-verify against the live 204-field view before relying on this.
+> **Note on job independence**: `duty_compute` and `images` are triggered on
+> their own schedules and can run concurrently with `main` or with each
+> other. This is safe by design — `compute_duty_rates` never touches DTC at
+> all, and `phase3_images`/`push_duty_rates` write through disjoint DTC
+> surfaces (binary `/images` endpoint keyed by `rowindex` vs. JSON
+> `sheetData` PATCH keyed by `rowId`, touching disjoint columns).
+>
+> A previous version of this footnote (as of 2026-07-02) flagged `BP Style#`/
+> `Gender`/`Supplier` as pending DTC admin migration — all three have since
+> been live-confirmed working end-to-end (2026-08-28 onward) and this is no
+> longer a caveat.

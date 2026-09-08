@@ -522,10 +522,22 @@ print(f"\n   Checking data...")
 print(f"   styles list length: {len(styles)}")
 
 # ---------------------------------------------------------------------------
-# Filter out styles whose Product Status is in EXCLUDED_STATUSES
-# ("Finalized", "Drop"). Applied BEFORE app enrichment so no app_get API
-# calls are wasted on excluded styles. The full raw list (all_styles) is
-# unchanged for reporting purposes.
+# `styles` (this FULL list, unfiltered) is what gets WRITTEN to ktb_styles --
+# FIXED 2026-09-08 (live-discovered bug, full-pipeline conflict scan):
+# EXCLUDED_STATUSES used to filter THIS list before it became the ktb_styles
+# write payload, meaning a style transitioning to Finalized/Drop actually
+# VANISHED from ktb_styles entirely on the next FULL sync -- contradicting
+# this file's own long-standing comment ("still written to ktb_styles, full
+# picture") and silently breaking Phase 10's join (which reads ktb_styles
+# directly). ktb_styles now always reflects EVERY style in the folder,
+# regardless of Product Status -- the Finalized/Drop exclusion instead
+# happens downstream, in p1p7_beproduct_to_dtc_transform.py's staging
+# build (see that file's own "last-update-then-leave-WIP-alone" logic,
+# 2026-09-08 owner spec).
+#
+# A SEPARATE, smaller list is still used to skip wasted app_get() API calls
+# for Finalized/Drop styles (a pure performance optimization -- sample-app
+# data for a terminal-status style is not expected to keep changing).
 # ---------------------------------------------------------------------------
 def _get_style_status(style: dict) -> str:
     """Extract product_status value (field_id style_status) from a raw style record."""
@@ -534,12 +546,12 @@ def _get_style_status(style: dict) -> str:
             return (f.get("value") or "")
     return ""
 
-before_status_filter = len(styles)
-styles = [s for s in styles if _get_style_status(s) not in EXCLUDED_STATUSES]
-excluded_count = before_status_filter - len(styles)
-if excluded_count:
-    print(f"\n   🔵 Excluded {excluded_count} style(s) with status in {set(EXCLUDED_STATUSES)}"
-          f" ({before_status_filter} → {len(styles)} styles remaining)")
+styles_for_enrichment = [s for s in styles if _get_style_status(s) not in EXCLUDED_STATUSES]
+excluded_from_enrichment = len(styles) - len(styles_for_enrichment)
+if excluded_from_enrichment:
+    print(f"\n   🔵 Skipping sample-app enrichment for {excluded_from_enrichment} style(s) "
+          f"with status in {set(EXCLUDED_STATUSES)} ({len(styles)} styles total, "
+          f"still written to ktb_styles in full)")
 
 HAS_DATA = len(styles) > 0
 
@@ -649,19 +661,23 @@ if HAS_DATA:
             print(f"   ⚠️  {errors} app_get call(s) failed (left as '[]')")
         return enrichment
 
-    # Always initialise the map so every row gets the 6 JSON-array columns ('[]').
+    # Always initialise the map so EVERY style (including Finalized/Drop, which
+    # are still written to ktb_styles in full) gets the 6 JSON-array columns
+    # defaulted to '[]' -- then MERGE in real enrichment for styles_for_enrichment
+    # only, so a Finalized/Drop style's entry is never simply missing.
     _empty_json = json.dumps([])
     app_enrichment = {s["id"]: {c: _empty_json for c in SAMPLE_APP_COLUMNS} for s in styles}
     if enrich_sample_apps_val:
         _app_t0 = time.perf_counter()
         _app_ids = resolve_sample_app_ids()
-        _n_calls = len(styles) * len(_app_ids)
-        print(f"   {len(styles)} styles × {len(_app_ids)} sample apps = {_n_calls} "
+        _n_calls = len(styles_for_enrichment) * len(_app_ids)
+        print(f"   {len(styles_for_enrichment)} styles × {len(_app_ids)} sample apps = {_n_calls} "
               f"app_get calls ({app_max_workers_val} workers)…")
         if refresh_mode_val != "FULL":
             print("   ⚠️  INCREMENTAL run: only changed styles are enriched. App-only "
                   "changes on unchanged styles are NOT captured — use FULL for that.")
-        app_enrichment = enrich_styles_with_sample_apps(styles, _app_ids, app_max_workers_val)
+        app_enrichment.update(
+            enrich_styles_with_sample_apps(styles_for_enrichment, _app_ids, app_max_workers_val))
         _n_with = sum(1 for v in app_enrichment.values()
                       if any(x not in (None, "[]") for x in v.values()))
         print(f"   ✅ Enriched in {time.perf_counter()-_app_t0:.1f}s — "

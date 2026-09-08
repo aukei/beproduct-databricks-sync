@@ -110,6 +110,14 @@ dbutils.widgets.text("dtc_workspace", "KTB", "DTC Workspace Name")
 dbutils.widgets.text("dry_run", "true", "Dry Run (true/false)")
 dbutils.widgets.text("http_timeout", "30", "CDN download timeout (s)")
 dbutils.widgets.text("max_uploads", "0", "Max uploads this run (0 = no cap)")
+# Checked INSIDE the notebook, NOT via a DAG-level gate_task -- this job
+# (BeProduct_DTC_sync_images) has a single root task with no upstream
+# dependents, so there's no EXCLUDED-cascade risk here the way there was for
+# phase1_push/fill_bom_data in the main job; this widget was simply left
+# unwired when Phase 3 moved to its own job on 2026-09-03 (found + fixed
+# 2026-09-08 during a full pipeline conflict scan -- see AGENTS.md decisions
+# log). Same no-op-exit pattern as run_phase1/run_phase10 for consistency.
+dbutils.widgets.text("run_phase3", "true", "Run Phase 3 (true/false) -- checked internally")
 
 catalog = dbutils.widgets.get("catalog")
 schema = dbutils.widgets.get("schema")
@@ -119,6 +127,11 @@ workspace = dbutils.widgets.get("dtc_workspace").strip()
 dry_run = dbutils.widgets.get("dry_run").strip().lower() == "true"
 http_timeout = int(dbutils.widgets.get("http_timeout"))
 max_uploads = int(dbutils.widgets.get("max_uploads"))
+run_phase3 = dbutils.widgets.get("run_phase3").strip().lower() == "true"
+
+if not run_phase3:
+    print("run_phase3=false -- skipping entirely (no DTC/BeProduct access made).")
+    dbutils.notebook.exit("SKIPPED_run_phase3_false")
 
 staging_full = f"{catalog}.{schema}.{staging_table}"
 mapping_full = f"{catalog}.{schema}.dtc_request_mapping"
