@@ -72,17 +72,14 @@ all-or-nothing `style_already_enriched` design this replaces):
         bullet for the even more common trigger of this rule.
   * If the style's `bom_unified` is entirely missing/blank THIS RUN, or its
     "Main Fabric" segment itself is absent (parses to no "Main Fabric" at
-    all): NO Fabric Group/Placement/Mill Fabric Article #/Content action is
-    taken for the whole style — never revert, and NO BeProduct fallback for
-    `Content` either (decided 2026-09-07, project team: "keep DTC WIP true
-    to BOM extraction" — see `plan_style_enrichment()`'s docstring for the
-    full rationale, including why this is not a permanent gap for
-    non-Finalized/non-Drop styles). Live-confirmed real trigger
-    (2026-09-03): switching the source table to `customer_teckpack_style_
-    latest` (see below) left `bom_unified` NULL for some previously-BOM-
-    bearing test styles (KTB-00016, KTB-00021) — this rule is what keeps
-    their earlier, correct Phase 10 enrichment intact rather than silently
-    wiping it.
+    all): NO Fabric Group/Placement/Mill Fabric Article # action is taken
+    for the whole style — never revert. (`Content` is never touched by
+    Phase 10 at all any more — see below — so it is not part of this rule.)
+    Live-confirmed real trigger (2026-09-03): switching the source table to
+    `customer_teckpack_style_latest` (see below) left `bom_unified` NULL
+    for some previously-BOM-bearing test styles (KTB-00016, KTB-00021) —
+    this rule is what keeps their earlier, correct Phase 10 enrichment
+    intact rather than silently wiping it.
   * For each "Fabric" segment (0 or more) whose (Fabric Group, Mill Fabric
     Article #) key is NOT already represented by ANY existing row for this
     style: it's genuinely new — duplicate every existing row once per such
@@ -90,10 +87,38 @@ all-or-nothing `style_already_enriched` design this replaces):
     produces N new INSERTs).
   * The value written to `Fabric Group` is the segment's own
     `bom_detail_name` (i.e. literally "Main Fabric" or "Fabric"), NOT
-    `material_name`. `Placement` / `Mill Fabric Article #` map from
-    `placement` / `material_no`. `Content` (added 2026-09-03) maps from
-    `material_name` instead — see `WIP_FIELD_CONTENT`'s comment for why
-    Phase 10 writes this itself rather than relying on DTC's own trigger.
+    `material_name`. `Placement` maps from `placement`.
+  * **`Mill Fabric Article #` maps from `material_name` — CORRECTED
+    2026-09-09 (owner spec, supersedes the original `material_no` mapping).**
+    Live-discovered the same day: for a newer batch of test styles
+    (KTB-00024, 00026-00028, 00031), `material_name` held values that looked
+    like material CODES (e.g. `"WV-0063"`) while `material_no` held a
+    different code format (e.g. `"LF-BD26-000005--TW"`) — the OPPOSITE of
+    what the original 2026-09-02 field-name assumption expected. Live-
+    checked against KTB-00029/KTB-00030 (owner-supplied confirmation
+    styles): `material_name` = `"LTCL6080"` / `"WV-0064"` / `"WG24-01706"` —
+    consistently article-code-shaped, confirming `material_name` (not
+    `material_no`) is the correct source for "Mill Fabric Article #" across
+    the real data, regardless of what any individual older/inconsistent
+    test style happens to show. `material_no` is no longer read by this
+    module at all.
+  * **`Content` is ALWAYS left blank by Phase 10 — CORRECTED 2026-09-09,
+    REVERSES the 2026-09-03 decision below `WIP_FIELD_CONTENT` used to
+    document.** That earlier decision had Phase 10 write `material_name`
+    into `Content`; live-discovered 2026-09-08 that for the same newer test
+    styles above, this pushed material-CODE-shaped values (e.g. `"WV-0063"`)
+    into DTC's `Content` cell — a real live-data corruption, not merely a
+    theoretical risk. Per owner spec (2026-09-09), Phase 10 no longer writes
+    `Content` at all, in any code path (first-time enrichment, upsert
+    backfill, or INSERT). The field is left exactly as DTC's own (unreliable
+    — see the trigger note this replaces) mechanism leaves it. NOTE: this
+    means `costing_chart.fabric_content` (sourced from the WIP `"Content"`
+    column, see `p9a_build_costing_chart.py`) will typically stay blank too,
+    since DTC's own Content-population trigger was already confirmed
+    unreliable in UAT — a real, accepted downstream consequence, not a bug;
+    `fabric_content` is only one of six `duty.PRODUCT_DESCRIPTION_COLS`
+    concatenated for NT Orbit, so this degrades gracefully rather than
+    blocking Phase 9b.
   * A BOM segment list with neither "Main Fabric" nor "Fabric" (e.g. only
     "Trim"/"Label"/"Stitch/Seam") is equivalent to "no Main Fabric" above —
     zero actions, never revert.
@@ -147,18 +172,17 @@ SEGMENT_FABRIC = "Fabric"
 # dynamicFields, 2026-09-02) — NOT the Delta col_* normalized names.
 WIP_FIELD_FABRIC_GROUP = "Fabric Group"
 WIP_FIELD_PLACEMENT = "Placement"
+# CORRECTED 2026-09-09 (owner spec): sourced from the BOM detail's
+# `material_name`, NOT `material_no` -- see the module docstring's spec
+# section for the live evidence (KTB-00024/26-28/31 vs. KTB-00029/00030).
 WIP_FIELD_MILL_FABRIC_ARTICLE = "Mill Fabric Article #"
-# Added 2026-09-03 (owner spec): "Content" is normally populated by a
-# DTC-internal trigger polling Mill Fabric Article #, but that trigger's
-# timing/conditions in UAT are unreliable (live-confirmed: every KTB test
-# row still blank days after Mill Fabric Article # was set) and was blocking
-# Phase 9a's fabric-details completeness filter. For our purposes, Phase 10
-# writes "Content" itself from the SAME BOM segment's `material_name` --
-# removing that dependency on DTC's own trigger entirely. This is an
-# intentional, accepted dual-write (DTC's trigger may also write the same
-# cell independently) per explicit owner instruction, unlike the earlier
-# Phase 1/Phase 10 Fabric Group conflict, which was an unintentional bug.
-WIP_FIELD_CONTENT = "Content"
+
+# REMOVED 2026-09-09 (owner spec, reverses the 2026-09-03 decision this
+# constant used to document): Phase 10 no longer writes "Content" at all --
+# see the module docstring's spec section for why (live-data corruption
+# discovered 2026-09-08). If DTC's own trigger writes this cell
+# independently, that's outside this pipeline's control; this module simply
+# never targets "Content" in any PATCH/INSERT payload any more.
 
 
 def _blank(v: Any) -> bool:
@@ -242,7 +266,7 @@ def parse_bom_segments(bom_unified: Any) -> ParsedBomSegments:
 def extract_enrichment_fields(detail: Dict[str, Any]) -> Dict[str, Optional[str]]:
     """
     Map one BOM detail object ("Main Fabric" or a "Fabric" segment) to the
-    four fields Phase 10 writes, using the module's own (Delta-agnostic)
+    three fields Phase 10 writes, using the module's own (Delta-agnostic)
     field names — see `to_wip_fields()` for the raw-DTC-field-name mapping
     used for the actual PATCH.
 
@@ -250,26 +274,32 @@ def extract_enrichment_fields(detail: Dict[str, Any]) -> Dict[str, Optional[str]
     literally "Main Fabric" or "Fabric"), NOT `material_name` — corrected
     2026-09-02 per an explicit spec amendment.
 
-    `content` (added 2026-09-03) IS the segment's `material_name` — see
-    `WIP_FIELD_CONTENT`'s comment for why Phase 10 writes this itself rather
-    than waiting on DTC's own trigger.
+    `mill_fabric_article` is the segment's `material_name` — CORRECTED
+    2026-09-09 (owner spec; was `material_no` until this date). See the
+    module docstring's spec section for the live evidence.
+
+    There is no `content` key any more (REMOVED 2026-09-09, owner spec) —
+    Phase 10 never writes DTC's "Content" field at all. See the module
+    docstring's spec section for why (live-data corruption discovered
+    2026-09-08: `material_name` held material-code-shaped values for a
+    newer batch of test styles, not a real content/fabric description).
     """
     return {
         "fabric_group": detail.get("bom_detail_name"),
         "placement": detail.get("placement"),
-        "mill_fabric_article": detail.get("material_no"),
-        "content": detail.get("material_name"),
+        "mill_fabric_article": detail.get("material_name"),
     }
 
 
 def to_wip_fields(fields: Dict[str, Optional[str]]) -> Dict[str, Optional[str]]:
     """Map `extract_enrichment_fields()`'s output to raw DTC WIP field names,
-    ready to merge into a `sheetData` PATCH/INSERT row object."""
+    ready to merge into a `sheetData` PATCH/INSERT row object. No "Content"
+    key is ever produced (REMOVED 2026-09-09, owner spec) -- Phase 10 does
+    not write that field at all any more."""
     return {
         WIP_FIELD_FABRIC_GROUP: fields.get("fabric_group"),
         WIP_FIELD_PLACEMENT: fields.get("placement"),
         WIP_FIELD_MILL_FABRIC_ARTICLE: fields.get("mill_fabric_article"),
-        WIP_FIELD_CONTENT: fields.get("content"),
     }
 
 
@@ -339,7 +369,6 @@ def plan_style_enrichment(
     mill_fabric_article_key: str = "mill_fabric_article",
     placement_key: str = "placement",
     row_id_key: str = "row_id",
-    content_key: Optional[str] = "content",
 ) -> List[RowAction]:
     """
     Plan every action needed to upsert ONE style's existing WIP rows from
@@ -348,9 +377,7 @@ def plan_style_enrichment(
     docstring for the full upsert-semantics spec; summary:
 
       - Row already matches a current segment by (Fabric Group, Mill
-        Fabric Article #): update `Placement` only if it changed, PLUS
-        backfill `Content` if it's currently blank there (added 2026-09-03
-        — see below; never overwrites a real existing Content value).
+        Fabric Article #): update `Placement` only if it changed.
       - Row is still un-enriched (blank/placeholder): apply "Main Fabric"'s
         full field set (first-time enrichment).
       - Row carries some OTHER real value not in the current BOM data
@@ -361,39 +388,21 @@ def plan_style_enrichment(
       - Each "Fabric" segment not yet represented by any existing row is
         genuinely new: duplicate every existing row once per such segment.
 
-    Content backfill (added 2026-09-03): a row enriched by an EARLIER
-    version of this notebook (before `Content` existed as a target field at
-    all) already satisfies the "matches a current segment" branch above and
-    would otherwise NEVER get `Content` populated — first-time enrichment
-    (the `is_unenriched` branch) is the only OTHER place `Content` is
-    written, and that branch is for un-enriched rows only. So the matched
-    branch also fills `Content` whenever the row's current value (via
-    `content_key`) is blank, sourced from the SAME matched segment's
-    `content` field. Pass `content_key=None` to disable this check entirely
-    if the caller doesn't track the row's current Content value.
-
-    NO BeProduct fallback for `Content` (decided 2026-09-07, project team
-    decision, REVERSES a same-week same-day earlier attempt — see AGENTS.md
-    decisions log): "keep DTC WIP true to BOM extraction" — if techpack
-    (`customer_teckpack_style_latest`) has no/null `bom_unified` for a
-    style, `Content` (and everything else) is left exactly as-is (typically
-    blank), even though BeProduct's own `core_main_material` header field
-    may hold a plausible value. As long as a style's Product Status is not
-    in `("Finalized", "Drop")`, its BOM extraction is expected to keep being
-    updated over time, so this is not a permanent gap — a style with
-    currently-missing techpack data will start flowing through again once
-    its techpack data appears.
+    `Content` is NEVER touched by this function (REMOVED 2026-09-09, owner
+    spec — see the module docstring's spec section and `WIP_FIELD_
+    MILL_FABRIC_ARTICLE`'s comment for the full history, including the
+    live-data corruption that triggered this reversal). There is no
+    `content_key` parameter any more.
 
     Args:
         existing_rows: the style's current WIP rows (one dict per colorway
             row), each containing at least `fabric_group_key` (current
             Fabric Group value), `mill_fabric_article_key` (current Mill
             Fabric Article # value), `placement_key` (current Placement
-            value), `content_key` (current Content value, or omit/None to
-            skip the backfill check), and `row_id_key` (its DTC rowId). Any
-            other keys are passed through untouched into `RowAction.
-            base_row` for "insert" actions, so the notebook can copy the
-            FULL row when creating a genuinely new DTC row.
+            value), and `row_id_key` (its DTC rowId). Any other keys are
+            passed through untouched into `RowAction.base_row` for "insert"
+            actions, so the notebook can copy the FULL row when creating a
+            genuinely new DTC row.
         bom_unified: the raw `bom_unified` JSON (string or parsed).
 
     Returns:
@@ -410,10 +419,7 @@ def plan_style_enrichment(
     if target_segments is None:
         # No Main Fabric this run (BOM missing entirely, or Main Fabric
         # itself vanished) -- never revert existing Fabric Group/Placement/
-        # Mill Fabric Article # data. No BeProduct fallback for Content
-        # either (see docstring above) -- techpack extraction is the sole
-        # source of truth; a missing/null techpack means Content stays
-        # exactly as-is (typically blank).
+        # Mill Fabric Article # data.
         return []
     main_target, fabric_targets = target_segments[0], target_segments[1:]
 
@@ -429,25 +435,13 @@ def plan_style_enrichment(
         matched_target = next(
             (t for t in target_segments if segment_key(t) == rkey), None)
         if matched_target is not None:
-            # Already represents this exact segment -- upsert ONLY the
-            # fields expected to still legitimately drift or need
-            # backfilling, never re-write Fabric Group/Mill Fabric Article #
-            # (they're already correct, that's how we matched).
+            # Already represents this exact segment -- upsert ONLY Placement
+            # (the one field expected to still legitimately drift), never
+            # re-write Fabric Group/Mill Fabric Article # (they're already
+            # correct, that's how we matched).
             upsert_fields: Dict[str, Optional[str]] = {}
             if row.get(placement_key) != matched_target.get("placement"):
                 upsert_fields[WIP_FIELD_PLACEMENT] = matched_target.get("placement")
-            # Content backfill (added 2026-09-03): rows enriched by an
-            # earlier version of this notebook (before Content existed as a
-            # target field at all) already satisfy the match above and would
-            # otherwise NEVER get Content populated, since first-time
-            # enrichment (the `is_unenriched` branch below) is the only
-            # other place Content is written. Only fills a currently-blank
-            # cell -- never overwrites a real existing Content value (e.g.
-            # one DTC's own trigger already wrote independently).
-            if content_key and _blank(row.get(content_key)):
-                content_val = matched_target.get("content")
-                if not _blank(content_val):
-                    upsert_fields[WIP_FIELD_CONTENT] = content_val
             if upsert_fields:
                 actions.append(RowAction(
                     kind="update",

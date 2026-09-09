@@ -37,24 +37,23 @@ this notebook pre-filters `customer_name = bom_customer_name` (default
 data) purely as a scoping/performance optimization; the join keys alone are
 already customer-correct without it.
 
-**No BeProduct fallback for `Content` (decided 2026-09-07, project team
-decision)**: "keep DTC WIP true to BOM extraction" — if techpack
-(`customer_teckpack_style_latest`) has no/null `bom_unified` for a style,
-`Content` is left exactly as-is (typically blank), even though BeProduct's
-own `core_main_material` header field ("MAIN MATERIAL CONTENT",
-`ktb_styles.bom_material_1`) may hold a plausible value (live-confirmed:
-KTB-00016/KTB-00021 have exactly this situation — real `core_main_material`
-values but no current `bom_unified` match). A same-day-earlier attempt to
-use `core_main_material` as a fallback source (LEFT JOIN + a
-`fallback_content` parameter on `bom.plan_style_enrichment()`) was
-implemented, live-validated, then EXPLICITLY REVERSED per this decision —
-see AGENTS.md's decisions log for the full history. As long as a style's
-Product Status is not in `("Finalized", "Drop")` (see `EXCLUDED_STATUSES` in
-`p1p7_beproduct_style_sync.py`), its BOM extraction is expected to keep
-being updated over time, so a currently-missing techpack match is not
-treated as a permanent gap — the style will start flowing through again
-once its techpack data appears, consistent with the existing "never revert"
-semantics below.
+**`Content` is NEVER written by Phase 10 at all — CORRECTED 2026-09-09,
+supersedes everything below this paragraph (kept for history).** An
+earlier 2026-09-03 decision had Phase 10 write BOM `material_name` into
+DTC's "Content" WIP column (to work around DTC's own unreliable
+Content-population trigger). Live-discovered 2026-09-08: for a newer batch
+of test styles (KTB-00024, 00026-00028, 00031), `material_name` itself held
+material-CODE-shaped values (e.g. `"WV-0063"`), so that mapping pushed
+code-like garbage into live DTC `Content` cells — a real data corruption,
+not a theoretical risk. Per owner spec (2026-09-09), Phase 10 no longer
+targets `Content` in any code path — see `dtc/python/sync/bom.py`'s module
+docstring for the full history and the corrected `Mill Fabric Article #`
+mapping (now sourced from `material_name` instead of `material_no`, live-
+confirmed against KTB-00029/KTB-00030). The now-obsolete "no BeProduct
+fallback for Content" sub-decision (2026-09-07) and the same-day-earlier
+`core_main_material`/`fallback_content` LEFT JOIN experiment it reversed
+are both moot now that Content isn't written at all — see AGENTS.md's
+decisions log for that history.
 
 Enrichment decision logic — UPSERT semantics (pure, unit-tested in
 dtc/python/sync/bom.py; REVISED 2026-09-03, see the decisions log in
@@ -89,8 +88,10 @@ AGENTS.md for the full history including the earlier all-or-nothing design):
      (unchanged fan-out shape: N colorway rows x each new segment produces
      N new INSERTs).
   6. `Fabric Group` is set to the segment's own `bom_detail_name` (literally
-     "Main Fabric" or "Fabric"), NOT `material_name`. `Placement` / `Mill
-     Fabric Article #` map from `placement` / `material_no`.
+     "Main Fabric" or "Fabric"), NOT `material_name`. `Placement` maps from
+     `placement`; `Mill Fabric Article #` maps from `material_name` (NOT
+     `material_no` — corrected 2026-09-09, see `bom.py`'s docstring). DTC's
+     `Content` field is never written by this phase at all (see above).
 
 Versioning: the older `customer_teckpack_style_log` table had a
 `current_version` column and could carry MULTIPLE rows per (style_no,
@@ -118,15 +119,23 @@ This notebook does NOT directly mutate the local Delta `dtc_wip_ktb` table
 after pushing — like Phase 1's push, it pushes to the LIVE DTC sheet only.
 
 DAG placement (owner decision 2026-09-02): this notebook runs BEFORE
-`build_costing_chart`, not after — the whole point of Phase 10 is to get
-up-to-date material names into `costing_chart`'s `fabric_content` (part of
+`build_costing_chart`, not after — the original intent was to get up-to-date
+material content into `costing_chart`'s `fabric_content` (part of
 `product_description`) so Phase 9b's NT Orbit duty classification is computed
-against real BOM data, not the "MAIN MATERIAL CONTENT" placeholder. Since
-this notebook never mutates Delta directly, `scripts/deploy_job.py` runs a
-dedicated `repull_dtc_bom` task (a full `p1_pull_masters_to_delta` re-pull)
-immediately afterward, and `build_costing_chart` depends on THAT re-pull, not
-on the earlier `pull_master_dtc`. See that file's DAG diagram for the exact
-task graph.
+against real BOM data, not the "MAIN MATERIAL CONTENT" placeholder. NOTE
+(2026-09-09): since Phase 10 no longer writes DTC's "Content" field at all
+(see above), `fabric_content` will typically stay blank going forward unless
+DTC's own (previously unreliable) Content-population trigger fills it
+independently — a real, accepted consequence, not a bug; `fabric_content` is
+only one of six columns `duty.PRODUCT_DESCRIPTION_COLS` concatenates for NT
+Orbit, so this degrades gracefully. The DAG ordering itself (Phase 10 before
+`build_costing_chart`) is unchanged, since `Fabric Group`/`Mill Fabric
+Article #`/`Placement` are still real Phase 10 outputs `costing_chart`
+depends on. Since this notebook never mutates Delta directly,
+`scripts/deploy_job.py` runs a dedicated `repull_dtc_bom` task (a full
+`p1_pull_masters_to_delta` re-pull) immediately afterward, and
+`build_costing_chart` depends on THAT re-pull, not on the earlier
+`pull_master_dtc`. See that file's DAG diagram for the exact task graph.
 """
 
 # COMMAND ----------
@@ -275,7 +284,8 @@ for r in spark.table(wip_table).where(F.col("bp_style_number").isin(list(matched
         "fabric_group": row_fields.get(bom.WIP_FIELD_FABRIC_GROUP),
         "mill_fabric_article": row_fields.get(bom.WIP_FIELD_MILL_FABRIC_ARTICLE),
         "placement": row_fields.get(bom.WIP_FIELD_PLACEMENT),
-        "content": row_fields.get(bom.WIP_FIELD_CONTENT),  # for the Content-backfill check, see bom.py
+        # No "content" key any more -- Content is never read/written by
+        # Phase 10 (removed 2026-09-09, see bom.py's module docstring).
         "request_id": wr.get("request_id"),
         "data_json": wr.get("data_json"),
     })

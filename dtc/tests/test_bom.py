@@ -17,7 +17,6 @@ from sync.bom import (
     to_wip_fields, segment_key, is_unenriched, build_target_segments,
     plan_style_enrichment, PLACEHOLDER_FABRIC_GROUP,
     WIP_FIELD_FABRIC_GROUP, WIP_FIELD_PLACEMENT, WIP_FIELD_MILL_FABRIC_ARTICLE,
-    WIP_FIELD_CONTENT,
     build_insert_row_payload, INSERT_EXCLUDE_COLS, compute_non_writable_cols,
 )
 
@@ -43,16 +42,26 @@ check(build_style_season("  Spring  ", " 2028 ") == "Spring - 2028",
 check(build_style_season("", "") is None, "both blank -> None")
 
 # ---------------------------------------------------------------------------
-print("\n[2] parse_bom_segments() — real KTB-00023 data (Main Fabric + 1 Fabric segment)")
+# NOTE (2026-09-09): fixture `material_name`/`material_no` values below use
+# the CORRECTED live-data shape (matching KTB-00029/KTB-00030, owner-
+# confirmed 2026-09-09) -- `material_name` holds the article-code-like value
+# ("WV-0063", "LTCL6080", ...) and `material_no` holds a different ("LF-...")
+# code format that `bom.py` no longer reads at all. This supersedes an
+# earlier fixture shape (based on early KTB-00023/00016 live data) where
+# `material_name` held a descriptive fabric-content string instead -- that
+# shape turned out to be inconsistent across the source table and is no
+# longer what this module's mapping expects; per owner spec, the CORRECTED
+# mapping applies "irrespective to active test cases."
+print("\n[2] parse_bom_segments() — Main Fabric + 1 Fabric segment (KTB-00023-like)")
 REAL_BOM_KTB00023 = json.dumps([{
     "part": "BOM",
     "details": [
         {"bom_detail_name": "Main Fabric", "material_type": "2/2 Twill",
-         "material_name": "100% Recycled Nylon Shell", "material_no": "WV-0063",
+         "material_name": "WV-0063", "material_no": "LF-BD26-000005--TW",
          "mill_supplier": "BEPRODUCT VENDOR", "usage": "BODICE", "placement": "BODICE"},
         {"bom_detail_name": "Fabric", "material_type": "Tulle",
-         "material_name": "LINING FABRIC (100% POLYESTER): AVAILABLE LINING",
-         "material_no": "WV-0047", "usage": "Body Front", "placement": "Body Front"},
+         "material_name": "WV-0047",
+         "material_no": "LF-BD26-000006--TU", "usage": "Body Front", "placement": "Body Front"},
         {"bom_detail_name": "Stitch/Seam", "material_name": "TOPS THREAD T105"},
         {"bom_detail_name": "Trim", "material_name": "16L PLASTIC BUTTON DTM"},
         {"bom_detail_name": "Label", "material_name": "WOMEN Label"},
@@ -61,16 +70,16 @@ REAL_BOM_KTB00023 = json.dumps([{
 }])
 
 segs = parse_bom_segments(REAL_BOM_KTB00023)
-check(segs.main_fabric is not None and segs.main_fabric["material_no"] == "WV-0063",
+check(segs.main_fabric is not None and segs.main_fabric["material_name"] == "WV-0063",
       "Main Fabric segment extracted")
-check(len(segs.fabric_list) == 1 and segs.fabric_list[0]["material_no"] == "WV-0047",
+check(len(segs.fabric_list) == 1 and segs.fabric_list[0]["material_name"] == "WV-0047",
       "exactly one Fabric segment extracted")
 check(not segs.is_empty(), "non-empty when segments found")
 
 print("\n[2b] parse_bom_segments() — Main Fabric only (no Fabric segment; e.g. KTB-00016)")
 REAL_BOM_KTB00016 = json.dumps([{"part": "BOM", "details": [
-    {"bom_detail_name": "Main Fabric", "material_name": "123455 - 97%Cotton 3%Spandex",
-     "material_no": "WV-0064", "placement": "bodice"},
+    {"bom_detail_name": "Main Fabric", "material_name": "WV-0064",
+     "material_no": "LF-BD26-000003--PN", "placement": "bodice"},
     {"bom_detail_name": "Trim", "material_name": "x"},
 ]}])
 segs16 = parse_bom_segments(REAL_BOM_KTB00016)
@@ -92,21 +101,21 @@ check(parse_bom_segments([{"part": "BOM", "details": [
 
 print("\n[2d] parse_bom_segments() — multiple Fabric segments (spec allows 0+; not yet seen live)")
 MULTI_FABRIC_BOM = [{"part": "BOM", "details": [
-    {"bom_detail_name": "Main Fabric", "material_no": "MN-001", "placement": "bodice"},
-    {"bom_detail_name": "Fabric", "material_no": "FB-001", "placement": "sleeve"},
-    {"bom_detail_name": "Fabric", "material_no": "FB-002", "placement": "collar"},
+    {"bom_detail_name": "Main Fabric", "material_name": "MN-001", "placement": "bodice"},
+    {"bom_detail_name": "Fabric", "material_name": "FB-001", "placement": "sleeve"},
+    {"bom_detail_name": "Fabric", "material_name": "FB-002", "placement": "collar"},
 ]}]
 segs_multi = parse_bom_segments(MULTI_FABRIC_BOM)
 check(len(segs_multi.fabric_list) == 2, "both Fabric segments collected, in document order")
-check([d["material_no"] for d in segs_multi.fabric_list] == ["FB-001", "FB-002"],
+check([d["material_name"] for d in segs_multi.fabric_list] == ["FB-001", "FB-002"],
       "order preserved")
 
 print("\n[2e] parse_bom_segments() — duplicate Main Fabric, first wins")
 DUP_BOM = [{"part": "BOM", "details": [
-    {"bom_detail_name": "Main Fabric", "material_no": "FIRST"},
-    {"bom_detail_name": "Main Fabric", "material_no": "SECOND"},
+    {"bom_detail_name": "Main Fabric", "material_name": "FIRST"},
+    {"bom_detail_name": "Main Fabric", "material_name": "SECOND"},
 ]}]
-check(parse_bom_segments(DUP_BOM).main_fabric["material_no"] == "FIRST",
+check(parse_bom_segments(DUP_BOM).main_fabric["material_name"] == "FIRST",
       "first occurrence of a repeated Main Fabric wins")
 
 # ---------------------------------------------------------------------------
@@ -115,27 +124,27 @@ fields = extract_enrichment_fields(segs.main_fabric)
 check(fields == {
     "fabric_group": "Main Fabric",     # bom_detail_name, NOT material_name (corrected 2026-09-02)
     "placement": "BODICE",
-    "mill_fabric_article": "WV-0063",
-    "content": "100% Recycled Nylon Shell",   # material_name (added 2026-09-03)
-}, "fabric_group = bom_detail_name (NOT material_name); content = material_name (added 2026-09-03)")
+    "mill_fabric_article": "WV-0063",  # material_name (CORRECTED 2026-09-09 -- was material_no)
+}, "fabric_group = bom_detail_name; mill_fabric_article = material_name (corrected 2026-09-09); "
+   "no 'content' key at all (Content removed as a Phase 10 target, 2026-09-09)")
+check("content" not in fields, "extract_enrichment_fields() never produces a 'content' key any more")
 
 fabric_fields = extract_enrichment_fields(segs.fabric_list[0])
 check(fabric_fields["fabric_group"] == "Fabric",
       "a 'Fabric' segment's fabric_group is literally 'Fabric'")
-check(fabric_fields["content"] == "LINING FABRIC (100% POLYESTER): AVAILABLE LINING",
-      "a 'Fabric' segment's content is ITS OWN material_name, not Main Fabric's")
+check(fabric_fields["mill_fabric_article"] == "WV-0047",
+      "a 'Fabric' segment's mill_fabric_article is ITS OWN material_name, not Main Fabric's")
 
 wip_fields = to_wip_fields(fields)
 check(wip_fields == {
     WIP_FIELD_FABRIC_GROUP: "Main Fabric",
     WIP_FIELD_PLACEMENT: "BODICE",
     WIP_FIELD_MILL_FABRIC_ARTICLE: "WV-0063",
-    WIP_FIELD_CONTENT: "100% Recycled Nylon Shell",
-}, "maps to the exact live-confirmed raw DTC field names")
+}, "maps to the exact live-confirmed raw DTC field names -- no 'Content' key produced")
+check("Content" not in wip_fields, "to_wip_fields() never targets DTC's 'Content' field any more")
 check(WIP_FIELD_FABRIC_GROUP == "Fabric Group"
       and WIP_FIELD_PLACEMENT == "Placement"
-      and WIP_FIELD_MILL_FABRIC_ARTICLE == "Mill Fabric Article #"
-      and WIP_FIELD_CONTENT == "Content",
+      and WIP_FIELD_MILL_FABRIC_ARTICLE == "Mill Fabric Article #",
       "raw field name constants match the live WIP view definition")
 
 # ---------------------------------------------------------------------------
@@ -171,7 +180,7 @@ check(build_target_segments(json.dumps([{"part": "BOM", "details": [
     {"bom_detail_name": "Trim", "material_name": "x"},
 ]}])) is None, "no Main Fabric/Fabric segments at all -> None")
 check(build_target_segments([{"part": "BOM", "details": [
-    {"bom_detail_name": "Fabric", "material_no": "FB-999", "placement": "yoke"},
+    {"bom_detail_name": "Fabric", "material_name": "FB-999", "placement": "yoke"},
 ]}]) is None, "Fabric segment(s) present but NO Main Fabric -> None (never just insert-only)")
 
 # ---------------------------------------------------------------------------
@@ -193,6 +202,8 @@ check(actions[0].wip_fields[WIP_FIELD_FABRIC_GROUP] == "Main Fabric",
       "UPDATE's Fabric Group is the literal segment name 'Main Fabric'")
 check(WIP_FIELD_MILL_FABRIC_ARTICLE in actions[0].wip_fields,
       "first-time enrichment writes the FULL field set (not just Placement)")
+check("Content" not in actions[0].wip_fields,
+      "first-time enrichment never targets 'Content' (removed 2026-09-09)")
 
 print("  [6c] first-time enrichment: single row, Main Fabric + 1 Fabric segment -> one UPDATE + one INSERT")
 actions = plan_style_enrichment(
@@ -210,7 +221,7 @@ check(update_action.wip_fields[WIP_FIELD_FABRIC_GROUP] == "Main Fabric",
 check(insert_action.wip_fields[WIP_FIELD_FABRIC_GROUP] == "Fabric",
       "the INSERT's Fabric Group = 'Fabric'")
 check(insert_action.wip_fields[WIP_FIELD_MILL_FABRIC_ARTICLE] == "WV-0047",
-      "the INSERT carries the Fabric segment's own material_no")
+      "the INSERT carries the Fabric segment's own material_name (corrected 2026-09-09)")
 check(insert_action.base_row["color"] == "RedGingham",
       "the INSERT's base_row is the full original row dict, for copying all other fields")
 
@@ -242,18 +253,9 @@ check(plan_style_enrichment([already_enriched_row], json.dumps([{"part": "BOM", 
     {"bom_detail_name": "Trim", "material_name": "x"},
 ]}])) == [], "no Main Fabric/Fabric segments at all -> no-op, row untouched")
 
-print("  [6e2] no BeProduct fallback for Content (REVERSED 2026-09-07, project team decision: "
-      "'keep DTC WIP true to BOM extraction'): BOM missing entirely -> ZERO actions, even for an "
-      "already-enriched row with blank Content -- Content stays exactly as-is, no matter what "
-      "BeProduct's own core_main_material field might hold")
-already_enriched_no_content = {"row_id": "r1", "fabric_group": "Main Fabric",
-                                "mill_fabric_article": "WV-0064", "placement": "bodice", "content": None}
-check(plan_style_enrichment([already_enriched_no_content], None) == [],
-      "no bom_unified -> zero actions regardless of blank Content (no fallback source consulted at all)")
-
 print("  [6f] Fabric segment(s) present but NO Main Fabric -> ZERO actions (not insert-only anymore)")
 fabric_only_bom = [{"part": "BOM", "details": [
-    {"bom_detail_name": "Fabric", "material_no": "FB-999", "placement": "yoke"},
+    {"bom_detail_name": "Fabric", "material_name": "FB-999", "placement": "yoke"},
 ]}]
 actions = plan_style_enrichment(
     [{"row_id": "r1", "fabric_group": PLACEHOLDER_FABRIC_GROUP, "mill_fabric_article": None, "placement": None}],
@@ -261,40 +263,20 @@ actions = plan_style_enrichment(
 )
 check(actions == [], "no Main Fabric -> zero actions at all, even for a placeholder row")
 
-print("  [6g] upsert: row already matches a segment by (Fabric Group, Mill Fabric Article #) -> Placement-fix + Content-backfill")
+print("  [6g] upsert: row already matches a segment by (Fabric Group, Mill Fabric Article #) -> Placement-fix ONLY")
 row_matches_main = {"row_id": "r1", "fabric_group": "Main Fabric",
-                     "mill_fabric_article": "WV-0064", "placement": "WRONG PLACEMENT", "content": None}
+                     "mill_fabric_article": "WV-0064", "placement": "WRONG PLACEMENT"}
 actions = plan_style_enrichment([row_matches_main], REAL_BOM_KTB00016)
 check(len(actions) == 1 and actions[0].kind == "update", "exactly one update")
-check(actions[0].wip_fields == {WIP_FIELD_PLACEMENT: "bodice",
-                                 WIP_FIELD_CONTENT: "123455 - 97%Cotton 3%Spandex"},
-      "Placement fixed AND blank Content backfilled in the SAME payload -- Fabric Group/Mill Fabric Article # never re-written")
+check(actions[0].wip_fields == {WIP_FIELD_PLACEMENT: "bodice"},
+      "ONLY Placement is fixed -- Fabric Group/Mill Fabric Article # never re-written, "
+      "'Content' never touched at all (removed 2026-09-09)")
 
-print("  [6h] upsert: row already matches AND Placement/Content already correct -> no-op (idempotent)")
+print("  [6h] upsert: row already matches AND Placement already correct -> no-op (idempotent)")
 row_fully_correct = {"row_id": "r1", "fabric_group": "Main Fabric",
-                      "mill_fabric_article": "WV-0064", "placement": "bodice",
-                      "content": "123455 - 97%Cotton 3%Spandex"}
+                      "mill_fabric_article": "WV-0064", "placement": "bodice"}
 check(plan_style_enrichment([row_fully_correct], REAL_BOM_KTB00016) == [],
-      "already fully matching (incl. Content) -> no PATCH issued at all")
-
-print("  [6h2] Content backfill: row matches, Placement already correct, ONLY Content is blank")
-row_only_content_blank = {"row_id": "r1", "fabric_group": "Main Fabric",
-                           "mill_fabric_article": "WV-0064", "placement": "bodice", "content": ""}
-actions = plan_style_enrichment([row_only_content_blank], REAL_BOM_KTB00016)
-check(len(actions) == 1 and actions[0].wip_fields == {WIP_FIELD_CONTENT: "123455 - 97%Cotton 3%Spandex"},
-      "ONLY Content is in the payload when Placement already matches")
-
-print("  [6h3] Content backfill: a row that ALREADY has a real (different) Content value is NEVER overwritten")
-row_real_content_already = {"row_id": "r1", "fabric_group": "Main Fabric",
-                             "mill_fabric_article": "WV-0064", "placement": "bodice",
-                             "content": "SOME OTHER VALUE -- e.g. written by DTC's own trigger"}
-check(plan_style_enrichment([row_real_content_already], REAL_BOM_KTB00016) == [],
-      "a non-blank Content value (ours or DTC-trigger-written) is never overwritten by the backfill")
-
-print("  [6h4] content_key=None disables the backfill check entirely (Placement-fix is independent)")
-actions = plan_style_enrichment([row_matches_main], REAL_BOM_KTB00016, content_key=None)
-check(len(actions) == 1 and actions[0].wip_fields == {WIP_FIELD_PLACEMENT: "bodice"},
-      "content_key=None -> only Placement is fixed, Content backfill skipped entirely")
+      "already fully matching -> no PATCH issued at all")
 
 print("  [6i] never-revert: row holds a real, unrecognized (Fabric Group, Article#) combo not in current BOM -> untouched")
 row_vanished_segment = {"row_id": "r1", "fabric_group": "Fabric",
@@ -304,13 +286,17 @@ check(plan_style_enrichment([row_vanished_segment], REAL_BOM_KTB00016) == [],
 
 print("  [6j] never-insert-duplicate: a Fabric segment already represented by an existing row -> no re-insert")
 existing_with_fabric_segment = [
-    {"row_id": "r1", "fabric_group": "Main Fabric", "mill_fabric_article": "WV-0063", "placement": "BODICE",
-     "content": "100% Recycled Nylon Shell"},
-    {"row_id": "r2", "fabric_group": "Fabric", "mill_fabric_article": "WV-0047", "placement": "Body Front",
-     "content": "LINING FABRIC (100% POLYESTER): AVAILABLE LINING"},
+    {"row_id": "r1", "fabric_group": "Main Fabric", "mill_fabric_article": "WV-0063", "placement": "BODICE"},
+    {"row_id": "r2", "fabric_group": "Fabric", "mill_fabric_article": "WV-0047", "placement": "Body Front"},
 ]
 check(plan_style_enrichment(existing_with_fabric_segment, REAL_BOM_KTB00023) == [],
-      "both segments already correctly represented (incl. Content) -> zero actions, no duplicate insert")
+      "both segments already correctly represented -> zero actions, no duplicate insert")
+
+print("  [6k] plan_style_enrichment() has no content_key parameter any more (removed 2026-09-09)")
+import inspect
+sig = inspect.signature(plan_style_enrichment)
+check("content_key" not in sig.parameters,
+      "content_key parameter removed entirely -- Content is never consulted or written")
 
 # ---------------------------------------------------------------------------
 print("\n[7] build_insert_row_payload() — Style Image must never be copied forward")

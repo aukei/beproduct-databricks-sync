@@ -281,13 +281,17 @@ this stays true by construction; verify it stays true after any change).
    `Brand`, `Color / Wash`, `Garment Finish`, `Tech Pack Stage`, `BP Style#`,
    `LF Style#`, `Legacy Code`, `Gender`, `Supplier` (hardcoded prefill
    default-fill value, not sourced from BeProduct), `Fabric Group`,
-   `Placement`, `Mill Fabric Article #`, `Content` (Phase 10 writes this
-   from BOM `material_name` — see decisions log), `Proto Sample - Sample
-   Status`, `Pre-line Sample - Status`, `SMS - Sample Status`, `2nd Fit
-   Sample Approval Status`, `PP Sample Submission Approval Status`, `TOP
-   Sample Approval Status`. `Style Image` is explicitly EXCLUDED from every
-   sheetData PATCH (image cells can ONLY be set via Phase 3's separate
-   multipart `/images` endpoint — DTC rejects any sheetData write to it).
+   `Placement`, `Mill Fabric Article #` (Phase 10 sources this from BOM
+   `material_name`, NOT `material_no` — corrected 2026-09-09, see decisions
+   log), `Proto Sample - Sample Status`, `Pre-line Sample - Status`,
+   `SMS - Sample Status`, `2nd Fit Sample Approval Status`, `PP Sample
+   Submission Approval Status`, `TOP Sample Approval Status`. `Style Image`
+   is explicitly EXCLUDED from every sheetData PATCH (image cells can ONLY
+   be set via Phase 3's separate multipart `/images` endpoint — DTC rejects
+   any sheetData write to it). **`Content` is likewise NEVER a Phase 1/10
+   PATCH key** (REMOVED 2026-09-09, reverses an earlier 2026-09-03 decision
+   — see decisions log): Phase 10 no longer writes it at all, leaving it to
+   DTC's own (previously-unreliable-in-UAT) Content-population trigger.
 
    **Phase 9b fields** (`duty.WIP_HTS_COL` / `duty.WIP_DUTY_COL` /
    `duty.WIP_TARIFF_COL` — costing/duty data, written at Step 55, a
@@ -622,6 +626,61 @@ kept below for historical reference only (see decisions log):**
   sanity assertion (should now always be a no-op).
 
 ## Decisions on record
+
+- **Phase 10 `Mill Fabric Article #`/`Content` mapping corrected, 2026-09-09
+  (owner spec) — reverses the 2026-09-03 decision that had Phase 10 write
+  `Content` from BOM `material_name`.** Live-discovered 2026-09-08 (user
+  report: "Content field now gets the material_no value"): for a newer
+  batch of test styles (KTB-00024, 00026-00028, 00031), the raw
+  `bom_unified` source JSON itself has `material_name`/`material_no`
+  effectively swapped vs. the original 2026-09-02 assumption — e.g.
+  `material_name: "WV-0063"` (code-shaped) / `material_no:
+  "LF-BD26-000005--TW"` (a different code format) — the OPPOSITE of early
+  KTB-00016/00020/00023 data, where `material_name` held a real descriptive
+  content string. This had already pushed material-CODE-shaped garbage into
+  live DTC "Content" cells for those 5 styles. Owner-issued corrected spec
+  (2026-09-09, confirmed against live `bom_unified` for KTB-00029/KTB-00030
+  — `material_name` = `"LTCL6080"` / `"WV-0064"` / `"WG24-01706"`,
+  consistently article-code-shaped): **`Mill Fabric Article #` now sources
+  from `material_name`** (not `material_no`, which is no longer read by
+  this module at all), and **`Content` is NEVER written by Phase 10 at
+  all**, in any code path (first-time enrichment, upsert, or INSERT) —
+  applies "irrespective to active test cases," i.e. regardless of what any
+  individual older/inconsistent test style's data happens to look like.
+  Implementation: `dtc/python/sync/bom.py` — `extract_enrichment_fields()`
+  / `to_wip_fields()` no longer produce a `content`/`Content` key at all;
+  `WIP_FIELD_CONTENT` constant removed; `plan_style_enrichment()`'s
+  `content_key` parameter and the whole Content-backfill branch removed.
+  `dtc/notebooks/p10_pull_bom_and_enrich.py` and `p9a_build_costing_chart.py`
+  docstrings updated to match. `dtc/tests/test_bom.py` rewritten (fixtures
+  now use the corrected `material_name`-is-a-code-value shape; all
+  Content-related assertions removed, replaced with explicit "no Content
+  key produced" checks). **Known downstream consequence, accepted**:
+  `costing_chart.fabric_content` (sourced from WIP's "Content" column) will
+  typically stay blank now unless DTC's own (already confirmed unreliable
+  in UAT) Content-population trigger fills it independently — degrades
+  gracefully since `fabric_content` is only one of six `duty.
+  PRODUCT_DESCRIPTION_COLS` concatenated for NT Orbit, not a hard blocker.
+  **Consequent `p9a_build_costing_chart.py` Step 1b filter change (same
+  day, owner spec)**: costing-chart formation now explicitly GATES on WIP
+  "Content" being non-blank, on top of (not instead of) the existing
+  `material_no` non-blank requirement — a "Main Fabric" WIP row whose
+  Content is still blank this round (DTC's trigger/an external job hasn't
+  filled it in yet) is excluded from `costing_chart` THIS ROUND, consistent
+  with the pipeline's existing "never revert, wait for a later round"
+  philosophy (not a permanent exclusion). Per owner: "Content is to be
+  filled by DTC trigger / job externally before next step (OrbitDuty etc).
+  So costing calculation gate on field nullness." Step 1b's single
+  aggregate drop-count was also split into four separate per-reason counts
+  (blank `material_no`, blank `bp_style_no`, blank/placeholder `Content`,
+  `fabric_group != "Main Fabric"`) so this gate's real-world impact is
+  visible/auditable going forward, since it is expected to become the
+  dominant reason for exclusion.
+  **Not yet live-validated**: the actual `costing_chart` row-count impact
+  of the new Content gate (requires a live `build_costing_chart` run against
+  current WIP data); the already-corrupted live "Content" cells on the 5
+  affected styles have NOT been cleaned up yet (flagged, pending explicit
+  go-ahead).
 
 - **Lifecycle gating implemented for the `EXCLUDED_STATUSES`/`ktb_styles`
   gap flagged below (2026-09-08, same-day follow-up), live-validated where

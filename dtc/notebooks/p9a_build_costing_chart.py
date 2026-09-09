@@ -61,8 +61,9 @@ Costing chart schema (field → source):
   lineplan_ref        from WIP data_json "Lineplan Ref #"
   fabric_content      from WIP data_json "Content"  (corrected 2026-09-03 --
                        was mistakenly "Fabric Group"; "Content" is a
-                       DIFFERENT, DTC-internal-trigger-populated column, see
-                       the filter note below)
+                       DIFFERENT, DTC-internal-trigger-populated column --
+                       NEVER written by Phase 10 as of 2026-09-09, see the
+                       filter note below and sync/bom.py's docstring)
   fabric_type         from WIP data_json "Fabric Type" (new 2026-09-03)
   gender              from WIP data_json "Gender"
   class               from WIP data_json "Class"
@@ -101,26 +102,44 @@ STYLES can share one `lineplan_ref` — neither `fabric_content` nor
 `material_no` (Phase 10's own "Mill Fabric Article #") is the real,
 unambiguous per-material identifier.
 
-Fabric-details completeness filter (REVISED 2026-09-03, owner spec)
+Fabric-details completeness filter (REVISED 2026-09-09, owner spec — see
+below; supersedes the 2026-09-03 revision, kept for history)
 ----------------------------------------------------------------------
 Originally gated on WIP's "Content"/"Fabric Type" columns (populated by a
 DTC-internal trigger polling "Mill Fabric Article #") both being non-blank
 — but live-confirmed 2026-09-03 that trigger's timing/conditions in UAT are
 unreliable (every KTB test row still blank days after Mill Fabric Article #
-was set), which blocked Phase 9a entirely. Fixed at the SOURCE instead:
-Phase 10 (`p10_pull_bom_and_enrich.py` / `sync/bom.py`) now writes "Content"
-itself from the SAME BOM segment's `material_name` (`WIP_FIELD_CONTENT`),
-removing the dependency on DTC's own trigger for that column (DTC's trigger
-may still also write it independently — an intentional, accepted dual-write
-per explicit owner instruction). The filter now gates on `material_no`
-(Mill Fabric Article #) being non-blank instead — the real completeness
-signal now that it's also the costing-chart key component: a WIP row Phase
-10 hasn't touched yet has no `material_no` and is dropped (same treatment
-as a blank "Lineplan Ref #" — see Step 3). `fabric_type` ("Fabric Type") is
-still extracted and carried through to `costing_chart.fabric_type` for
-traceability, but is NOT part of the filter or the NT Orbit description
-string (unaffected by this revision) — it remains solely DTC-trigger-
-populated and may still be blank in practice.
+was set), which blocked Phase 9a entirely. Fixed at the SOURCE at the time:
+Phase 10 started writing "Content" itself from the SAME BOM segment's
+`material_name`, removing the dependency on DTC's own trigger for that
+column, and the completeness filter was changed to gate on `material_no`
+(Mill Fabric Article #) instead of Content/Fabric Type.
+
+**REVERSED 2026-09-09 (owner spec)**: Phase 10 writing "Content" from
+`material_name` turned out to push material-CODE-shaped garbage into DTC
+for a newer batch of test styles (live-discovered 2026-09-08 — see
+`dtc/python/sync/bom.py`'s module docstring for the full history). Phase 10
+now NEVER writes "Content" at all — it is left entirely to DTC's own
+(previously-unreliable-in-UAT) trigger. Consequently, the completeness
+filter gains BACK an explicit "Content" (WIP `fabric_content`) non-blank
+requirement, layered on TOP of the still-required `material_no` check (not
+a replacement for it — `material_no` remains the costing-chart key
+component and is still required independently): a "Main Fabric" WIP row
+whose "Content" cell is still blank this round (DTC's trigger hasn't caught
+up yet, or hasn't run at all) is EXCLUDED from `costing_chart` THIS ROUND,
+even though it's otherwise a fully-qualifying "Main Fabric" row with a real
+`material_no`. This is consistent with the "never revert, just wait for the
+next round" philosophy used elsewhere in this pipeline (see Step 3's
+LinePlan-ref handling) — NOT a permanent exclusion: once DTC's trigger (or
+a manual edit) eventually fills in Content, that row will start appearing
+in `costing_chart` on a later run without any code change. Expect this to
+significantly reduce `costing_chart`'s row count vs. the 2026-09-03-era
+behavior, since DTC's Content trigger was already confirmed unreliable in
+UAT — this is an accepted, intentional trade-off (owner decision), not a
+regression to fix. `fabric_type` ("Fabric Type") is still extracted and
+carried through to `costing_chart.fabric_type` for traceability, but
+remains NOT part of the filter or the NT Orbit description string (it
+remains solely DTC-trigger-populated and may still be blank in practice).
 
 **"Main Fabric" only (added 2026-09-07, project team decision)**: ONLY a
 style's "Main Fabric" WIP row (`fabric_group == "Main Fabric"`) enters
@@ -250,57 +269,72 @@ print(f"  WIP columns extracted: {len(wip.columns)}")
 
 # COMMAND ----------
 
-# ── Step 1b: Drop WIP rows Phase 10 hasn't enriched yet ──────────────────────
-# See module docstring "Fabric-details completeness filter" (REVISED
-# 2026-09-03: gates on material_no now, not Content/Fabric Type -- Phase 10
-# writes Content itself now, but material_no is the real signal AND the new
-# costing-chart key component, see "Costing chart key" above).
+# ── Step 1b: Drop WIP rows Phase 10 hasn't enriched yet (or DTC hasn't
+#             filled Content for) yet ────────────────────────────────────────
+# See module docstring "Fabric-details completeness filter" for the full
+# history. Four independent conditions, ALL required (AND):
+#   1. `material_no` (Mill Fabric Article #) non-blank -- the real
+#      completeness signal that Phase 10 has assigned a material, and also
+#      the costing-chart key component (see "Costing chart key" above).
+#   2. `bp_style_no` non-blank -- excludes legacy "(BACKUP)"-named WIP
+#      request pollution (added 2026-09-07; see AGENTS.md decisions log).
+#   3. `fabric_content` (WIP "Content") non-blank -- RE-ADDED 2026-09-09
+#      (owner spec), now layered on top of #1 rather than replacing it.
+#      Phase 10 no longer writes "Content" at all (see `sync/bom.py` --
+#      REVERSED 2026-09-09 after live-discovering it could push material-
+#      CODE-shaped garbage there), so this is now a genuine "wait for DTC's
+#      own Content-population trigger to catch up" gate: a row is excluded
+#      from costing_chart THIS ROUND if Content is still blank, even if it's
+#      otherwise a fully-qualifying "Main Fabric" row with a real
+#      material_no. Not a permanent exclusion -- consistent with this
+#      pipeline's "never revert, just wait for a later round" philosophy
+#      (see Step 3's LinePlan-ref handling): once Content is eventually
+#      filled (by DTC's trigger, or a manual edit), the row starts appearing
+#      in costing_chart on a later run with no code change needed. The
+#      `!= "Main Fabric"` sub-check guards against the literal Fabric Group
+#      placeholder string leaking into Content (a real, now-historical bug
+#      -- see AGENTS.md's "fabric_content was reading the WRONG WIP column"
+#      -- kept as cheap defense-in-depth even though Phase 10 can no longer
+#      cause it directly).
+#   4. `fabric_group == "Main Fabric"` -- added 2026-09-07 (owner spec): ONLY
+#      a style's "Main Fabric" WIP row enters costing_chart at all. The
+#      "Fabric" segment duplicate rows Phase 10 creates (see `sync/bom.py`)
+#      are excluded entirely, never reaching costing_chart or NT Orbit.
+#      Duty/Tariff rate/HTS Code (Phase 9b) are therefore only ever computed
+#      for "Main Fabric" rows.
 #
-# Two more exclusions added 2026-09-07 (owner spec, live-discovered while
-# investigating a stale tariff_rate on a KTB-00023/WV-0063 row):
-#   - `bp_style_no IS NULL`: these rows trace to legacy "(BACKUP)"-named WIP
-#     requests (pre-existing data-quality pollution, documented in AGENTS.md
-#     -- 199/227 dtc_wip_ktb rows with null bp_style_number all trace to
-#     those), never real production/test data. They must never reach
-#     costing_chart or NT Orbit at all.
-#   - `fabric_content IN (NULL, "Main Fabric")`: `fabric_content` (WIP
-#     "Content") must hold a genuine material composition description (e.g.
-#     "100% Recycled Nylon Shell"), never the literal Fabric Group value
-#     "Main Fabric" -- live-confirmed root cause of a real bug: an OLDER,
-#     pre-fix version of this notebook sourced `fabric_content` from
-#     "Fabric Group" instead of "Content" (see AGENTS.md decisions log,
-#     "fabric_content was reading the WRONG WIP column"), so a WIP row that
-#     was enriched by Phase 10 back then could have a Content value that's
-#     still just the literal "Main Fabric" placeholder-like string, or a row
-#     never touched by Phase 10 at all still has Content genuinely blank.
-#     Either way, that row's product_description sent to NT Orbit would be
-#     nonsensical (literally "... Main Fabric ..." instead of the real
-#     material) and must be excluded rather than produce a misleading
-#     duty/HTS classification.
-#
-# THIRD exclusion added 2026-09-07 (owner spec, project team decision):
-# `fabric_group != "Main Fabric"` -- ONLY a style's "Main Fabric" WIP row
-# (Phase 10's own Fabric Group value) enters costing_chart at all. The
-# "Fabric" segment duplicate rows Phase 10 creates (see sync/bom.py --
-# one extra physical WIP row per "Fabric" segment) are EXCLUDED entirely,
-# never reaching costing_chart or NT Orbit. Consequently, Duty/Tariff
-# rate/HTS Code (Phase 9b) are only ever computed and pushed back to WIP
-# for "Main Fabric" rows -- "Fabric" segment rows never receive them.
+# Reported as separate per-reason counts below (not just one aggregate) so
+# the Content-completeness gate's real-world impact is visible/auditable,
+# since it is now expected to be the dominant reason for exclusion (DTC's
+# own Content trigger was already confirmed unreliable in UAT).
 print("\nStep 1b: Filtering out WIP rows with no material_no, no bp_style_no, "
-      "a placeholder-like fabric_content, or a non-'Main Fabric' fabric_group …")
+      "blank/placeholder Content, or a non-'Main Fabric' fabric_group …")
 wip_before_fabric_filter = wip.count()
-wip = wip.filter(
-    F.col("material_no").isNotNull() & (F.trim(F.col("material_no")) != "")
-    & F.col("bp_style_no").isNotNull() & (F.trim(F.col("bp_style_no")) != "")
-    & F.col("fabric_content").isNotNull() & (F.trim(F.col("fabric_content")) != "")
-    & (F.trim(F.col("fabric_content")) != "Main Fabric")
-    & (F.trim(F.col("fabric_group")) == "Main Fabric")
-)
+
+cond_material_no = F.col("material_no").isNotNull() & (F.trim(F.col("material_no")) != "")
+cond_bp_style_no = F.col("bp_style_no").isNotNull() & (F.trim(F.col("bp_style_no")) != "")
+cond_content = (F.col("fabric_content").isNotNull() & (F.trim(F.col("fabric_content")) != "")
+                & (F.trim(F.col("fabric_content")) != "Main Fabric"))
+cond_main_fabric = F.trim(F.col("fabric_group")) == "Main Fabric"
+
+dropped_no_material_no = wip.filter(~cond_material_no).count()
+dropped_no_bp_style_no = wip.filter(cond_material_no & ~cond_bp_style_no).count()
+dropped_no_content = wip.filter(cond_material_no & cond_bp_style_no & ~cond_content).count()
+dropped_not_main_fabric = wip.filter(
+    cond_material_no & cond_bp_style_no & cond_content & ~cond_main_fabric).count()
+
+wip = wip.filter(cond_material_no & cond_bp_style_no & cond_content & cond_main_fabric)
 dropped_incomplete_fabric = wip_before_fabric_filter - wip.count()
-print(f"  WIP rows before filter : {wip_before_fabric_filter}")
-print(f"  WIP rows after filter  : {wip.count()}")
-print(f"  Dropped (material_no/bp_style_no blank, fabric_content blank/'Main Fabric', "
-      f"or fabric_group != 'Main Fabric' -- i.e. a 'Fabric' segment row): {dropped_incomplete_fabric}")
+
+print(f"  WIP rows before filter        : {wip_before_fabric_filter}")
+print(f"  WIP rows after filter         : {wip.count()}")
+print(f"  Dropped total                 : {dropped_incomplete_fabric}")
+print(f"    - blank material_no         : {dropped_no_material_no}")
+print(f"    - blank bp_style_no         : {dropped_no_bp_style_no}")
+print(f"    - blank/placeholder Content : {dropped_no_content}  "
+      f"(Phase 10 no longer writes Content -- waiting on DTC's own trigger)")
+print(f"    - fabric_group != 'Main Fabric' (i.e. a 'Fabric' segment row) : "
+      f"{dropped_not_main_fabric}")
 
 # COMMAND ----------
 
