@@ -22,7 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "python"))
 
 from sync import phase2
-from sync.phase2 import build_beproduct_updates, to_sdk_calls
+from sync.phase2 import build_beproduct_updates, to_sdk_calls, resolve_coo_country_name
 
 _failures = []
 
@@ -121,6 +121,74 @@ rows5 = [
 plan5 = build_beproduct_updates(rows5)
 check(plan5.summary()["styles"] == 0,
       "'Legacy Code'/'Customer Style#' in DTC data do NOT trigger Phase 2 writes")
+
+print("\n[8] resolve_coo_country_name() -- COO code -> name lookup (2026-09-09)")
+CODE_TO_NAME = {"US": "United States", "BD": "Bangladesh", "IN": "India"}
+check(resolve_coo_country_name("US", CODE_TO_NAME) == "United States", "exact-case code match")
+check(resolve_coo_country_name("us", CODE_TO_NAME) == "United States", "lowercase code normalized to uppercase")
+check(resolve_coo_country_name(" bd ", CODE_TO_NAME) == "Bangladesh", "whitespace stripped before lookup")
+check(resolve_coo_country_name(None, CODE_TO_NAME) is None, "None -> None (never raises)")
+check(resolve_coo_country_name("", CODE_TO_NAME) is None, "blank string -> None")
+check(resolve_coo_country_name("ZZ", CODE_TO_NAME) is None,
+      "unrecognized code -> None (never falls back to the raw code)")
+
+print("\n[9] 'Factory Production Country for Main Factory' wired up (2026-09-09)")
+check(phase2.REVERSE_HEADER_FIELDS.get("Factory Production Country for Main Factory")
+      == "country_of_origin",
+      "DTC column -> BeProduct fieldId 'country_of_origin' (COO)")
+
+print("\n[10] build_beproduct_updates() value_transforms -- COO end-to-end")
+COO_COL = "Factory Production Country for Main Factory"
+coo_transform = {COO_COL: lambda v: resolve_coo_country_name(v, CODE_TO_NAME)}
+
+rows6 = [{  # style F: raw DTC code "US" must be transformed to "United States" before diff/write
+    "beproduct_style_id": "F", "colorway_id": "c1", "bp_style_number": "S6", "color": "navy",
+    "dtc": {COO_COL: "US"},
+    "bp": {COO_COL: None},
+}]
+plan6 = build_beproduct_updates(rows6, value_transforms=coo_transform)
+check(plan6.updates["F"].fields.get("country_of_origin") == "United States",
+      "raw code 'US' transformed to 'United States' before being written")
+
+print("  [10b] NOOP diff compares the TRANSFORMED value against BeProduct's current value")
+rows6b = [{
+    "beproduct_style_id": "G", "colorway_id": "c1", "bp_style_number": "S7", "color": "navy",
+    "dtc": {COO_COL: "us"},                       # raw code, different case
+    "bp": {COO_COL: "United States"},             # BeProduct already has the resolved name
+}]
+plan6b = build_beproduct_updates(rows6b, value_transforms=coo_transform)
+check(plan6b.summary()["styles"] == 0,
+      "code 'us' transforms to the SAME name BeProduct already has -> correctly a NOOP, not a spurious re-push")
+
+print("  [10c] unmatched code -> transform returns None -> treated as blank (no push, respects push_blanks)")
+rows6c = [{
+    "beproduct_style_id": "H", "colorway_id": "c1", "bp_style_number": "S8", "color": "navy",
+    "dtc": {COO_COL: "ZZ"},   # not in CODE_TO_NAME
+    "bp": {COO_COL: "Somewhere Else"},
+}]
+check(build_beproduct_updates(rows6c, value_transforms=coo_transform).summary()["styles"] == 0,
+      "unresolved code is treated as blank -- never overwrites BeProduct with nothing/garbage")
+
+print("  [10d] fields WITHOUT a value_transforms entry are unaffected (existing behavior preserved)")
+rows6d = [{
+    "beproduct_style_id": "I", "colorway_id": "c1", "bp_style_number": "S9", "color": "navy",
+    "dtc": {"Main Vendor (Sampling)": "V1", COO_COL: "US"},
+    "bp": {"Main Vendor (Sampling)": None, COO_COL: None},
+}]
+plan6d = build_beproduct_updates(rows6d, value_transforms=coo_transform)
+check(plan6d.updates["I"].fields.get("parent_vendor") == "V1",
+      "a field with no transform entry is copied through exactly as before")
+check(plan6d.updates["I"].fields.get("country_of_origin") == "United States",
+      "the transformed field is still applied correctly alongside untransformed fields")
+
+print("  [10e] value_transforms defaults to None -- zero regression for every existing caller")
+rows6e = [{
+    "beproduct_style_id": "J", "colorway_id": "c1", "bp_style_number": "S10", "color": "navy",
+    "dtc": {COO_COL: "US"},   # no transform passed -> raw code goes through untouched
+}]
+plan6e = build_beproduct_updates(rows6e)  # no value_transforms kwarg at all
+check(plan6e.updates["J"].fields.get("country_of_origin") == "US",
+      "without value_transforms, COO is just copied raw like any other field (backward compatible)")
 
 print("\n" + "=" * 70)
 if _failures:

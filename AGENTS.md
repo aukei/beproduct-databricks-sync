@@ -210,8 +210,12 @@ this stays true by construction; verify it stays true after any change).
   correct by the project team** (2026-08-28).
 - **DTC → BeProduct**: Main Vendor (Sampling) (`parent_vendor`), Main Factory
   (Sampling) (`factory`), Main Factory Customer ID (`customer_factory_code`,
-  wired up 2026-09-03 — see decisions log) [header]; Lot#
-  (`drawing_number_walmart`) [colorway].
+  wired up 2026-09-03 — see decisions log), Factory Production Country for
+  Main Factory (`country_of_origin` / "COO", wired up 2026-09-09 — see
+  decisions log; the first Phase 2 field requiring a value transform,
+  DTC 2-char country code → BeProduct country name, via
+  `phase2.resolve_coo_country_name()` + `beproduct_master_coo`) [header];
+  Lot# (`drawing_number_walmart`) [colorway].
   [REMOVED Phase 6]: "Legacy Code" DTC→BP. "Customer Style#" DTC column not created.
 - **Keys** (match, not overwritten): BP Style# (`header_number`), Color/Wash (`colorName`)
   [in-request]; [Customer, BP Style# (header_number), SeasonCode, Brand (brand_hk)]
@@ -626,6 +630,64 @@ kept below for historical reference only (see decisions log):**
   sanity assertion (should now always be a no-op).
 
 ## Decisions on record
+
+- **New Phase 2 field wired up, 2026-09-09 (owner spec): DTC "Factory
+  Production Country for Main Factory" → BeProduct "COO"
+  (`country_of_origin`), the FIRST Phase 2 field requiring an actual value
+  transform rather than a straight copy.** DTC's WIP column stores a plain
+  2-char ISO 3166-1 alpha-2 country code (live-confirmed real values in
+  `dtc_wip_ktb`: `"US"`, `"BD"`, `"IN"`). BeProduct's `country_of_origin`
+  field (display name "COO", `fieldType: "DropDown"`, discovered live via
+  `api.style.folder_schema(folder_id="053ed578-6759-4f36-b6df-d1bd89b3b7be")`
+  for the real KTB folder — per Ground Rule #1/#2, the fieldId was NOT
+  guessed) stores the country NAME instead (e.g. `"United States"`), never
+  the code. Both `folder_schema()`'s embedded `properties.Choices` and a
+  direct `api.raw_api.get("MasterData/country_of_origin")` call return an
+  **identical** 251-entry choice list (249 unique 2-char codes, 2
+  placeholder/blank entries) — confirming this field follows the exact same
+  MasterData pattern already used for `parent_vendor`/`factory`.
+  **Implementation**:
+  1. `beproduct/p5utl_beproduct_master_data_sync.py` — added `"coo":
+     "country_of_origin"` to `MASTER_DATA_FIELDS`, so the existing
+     admin-triggered PULL_ONLY mode syncs the full code→name choice list
+     into a new `lft.beproduct.beproduct_master_coo` table (zero other code
+     changes needed — the pull loop already iterates the dict generically).
+  2. `dtc/python/sync/phase2.py` — added `"Factory Production Country for
+     Main Factory": "country_of_origin"` to `REVERSE_HEADER_FIELDS`, plus a
+     new pure function `resolve_coo_country_name(dtc_country_code,
+     code_to_name)` (case-insensitive, whitespace-trimmed lookup; returns
+     `None` — never a raw-code fallback — on blank/unmatched input, so an
+     unrecognized code is treated as "no value" rather than corrupting
+     BeProduct's DropDown with an invalid string). `build_beproduct_
+     updates()` gained a new optional `value_transforms: Dict[str,
+     Callable]` parameter (defaults to `None`/`{}`, zero regression for
+     every existing caller/field) applied to the raw DTC value BEFORE
+     normalization/diffing/writing — this is a general mechanism, not
+     COO-specific, so any future field needing a lookup-based transform can
+     reuse it the same way.
+  3. `dtc/notebooks/p2_push_dtc_to_beproduct.py` — loads
+     `beproduct_master_coo` into a `{code: name}` dict (fails OPEN to an
+     empty dict with a warning, not a raise, if the admin hasn't run
+     `p5utl` yet — every OTHER Phase 2 field keeps working normally), builds
+     `value_transforms = {"Factory Production Country for Main Factory":
+     lambda v: phase2.resolve_coo_country_name(v, coo_code_to_name)}`, and
+     passes it to `build_beproduct_updates()`. `HDR_ID_TO_COL`/
+     `ALL_PHASE2_COLUMNS` already pick up the new field automatically
+     (derived from `REVERSE_HEADER_FIELDS`) — no other notebook change
+     needed; the NOOP diff correctly compares the TRANSFORMED value against
+     BeProduct's current (already-a-name) value, not code-vs-name.
+  **Live-validated**: the real `resolve_coo_country_name()` against the
+  real BeProduct MasterData response — `"US"→"United States"`,
+  `"BD"→"Bangladesh"`, `"IN"→"India"`, `"us"`/`" bd "` (case/whitespace)
+  normalize correctly, `"ZZ"` (unrecognized) → `None`. 13 new unit tests in
+  `dtc/tests/test_phase2.py` (pure-logic; the Spark/SDK notebook wiring
+  itself was not live-executed this pass — flagged for a follow-up
+  `p2_push_dtc_to_beproduct.py` dry-run once `p5utl` has been run at least
+  once in this environment to populate `beproduct_master_coo`).
+  Docs updated: `docs/beproduct_style_interested_fields.txt` (new table row
+  + fixed a stale "no BeProduct target yet" note on `Main Factory Customer
+  ID`'s prose summary that predated its 2026-09-03 wiring), this file's
+  "Current direction partition" section.
 
 - **Phase 10 `Mill Fabric Article #`/`Content` mapping corrected, 2026-09-09
   (owner spec) — reverses the 2026-09-03 decision that had Phase 10 write

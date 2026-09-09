@@ -654,3 +654,45 @@ so that
 After discussion with project team, the decision is to keep DTC WIP true to BOM extraction. I.e. even if BeProduct contains a valid "Main Material Content", if there is no data or null data from techpack "customer_techpack_log_latest", then we take Techpack as final, which in this case we left material / content empty. Note for a style, as long as  its "PRODUCT STAUS" are not in (FINALIZED, DROP), its corresponding BOM are subject to update, thus its costing chart rows are subject to update.
 
 2nd decision is for costing chart, only Fabric_content = "Main Fabric" should enter that chart. "Fabric" rows are not going into costing_chart. Consequently in DTC WIP, only "Main Fabric" rows will eventually receive Duty / Tariff rate / HS_Code.
+
+
+## 2026/09/09 demo patch 1
+- irrespective to active test cases, the spec is now (9/9/26):
+DTC.Fabric_Group = BOM.details[n].bom_detail_name
+DTC.Placement = BOM.details[n].placement
+DTC.Content = <blank>
+DTC.mill_fabric_article# = BOM.details[n].material_name
+
+live BOM data at public.customer_teckpack_style_latest.bom_unified where style_no  in ('KTB-00029','KTB-00030')
+Content is to be filled by DTC trigger / job externally before next step (OrbitDuty etc). 
+Skip Content = null rows (even is Main Fabric) into costing_chart. So costing calculation gate by "Content" field nullness.
+
+- In phase2 (DTC to BeProduct sync), add field 
+    - dtc."Factory Production Country for Main Factory" push to BeProduct.Style.COO
+    - dtc value are 2 chars country code. Lookup the BeProduct "COO" drop down list, i.e.
+        - add beproduct_master_coo to p5util
+        - lookup country code for country name
+        - pust COO = country name
+
+## 2026/09/09 2nd revision on material fields
+
+- BOM developer push back on updating customer_techpack_style_latest for new fields. They add the fields to upstream customer_techpack_style_log only.
+    -  select style_season, style_no, customer_name, customer_department, custom_fields
+from public.customer_teckpack_style_log cts
+where cts.teckpack_style_log_id  in (
+	select ctsl.latest_techpack_style_log_id
+	from public.customer_teckpack_style_latest ctsl 
+	where ctsl.style_no like 'KTB%' 
+)
+
+    - above query "custom_fields" returns json 
+{"xts_data": {"ACTION_CODE": "NEW_TECHPACK", ..., "DATE": ""}}           
+        - we are interested in "TECH_PACK_EXTRACTION"."Table"["Type"="BOM"]
+{"Seq": 2, "Type": "BOM", "Name": "", "Header": {}, "ColumnHeader": ["**BomHeader", "**MaterialCategory", "**MaterialCode", "**MaterialType", "**MaterialDescription", "**Quantity", "**MaterialContent", "**MaterialConstruction", "**MaterialCuttableWidth", "**Placement", "**Size", "**RefNo", "**Section", "**InternalName", "**SupplierName", "**SupplierCop", "**SupplierRefNo", "**MainMaterial", "**UOM", "**CountryOfOrigin", "**CostFob", "**CostCif", "**WeightBeforeWash", "**WeightAfterWash", "**WeightUOM", "**Comments", {"Colorway": ["CAD-12314 RedGingham", "12-1505 TCX Rose Bisque"]}, {"Color": ["CAD-12314 RedGingham", "12-1505 TCX Rose Bisque"]}, "COMPONENT", "MATERIAL/FABRIC WEIGHT"], "Data": [["SLEEVELESS SHIRT", "Main Fabric", "LF-BD26-000002--SH", "Sheeting", "WV-0003", "", "Cotton 100%", "", "", "BODICE", "", "", "", "", "AKIJ TEXTILE MILLS LTD.", "", "WV-0003", "", "", "", "", "", "", "", "", "", {"Colorway": ["CAD-12314 RedGingham", "12-1505 TCX Rose Bisque"]}, {"Color": ["DTM", "DTM"]}, "", ""], ["SLEEVELESS SHIRT", "Fabric", "LF-BD26-000004--PN", "Poplin", "WV-0061", "", "Cotton 100%", "", "", "HEM", "", "", "", "", "BEPRODUCT VENDOR", "", "WV-0061", "", "", "", "", "", "", "", "", "", {"Colorway": ["CAD-12314 RedGingham", "12-1505 TCX Rose Bisque"]}, {"Color": ["DTM", "DTM"]}, "", ""], ["SLEEVELESS SHIRT", "Fabric", "LF-CN26-001537--JE", "Jersey", "WG24-01706", "", "Cotton 65%, Modal 28%, Spandex 7%", "", "", "LINING", "", "", "", "", "WINGS GLORY CO., LIMITED", "", "WG24-01706", "", "", "", "", "", "", "", "", "", {"Colorway": ["CAD-12314 RedGingham", "12-1505 TCX Rose Bisque"]}, {"Color": ["DTM", "DTM"]}, "", ""]]}        - "ColumnHeader" is first row of table
+        - "Data" is array of (rows) array of cells
+        -  We are interested in col 
+            - "**SupplierRefNo" = DTC.mill_fabric_article#
+            - "**MaterialContent" = DTC.Content
+            - "**MaterialCategory" = DTC.Fabric_Group
+            - "**Placement" = DTC.Placement
+    - This override all fields from BOM_UNIFIED

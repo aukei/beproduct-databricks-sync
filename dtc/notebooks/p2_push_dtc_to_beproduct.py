@@ -6,12 +6,13 @@ Phase 2: Push DTC-owned fields back to BeProduct (DTC -> BeProduct)
 Reverse of Phase 1. A small set of DTC-OWNED columns are written from the pulled
 DTC data back into the corresponding BeProduct style:
 
-    DTC column                  BeProduct target (fieldId)             level
-    Customer Style#             customer_style_number                  header
-    Main Vendor (Sampling)      parent_vendor                          header
-    Main Factory (Sampling)     factory                                header
-    Main Factory Customer ID    customer_factory_code                  header
-    Lot#                        drawing_number_walmart                 colorway
+    DTC column                                     BeProduct target (fieldId)             level
+    Customer Style#                                customer_style_number                  header
+    Main Vendor (Sampling)                         parent_vendor                          header
+    Main Factory (Sampling)                        factory                                header
+    Main Factory Customer ID                       customer_factory_code                  header
+    Factory Production Country for Main Factory    country_of_origin (COO)                header
+    Lot#                                           drawing_number_walmart                 colorway
 
 Phase 6 update (2026-06-26):
     "Legacy Code" replaced by "Customer Style#" as the DTC->BP vehicle for
@@ -22,6 +23,15 @@ no BeProduct target and was skipped/logged. Live-confirmed BeProduct's
 `customer_factory_code` ("Customer Factory Code") is a real, writable
 header field; see `sync/phase2.py`'s module docstring for the live-test
 details.
+
+"Factory Production Country for Main Factory" wired up 2026-09-09 (owner
+spec) — the first Phase 2 field needing a VALUE TRANSFORM, not a straight
+copy: DTC stores a 2-char country code, BeProduct's "COO" field
+(`country_of_origin`, a DropDown) stores the country NAME. This notebook
+loads the code->name lookup from `beproduct_master_coo` (synced by
+`beproduct/p5utl_beproduct_master_data_sync.py`) and passes it to
+`phase2.build_beproduct_updates()` via `value_transforms`; see
+`sync/phase2.py`'s `resolve_coo_country_name()` for the pure lookup logic.
 
 Inputs (already produced by the daily pipeline):
   - DTC pulled table:  lft.beproduct.dtc_wip_<customer>   (pull_masters_to_delta)
@@ -98,6 +108,7 @@ dbutils.widgets.text("staging_table", "beproduct_to_dtc_staging", "Staging Table
 dbutils.widgets.text("dtc_environment", "uat", "DTC Environment")
 dbutils.widgets.text("dry_run", "true", "Dry Run (true/false)")
 dbutils.widgets.text("push_blanks", "false", "Clear BeProduct on blank DTC value")
+dbutils.widgets.text("coo_master_table", "beproduct_master_coo", "COO lookup table (code->name)")
 
 catalog = dbutils.widgets.get("catalog").strip()
 schema = dbutils.widgets.get("schema").strip()
@@ -106,10 +117,12 @@ staging_table = dbutils.widgets.get("staging_table").strip()
 environment = dbutils.widgets.get("dtc_environment").strip().lower()
 dry_run = dbutils.widgets.get("dry_run").strip().lower() == "true"
 push_blanks = dbutils.widgets.get("push_blanks").strip().lower() == "true"
+coo_master_table = dbutils.widgets.get("coo_master_table").strip()
 
 dtc_wip_full = f"{catalog}.{schema}.dtc_wip_{customer.lower()}"
 staging_full = f"{catalog}.{schema}.{staging_table}"
 sync_log_full = f"{catalog}.{schema}.dtc_to_beproduct_sync_log"
+coo_master_full = f"{catalog}.{schema}.{coo_master_table}"
 
 run_id = str(uuid.uuid4())
 now = datetime.now(timezone.utc)
@@ -244,8 +257,35 @@ for j in joined:
 
 # COMMAND ----------
 
+# Load the COO (Country of Origin) code->name lookup table -- synced by the
+# admin-triggered beproduct/p5utl_beproduct_master_data_sync.py (MASTER_DATA_
+# FIELDS["coo"] = "country_of_origin"). Fails OPEN (empty dict, not a raise)
+# if the table hasn't been synced yet -- the COO transform then simply never
+# resolves anything (no value pushed) rather than blocking the whole Phase 2
+# run for every other field.
+coo_code_to_name = {}
+try:
+    coo_rows = (spark.table(coo_master_full)
+        .where(F.col("code").isNotNull() & (F.trim(F.col("code")) != ""))
+        .select("code", "value").collect())
+    coo_code_to_name = {r["code"].strip().upper(): r["value"] for r in coo_rows}
+    print(f"COO lookup loaded: {len(coo_code_to_name)} codes from {coo_master_full}")
+except Exception as e:
+    print(f"⚠️  COO lookup table unavailable ({coo_master_full}): {e}")
+    print("   Run beproduct/p5utl_beproduct_master_data_sync.py (mode=PULL_ONLY) first.")
+    print("   Continuing without it -- 'Factory Production Country for Main Factory' "
+          "will simply never resolve/push this run.")
+
+COO_COL = "Factory Production Country for Main Factory"
+value_transforms = {
+    COO_COL: lambda v: phase2.resolve_coo_country_name(v, coo_code_to_name),
+}
+
+# COMMAND ----------
+
 # Compute the deterministic plan and the SDK calls.
-plan = phase2.build_beproduct_updates(joined, push_blanks=push_blanks)
+plan = phase2.build_beproduct_updates(joined, push_blanks=push_blanks,
+                                       value_transforms=value_transforms)
 print("Phase 2 plan:", plan.summary())
 
 for ex in plan.exceptions:

@@ -7,13 +7,11 @@ Fulfills a Phase 1 gap: BOM (Bill of Materials) data is not available from
 the BeProduct API at all and instead relies on a SEPARATE techpack-extraction
 pipeline, landed in:
 
-    alb_tpm_uat.public.customer_teckpack_style_latest   (UAT)
-    alb_tpm_prd.public.customer_teckpack_style_latest   (PRD)
+    alb_tpm_uat.public.customer_teckpack_style_log       (UAT)
+    alb_tpm_prd.public.customer_teckpack_style_log       (PRD)
+    alb_tpm_uat.public.customer_teckpack_style_latest    (UAT)
+    alb_tpm_prd.public.customer_teckpack_style_latest    (PRD)
 
-Changed 2026-09-03 (owner spec): reads `customer_teckpack_style_latest`, NOT
-`customer_teckpack_style_log` — the "latest" table pre-resolves the
-multi-version-per-style history the "log" table required this notebook to
-dedupe itself (see "Versioning" below for what that used to look like).
 Both catalogs are live-confirmed reachable directly from this workspace's
 Unity Catalog metastore (`SHOW CATALOGS` lists them) — no federation/JDBC
 setup needed, just `spark.table(...)`. NOTE the catalog naming is NOT
@@ -21,96 +19,93 @@ symmetric with `dtc_environment` ("uat"/"prod" elsewhere in this repo vs.
 "uat"/"prd" here) — `bom_catalog` is therefore its OWN widget, never derived
 from `dtc_environment`.
 
-Join (live-validated 2026-09-02/03 against the KONTOOR/Wrangler test data
-already used throughout Phase 9a/9b — KTB-00016..KTB-00023 all appear in
-this table with style_season="Spring - 2028", matching
-`ktb_styles.season="Spring"` + `.year="2028"`):
+**SOURCE CHANGED 2026-09-09 ("2nd revision", owner spec) — supersedes the
+`customer_teckpack_style_latest`-only join below (kept for history).** The
+BOM developer pushed back on ever adding new fields to
+`customer_teckpack_style_latest` again — new fields (including the ones
+this phase now needs) are added ONLY to the raw
+`customer_teckpack_style_log.custom_fields` JSON column. This notebook now
+does a TWO-HOP join:
 
     ktb_styles.bp_style_number = customer_teckpack_style_latest.style_no
     AND (ktb_styles.season || " - " || ktb_styles.year) = customer_teckpack_style_latest.style_season
+    -- then, to fetch the actual BOM data:
+    customer_teckpack_style_log.teckpack_style_log_id = customer_teckpack_style_latest.latest_techpack_style_log_id
 
-INNER JOIN only (reverted from a same-week LEFT JOIN experiment 2026-09-07
-— see next paragraph). `style_season` format varies WILDLY by customer in
-this shared table ("SS26", "SS 2027", "FH 2026", "Spring - 2028", ...) —
-this notebook pre-filters `customer_name = bom_customer_name` (default
-"KONTOOR", the live-confirmed customer_name for Wrangler/Kontoor Brands
-data) purely as a scoping/performance optimization; the join keys alone are
-already customer-correct without it.
+`customer_teckpack_style_latest` is STILL used (live-confirmed column names
+2026-09-09) — but now ONLY to resolve, per style, WHICH specific log row is
+current (`latest_techpack_style_log_id`, a real FK column onto
+`customer_teckpack_style_log.teckpack_style_log_id`); the actual BOM segment
+data comes from that log row's `custom_fields` column instead of the
+"latest" table's own `bom_unified` column. See `dtc/python/sync/bom.py`'s
+module docstring for the full `custom_fields` JSON path/structure and the
+corrected field mapping (`**MaterialCategory`/`**Placement`/
+`**SupplierRefNo`/`**MaterialContent`). **This overrides `bom_unified`
+entirely for these 4 fields — no fallback.** **Live-confirmed 2026-09-09
+(CORRECTED same day — an initial check used the wrong JSON path and wrongly
+concluded no KTB style had this data at all):** all 16 current
+KTB/KONTOOR test styles DO have `custom_fields.xts_data.
+TECH_PACK_EXTRACTION.Table` populated, and 14/16 have a real "Main Fabric"
+segment (`KTB-00016`/`KTB-00021` are the two exceptions, consistent with
+their long-standing lack of BOM data under the old `bom_unified` source
+too). `**SupplierRefNo` is genuinely blank for most of these real rows
+(`KTB-00017`..`KTB-00027`); only `KTB-00028`..`KTB-00031` have a real value
+there. This phase is therefore expected to push REAL enrichment (including
+Content) for most KTB test styles on its next real run, not a no-op.
 
-**`Content` is NEVER written by Phase 10 at all — CORRECTED 2026-09-09,
-supersedes everything below this paragraph (kept for history).** An
-earlier 2026-09-03 decision had Phase 10 write BOM `material_name` into
-DTC's "Content" WIP column (to work around DTC's own unreliable
-Content-population trigger). Live-discovered 2026-09-08: for a newer batch
-of test styles (KTB-00024, 00026-00028, 00031), `material_name` itself held
-material-CODE-shaped values (e.g. `"WV-0063"`), so that mapping pushed
-code-like garbage into live DTC `Content` cells — a real data corruption,
-not a theoretical risk. Per owner spec (2026-09-09), Phase 10 no longer
-targets `Content` in any code path — see `dtc/python/sync/bom.py`'s module
-docstring for the full history and the corrected `Mill Fabric Article #`
-mapping (now sourced from `material_name` instead of `material_no`, live-
-confirmed against KTB-00029/KTB-00030). The now-obsolete "no BeProduct
-fallback for Content" sub-decision (2026-09-07) and the same-day-earlier
-`core_main_material`/`fallback_content` LEFT JOIN experiment it reversed
-are both moot now that Content isn't written at all — see AGENTS.md's
-decisions log for that history.
+INNER JOIN only throughout (both hops) — a BeProduct style with no matching
+`customer_teckpack_style_latest` row, or whose `latest_techpack_style_log_id`
+has no live BOM data in `custom_fields`, is simply not processed by Phase 10
+this run (not an error; see the "never revert" rule below).
+`style_season` format varies WILDLY by customer in this shared table
+("SS26", "SS 2027", "FH 2026", "Spring - 2028", ...) — this notebook
+pre-filters `customer_name = bom_customer_name` (default "KONTOOR", the
+live-confirmed customer_name for Wrangler/Kontoor Brands data) purely as a
+scoping/performance optimization; the join keys alone are already
+customer-correct without it.
 
 Enrichment decision logic — UPSERT semantics (pure, unit-tested in
-dtc/python/sync/bom.py; REVISED 2026-09-03, see the decisions log in
-AGENTS.md for the full history including the earlier all-or-nothing design):
-  1. Parse `bom_unified` (JSON), keep only "Main Fabric" / "Fabric" segments
-     (the ONLY two `bom_detail_name` values this phase cares about — live
-     data also has "Stitch/Seam", "Trim", "Label", all ignored). By
-     construction there is exactly ONE "Main Fabric" per style, and ZERO OR
-     MORE "Fabric" segments.
+dtc/python/sync/bom.py; REVISED 2026-09-03 and again 2026-09-09, see the
+decisions log in AGENTS.md for the full history including the earlier
+all-or-nothing design):
+  1. Parse `custom_fields` (JSON), keep only "Main Fabric" / "Fabric"
+     segments by `**MaterialCategory` (the ONLY two values this phase cares
+     about). By construction there is exactly ONE "Main Fabric" per style,
+     and ZERO OR MORE "Fabric" segments.
   2. The match key between a BOM segment and an existing WIP row is
-     (Fabric Group, Mill Fabric Article #) TOGETHER — `Placement` is
-     deliberately excluded from the key since it's the one field expected
-     to still legitimately change for an otherwise-unchanged assignment.
+     (Fabric Group, Mill Fabric Article #) TOGETHER — `Placement`/`Content`
+     are deliberately excluded from the key since they're the fields
+     expected to still legitimately change for an otherwise-unchanged
+     assignment.
   3. Per existing row: if its current (Fabric Group, Mill Fabric Article #)
-     matches a CURRENT BOM segment exactly, UPSERT `Placement` ONLY (and
-     only if it changed); if the row is still un-enriched (blank/
-     placeholder), apply "Main Fabric"'s full field set (first-time
-     enrichment, unchanged from the original design); otherwise (the row
-     carries some OTHER real value not in the current BOM data — e.g. a
-     "Fabric" segment that has since disappeared) leave it COMPLETELY
-     UNTOUCHED.
-  4. If `bom_unified` is missing/blank this run, or its "Main Fabric"
-     segment itself is absent: take ZERO actions for the WHOLE style —
-     NEVER revert or blank already-enriched DTC data. Live-confirmed real
-     trigger (2026-09-03): switching to `customer_teckpack_style_latest`
-     left `bom_unified` NULL for some previously-BOM-bearing test styles
-     (KTB-00016, KTB-00021) that had already been correctly enriched by an
-     earlier run — this rule is what keeps that data intact.
+     matches a CURRENT BOM segment exactly, UPSERT `Placement` and/or
+     `Content`, independently, ONLY if either changed; if the row is still
+     un-enriched (blank/placeholder), apply "Main Fabric"'s full field set
+     (first-time enrichment, unchanged from the original design); otherwise
+     (the row carries some OTHER real value not in the current BOM data —
+     e.g. a "Fabric" segment that has since disappeared) leave it
+     COMPLETELY UNTOUCHED.
+  4. If `custom_fields` has no populated BOM table this run (missing/blank,
+     or its "Main Fabric" segment itself is absent): take ZERO actions for
+     the WHOLE style — NEVER revert or blank already-enriched DTC data.
+     This is the CURRENT state for every existing KTB test style as of
+     2026-09-09 (see above).
   5. For each "Fabric" segment whose (Fabric Group, Mill Fabric Article #)
      key isn't already represented by ANY existing row for the style, it's
      genuinely new: duplicate every existing row once per such segment
      (unchanged fan-out shape: N colorway rows x each new segment produces
      N new INSERTs).
-  6. `Fabric Group` is set to the segment's own `bom_detail_name` (literally
-     "Main Fabric" or "Fabric"), NOT `material_name`. `Placement` maps from
-     `placement`; `Mill Fabric Article #` maps from `material_name` (NOT
-     `material_no` — corrected 2026-09-09, see `bom.py`'s docstring). DTC's
-     `Content` field is never written by this phase at all (see above).
-
-Versioning: the older `customer_teckpack_style_log` table had a
-`current_version` column and could carry MULTIPLE rows per (style_no,
-style_season) over time (re-extracted techpacks), requiring this notebook to
-dedupe by highest `current_version` (tie-broken by `timestamp_lf_captured`).
-`customer_teckpack_style_latest` pre-resolves this — it guarantees at most
-one row per (`style_no`, `customer_name`, `customer_department`,
-`style_season`), live-confirmed for `customer_name='KONTOOR'` (2026-09-03).
-NOTE `customer_department` IS part of that key even though it's a constant,
-non-null value for KONTOOR ("Wrangler Collaborations") in this environment —
-a defensive `row_number()` dedup (on the 3 style/season columns +
-`customer_department`, tie-broken by `timestamp_lf_captured`) is still
-applied as a near-zero-cost safety net in case that guarantee is ever
-violated for a customer/environment this notebook hasn't seen yet.
+  6. Field mapping (CORRECTED 2026-09-09, "2nd revision"): `Fabric Group`
+     <- `**MaterialCategory`; `Placement` <- `**Placement`; `Mill Fabric
+     Article #` <- `**SupplierRefNo`; `Content` <- `**MaterialContent`
+     (REINSTATED — Phase 10 writes Content again, now from a genuinely
+     reliable dedicated column). See `bom.py`'s module docstring for the
+     exact JSON path and the full mapping history.
 
 Push mechanics: UPDATEs are sent as `sheetData` PATCH objects keyed by
 `rowId` (existing rows); INSERTs are sent keyed by `rowIndex` (new rows,
 values taken by copying the FULL original row's fields from `data_json` and
-overriding just the 3 BOM fields) — matches the established "cannot mix
+overriding just the 4 BOM fields) — matches the established "cannot mix
 rowId and rowIndex in one PATCH call" contract (see `DTCConnector.patch_rows`
 / AGENTS.md's Phase 1 `create_sheet`/PATCH notes). `rowIndex` values are
 assigned sequentially starting from `get_max_row_index() + 1` per sheet.
@@ -119,23 +114,17 @@ This notebook does NOT directly mutate the local Delta `dtc_wip_ktb` table
 after pushing — like Phase 1's push, it pushes to the LIVE DTC sheet only.
 
 DAG placement (owner decision 2026-09-02): this notebook runs BEFORE
-`build_costing_chart`, not after — the original intent was to get up-to-date
-material content into `costing_chart`'s `fabric_content` (part of
+`build_costing_chart`, not after — the intent is to get up-to-date material
+content into `costing_chart`'s `fabric_content` (part of
 `product_description`) so Phase 9b's NT Orbit duty classification is computed
-against real BOM data, not the "MAIN MATERIAL CONTENT" placeholder. NOTE
-(2026-09-09): since Phase 10 no longer writes DTC's "Content" field at all
-(see above), `fabric_content` will typically stay blank going forward unless
-DTC's own (previously unreliable) Content-population trigger fills it
-independently — a real, accepted consequence, not a bug; `fabric_content` is
-only one of six columns `duty.PRODUCT_DESCRIPTION_COLS` concatenates for NT
-Orbit, so this degrades gracefully. The DAG ordering itself (Phase 10 before
-`build_costing_chart`) is unchanged, since `Fabric Group`/`Mill Fabric
-Article #`/`Placement` are still real Phase 10 outputs `costing_chart`
-depends on. Since this notebook never mutates Delta directly,
-`scripts/deploy_job.py` runs a dedicated `repull_dtc_bom` task (a full
-`p1_pull_masters_to_delta` re-pull) immediately afterward, and
-`build_costing_chart` depends on THAT re-pull, not on the earlier
-`pull_master_dtc`. See that file's DAG diagram for the exact task graph.
+against real BOM data, not the "MAIN MATERIAL CONTENT" placeholder. Now that
+Content is reinstated (2026-09-09), this original intent is live again once
+the BOM developer populates `custom_fields` for KTB styles. Since this
+notebook never mutates Delta directly, `scripts/deploy_job.py` runs a
+dedicated `repull_dtc_bom` task (a full `p1_pull_masters_to_delta` re-pull)
+immediately afterward, and `build_costing_chart` depends on THAT re-pull,
+not on the earlier `pull_master_dtc`. See that file's DAG diagram for the
+exact task graph.
 """
 
 # COMMAND ----------
@@ -161,7 +150,12 @@ dbutils.widgets.text("dtc_workspace",   "KTB", "DTC Workspace")
 # not "_prod", so this must be its own parameter (see module docstring).
 dbutils.widgets.text("bom_catalog", "alb_tpm_uat", "BOM source catalog (alb_tpm_uat | alb_tpm_prd)")
 dbutils.widgets.text("bom_schema",  "public", "BOM source schema")
-dbutils.widgets.text("bom_table",   "customer_teckpack_style_latest", "BOM source table")
+dbutils.widgets.text("bom_table",   "customer_teckpack_style_latest",
+                     "BOM 'latest' table (resolves latest_techpack_style_log_id per style)")
+# Added 2026-09-09 ("2nd revision"): the actual BOM data (custom_fields) now
+# lives on the LOG table, not the "latest" table -- see module docstring.
+dbutils.widgets.text("bom_log_table", "customer_teckpack_style_log",
+                     "BOM 'log' table (custom_fields -- the actual BOM source, joined via latest_techpack_style_log_id)")
 dbutils.widgets.text("bom_customer_name", "KONTOOR",
                      "Pre-filter customer_name (scoping/perf only -- the join keys alone are already correct without it)")
 dbutils.widgets.text("dry_run", "true", "Dry run (true/false) -- compute + log, skip the live DTC push")
@@ -188,6 +182,7 @@ workspace     = dbutils.widgets.get("dtc_workspace").strip()
 bom_catalog   = dbutils.widgets.get("bom_catalog").strip()
 bom_schema    = dbutils.widgets.get("bom_schema").strip()
 bom_table     = dbutils.widgets.get("bom_table").strip()
+bom_log_table = dbutils.widgets.get("bom_log_table").strip()
 bom_customer_name = dbutils.widgets.get("bom_customer_name").strip()
 dry_run       = dbutils.widgets.get("dry_run").strip().lower() == "true"
 batch_size    = int(dbutils.widgets.get("batch_size") or 100)
@@ -197,6 +192,7 @@ styles_table    = f"{catalog}.{schema}.ktb_styles"
 wip_table       = f"{catalog}.{schema}.dtc_wip_{customer.lower()}"
 registry_table  = f"{catalog}.{schema}.dtc_request_registry"
 bom_source      = f"{bom_catalog}.{bom_schema}.{bom_table}"
+bom_log_source  = f"{bom_catalog}.{bom_schema}.{bom_log_table}"
 now = datetime.now(timezone.utc)
 
 print("=" * 72)
@@ -209,7 +205,9 @@ if not run_phase10:
 
 print(f"  BeProduct styles : {styles_table}  (folder_name={folder_name!r})")
 print(f"  WIP table        : {wip_table}")
-print(f"  BOM source       : {bom_source}  (customer_name={bom_customer_name!r})")
+print(f"  BOM 'latest'     : {bom_source}")
+print(f"  BOM 'log'        : {bom_log_source}  (custom_fields -- the actual BOM source)")
+print(f"  BOM customer     : {bom_customer_name!r}")
 print(f"  dry_run={dry_run}")
 
 # COMMAND ----------
@@ -236,29 +234,40 @@ print(f"  BeProduct styles with a valid season/year : {styles.count()}")
 # customer_department IS part of that key even though it's a constant
 # non-null value for KONTOOR ("Wrangler Collaborations") in this environment
 # -- live-confirmed 0 duplicate groups for customer_name='KONTOOR' on the
-# full 4-column key (2026-09-03). A defensive row_number() dedup is still
+# full 4-column key (2026-09-03). A defensive dropDuplicates is still
 # applied (belt-and-suspenders, near-zero cost) in case that guarantee is
 # ever violated for a customer/environment this notebook hasn't seen yet;
 # it should always be a no-op today.
-bom_raw = (spark.table(bom_source)
-           .where(F.col("customer_name") == bom_customer_name)
-           .where(F.col("bom_unified").isNotNull()))
+bom_latest = (spark.table(bom_source)
+              .where(F.col("customer_name") == bom_customer_name)
+              .where(F.col("latest_techpack_style_log_id").isNotNull())
+              .select("style_no", "customer_department", "style_season",
+                      "latest_techpack_style_log_id")
+              .dropDuplicates(["style_no", "customer_department", "style_season"]))
 
-from pyspark.sql import Window
-w = Window.partitionBy("style_no", "customer_department", "style_season").orderBy(
-    F.col("timestamp_lf_captured").desc_nulls_last(),
-)
-bom_latest = (bom_raw
-              .withColumn("_rn", F.row_number().over(w))
-              .where(F.col("_rn") == 1)
-              .select("style_no", "customer_department", "style_season", "bom_unified"))
+# SECOND HOP (added 2026-09-09, "2nd revision"): the actual BOM data
+# (`custom_fields`) lives on the LOG table, fetched via the FK
+# latest_techpack_style_log_id -> teckpack_style_log_id. This is a real
+# foreign key (one specific log row per "latest" row), so no further
+# dedup/windowing is needed on this hop.
+bom_log = (spark.table(bom_log_source)
+           .where(F.col("custom_fields").isNotNull())
+           .select(F.col("teckpack_style_log_id"), F.col("custom_fields")))
+
+bom_latest_with_custom_fields = (bom_latest.join(
+    bom_log,
+    on=bom_latest.latest_techpack_style_log_id == bom_log.teckpack_style_log_id,
+    how="inner",
+).select(bom_latest.style_no, bom_latest.customer_department, bom_latest.style_season,
+          bom_log.custom_fields))
 
 joined = (styles.join(
-    bom_latest,
-    on=(styles.bp_style_number == bom_latest.style_no)
-       & (styles.style_season == bom_latest.style_season),
+    bom_latest_with_custom_fields,
+    on=(styles.bp_style_number == bom_latest_with_custom_fields.style_no)
+       & (styles.style_season == bom_latest_with_custom_fields.style_season),
     how="inner",
-).select(styles.bp_style_number, bom_latest.customer_department, bom_latest.bom_unified))
+).select(styles.bp_style_number, bom_latest_with_custom_fields.customer_department,
+          bom_latest_with_custom_fields.custom_fields))
 
 matched = joined.collect()
 print(f"  Matched (style x BOM) pairs : {len(matched)}")
@@ -284,8 +293,11 @@ for r in spark.table(wip_table).where(F.col("bp_style_number").isin(list(matched
         "fabric_group": row_fields.get(bom.WIP_FIELD_FABRIC_GROUP),
         "mill_fabric_article": row_fields.get(bom.WIP_FIELD_MILL_FABRIC_ARTICLE),
         "placement": row_fields.get(bom.WIP_FIELD_PLACEMENT),
-        # No "content" key any more -- Content is never read/written by
-        # Phase 10 (removed 2026-09-09, see bom.py's module docstring).
+        # "content" REINSTATED 2026-09-09 ("2nd revision") -- see
+        # bom.py's module docstring. Needed so plan_style_enrichment() can
+        # diff/upsert Content on an already-matched row, not just at
+        # first-time enrichment.
+        "content": row_fields.get(bom.WIP_FIELD_CONTENT),
         "request_id": wr.get("request_id"),
         "data_json": wr.get("data_json"),
     })
@@ -319,7 +331,7 @@ for r in matched:
         skipped_no_wip_rows += 1
         continue
 
-    actions = bom.plan_style_enrichment(existing_rows, r["bom_unified"])
+    actions = bom.plan_style_enrichment(existing_rows, r["custom_fields"])
     if not actions:
         skipped_no_actions += 1
         continue

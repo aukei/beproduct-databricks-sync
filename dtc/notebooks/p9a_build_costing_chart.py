@@ -61,9 +61,12 @@ Costing chart schema (field → source):
   lineplan_ref        from WIP data_json "Lineplan Ref #"
   fabric_content      from WIP data_json "Content"  (corrected 2026-09-03 --
                        was mistakenly "Fabric Group"; "Content" is a
-                       DIFFERENT, DTC-internal-trigger-populated column --
-                       NEVER written by Phase 10 as of 2026-09-09, see the
-                       filter note below and sync/bom.py's docstring)
+                       DIFFERENT column, populated by BOTH DTC's own
+                       internal trigger AND Phase 10 -- Phase 10 briefly
+                       stopped writing it (2026-09-09 morning) then
+                       REINSTATED it the same day, "2nd revision", from a
+                       genuinely reliable new source (`**MaterialContent`);
+                       see the filter note below and sync/bom.py's docstring)
   fabric_type         from WIP data_json "Fabric Type" (new 2026-09-03)
   gender              from WIP data_json "Gender"
   class               from WIP data_json "Class"
@@ -140,6 +143,23 @@ regression to fix. `fabric_type` ("Fabric Type") is still extracted and
 carried through to `costing_chart.fabric_type` for traceability, but
 remains NOT part of the filter or the NT Orbit description string (it
 remains solely DTC-trigger-populated and may still be blank in practice).
+
+**REINSTATED again, same day 2026-09-09 ("2nd revision" of the BOM source,
+owner spec)**: the BOM developer's push-back on `customer_teckpack_style_
+latest` led to a NEW, genuinely reliable Content source
+(`customer_teckpack_style_log.custom_fields` -> `**MaterialContent`, via a
+real dedicated per-material column, NOT the overloaded `material_name`
+that caused the 2026-09-08 corruption) — see `sync/bom.py`'s module
+docstring for the full path/structure. Phase 10 writes "Content" from this
+source again. The completeness filter's LOGIC in this notebook is
+UNCHANGED (still gates on `fabric_content` non-blank, same as the
+2026-09-09-morning paragraph above) — only the reason a row's Content is
+populated changed (a real Phase 10 write again, not solely DTC's trigger).
+Live-confirmed 2026-09-09 (correcting an earlier same-day investigation
+mistake that used the wrong JSON path): 14 of 16 KTB test styles already
+have real Main Fabric BOM data via this new source, so this filter is
+expected to start passing for most of them on Phase 10's next real run,
+not stay permanently blocked.
 
 **"Main Fabric" only (added 2026-09-07, project team decision)**: ONLY a
 style's "Main Fabric" WIP row (`fabric_group == "Main Fabric"`) enters
@@ -332,7 +352,8 @@ print(f"  Dropped total                 : {dropped_incomplete_fabric}")
 print(f"    - blank material_no         : {dropped_no_material_no}")
 print(f"    - blank bp_style_no         : {dropped_no_bp_style_no}")
 print(f"    - blank/placeholder Content : {dropped_no_content}  "
-      f"(Phase 10 no longer writes Content -- waiting on DTC's own trigger)")
+      f"(Phase 10 writes Content again as of 2026-09-09 -- this should shrink "
+      f"once styles are re-enriched from the new custom_fields source)")
 print(f"    - fabric_group != 'Main Fabric' (i.e. a 'Fabric' segment row) : "
       f"{dropped_not_main_fabric}")
 

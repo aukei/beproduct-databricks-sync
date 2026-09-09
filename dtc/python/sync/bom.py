@@ -5,60 +5,120 @@ Fulfills a Phase 1 gap: BOM (Bill of Materials) data is not available from the
 BeProduct API and instead relies on techpack extraction, processed by a
 separate pipeline and landed in:
 
-    alb_tpm_uat.public.customer_teckpack_style_log   (UAT)
-    alb_tpm_prd.public.customer_teckpack_style_log   (PRD)
+    alb_tpm_uat.public.customer_teckpack_style_log       (UAT)
+    alb_tpm_prd.public.customer_teckpack_style_log       (PRD)
+    alb_tpm_uat.public.customer_teckpack_style_latest    (UAT)
+    alb_tpm_prd.public.customer_teckpack_style_latest    (PRD)
 
 Both catalogs are live-confirmed reachable from this Databricks workspace's
-metastore (`SHOW CATALOGS` lists them directly) — no federation/JDBC needed,
-just `spark.table("alb_tpm_<env>.public.customer_teckpack_style_log")`.
+metastore (`SHOW CATALOGS` lists them directly) — no federation/JDBC needed.
 
-Join (owner spec, live-validated 2026-09-02 against the KONTOOR/Wrangler test
-data already used throughout Phase 9a/9b testing — KTB-00016..KTB-00023 all
-appear in this table with style_season="Spring - 2028", matching
-`lft.beproduct.ktb_styles.season="Spring"` + `.year="2028"`):
+**SOURCE CHANGED 2026-09-09 ("2nd revision", owner spec) — supersedes
+everything about `bom_unified` below (kept for history).** The BOM developer
+pushed back on ever adding new fields to `customer_teckpack_style_latest`
+again; new fields (including the ones this module now needs) are added ONLY
+to the raw `customer_teckpack_style_log.custom_fields` JSON column. This
+module's source of truth for Fabric Group/Placement/Mill Fabric Article #/
+Content moved from `customer_teckpack_style_latest.bom_unified` to
+`customer_teckpack_style_log.custom_fields` — this **overrides all fields
+from BOM_UNIFIED entirely, no fallback** (a style with no populated
+`custom_fields.xts_data.TECH_PACK_EXTRACTION.Table[Type="BOM"]` structure
+yet gets ZERO enrichment actions this run, exactly like "BOM missing this
+run" always meant before — see the "never revert" rule below; it is NOT a
+special case). `customer_teckpack_style_latest` is STILL used, but now
+ONLY to resolve, per style, WHICH specific log row is current
+(`latest_techpack_style_log_id`, a foreign key onto
+`customer_teckpack_style_log.teckpack_style_log_id` — live-confirmed exact
+column names on both tables 2026-09-09). **Live-confirmed 2026-09-09
+(CORRECTED same day — an initial check used the wrong path,
+`custom_fields.TECH_PACK_EXTRACTION` instead of the real
+`custom_fields.xts_data.TECH_PACK_EXTRACTION`, and wrongly concluded no KTB
+style had this data at all):** all 16 current KTB/KONTOOR test styles
+DO have `custom_fields.xts_data.TECH_PACK_EXTRACTION.Table` populated, and
+14/16 have a real "Main Fabric" segment (`KTB-00016`/`KTB-00021` are the
+two exceptions — no Main Fabric segment found, consistent with their
+long-standing lack of BOM data under the old `bom_unified` source too).
+`**SupplierRefNo` (`mill_fabric_article`) is genuinely BLANK for most of
+these real rows (`KTB-00017`..`KTB-00027`) — only `KTB-00028`..`KTB-00031`
+have a real, non-blank value there. 2,411 OTHER real rows across other
+customers (e.g. "Etam Lingerie") also have this structure live, confirming
+the shape below is real and not merely illustrative.
 
-    ktb_styles.bp_style_number = customer_teckpack_style_log.style_no
-    AND (ktb_styles.season || " - " || ktb_styles.year) = customer_teckpack_style_log.style_season
+The join itself is UNCHANGED (still `ktb_styles.bp_style_number` /
+`ktb_styles.season||" - "||year` against `style_no`/`style_season`, still
+INNER JOIN, still pre-filtered by `customer_name` for scoping/perf only —
+see `build_style_season()` and the notebook's Step 1): it now targets
+`customer_teckpack_style_latest.style_no`/`.style_season` as before, PLUS a
+second join hop through `latest_techpack_style_log_id` to fetch
+`custom_fields` from `customer_teckpack_style_log`.
 
-INNER JOIN only — a BeProduct style with no matching BOM row is simply not
-processed by Phase 10 (not an error).
+``custom_fields`` (on the LOG table, NOT the "latest" table) is a JSON
+string/object shaped like (live-confirmed path and structure 2026-09-09,
+via 2,411 real non-KTB rows plus the owner-supplied example below):
 
-``bom_unified`` is a JSON string shaped like:
+    {
+      "xts_data": {
+        "ACTION_CODE": "NEW_TECHPACK", ...,
+        "TECH_PACK_EXTRACTION": {
+          "Table": [
+            {"Seq": 1, "Type": "POM", ...},
+            {"Seq": 2, "Type": "BOM",
+             "ColumnHeader": ["**BomHeader", "**MaterialCategory",
+                 "**MaterialCode", "**MaterialType", "**MaterialDescription",
+                 "**Quantity", "**MaterialContent", "**MaterialConstruction",
+                 "**MaterialCuttableWidth", "**Placement", ..., "**SupplierRefNo",
+                 ..., {"Colorway": [...]}, {"Color": [...]}, ...],
+             "Data": [
+               ["SLEEVELESS SHIRT", "Main Fabric", "LF-BD26-000002--SH",
+                "Sheeting", "WV-0003", "", "Cotton 100%", "", "", "BODICE",
+                ..., "WV-0003", ..., {"Colorway": [...]}, {"Color": [...]}, "", ""],
+               ["SLEEVELESS SHIRT", "Fabric", "LF-BD26-000004--PN", "Poplin",
+                "WV-0061", "", "Cotton 100%", "", "", "HEM", ..., "WV-0061", ...],
+               ...
+             ]},
+            {"Seq": 3, "Type": "Colorway", ...}
+          ]
+        },
+        "DATE": ""
+      }
+    }
 
-    [{"part": "BOM", "details": [
-        {"bom_detail_name": "Main Fabric", "material_name": "...",
-         "material_no": "...", "placement": "...", ...},
-        {"bom_detail_name": "Fabric", ...},
-        {"bom_detail_name": "Stitch/Seam", ...},
-        {"bom_detail_name": "Trim", ...},
-        ...
-    ], "column_header": [...]}]
+Path: `custom_fields -> xts_data -> TECH_PACK_EXTRACTION -> Table[] ->
+(entries where Type == "BOM") -> ColumnHeader (defines each Data row's
+column order) + Data (list of row-arrays)`. `ColumnHeader` can ALSO contain
+DICT entries (e.g. `{"Colorway": [...]}`, `{"Color": [...]}`) for
+per-colorway-column breakdowns this module does not use — a plain-string
+`.index()` lookup for our 4 target column names simply never matches those,
+so no special-casing is required. If more than one `Type == "BOM"` table
+entry exists, ALL of their `Data` rows are concatenated (defensive; only one
+has ever been observed live, but nothing in the spec guarantees exactly one).
 
-Only two ``bom_detail_name`` values matter here: "Main Fabric" and "Fabric"
-(corrected 2026-09-02 — an earlier iteration of this spec used "Body" instead
-of "Fabric"; live data across all 16 KONTOOR rows never has "Body" at all,
-but 3/16 genuinely have a "Fabric" segment alongside "Main Fabric" — e.g.
-KTB-00020, KTB-00023). By construction there is exactly ONE "Main Fabric" per
-style, and ZERO OR MORE "Fabric" segments (never seen more than 1 in live
-data, but the notebook handles any count). "Stitch/Seam", "Trim", "Label" are
-also live-confirmed present and are NOT used.
+Only two ``**MaterialCategory`` values matter here: "Main Fabric" and
+"Fabric" (UNCHANGED from the old `bom_detail_name` semantics — the OLD
+`bom_unified` structure's `bom_detail_name` field and this NEW structure's
+`**MaterialCategory` column play the exact same conceptual role: "Main
+Fabric" appears exactly once per style by construction; "Fabric" is zero or
+more). Other `**MaterialCategory` values (blank, or anything else) are
+ignored, matching the old "Stitch/Seam"/"Trim"/"Label" ignore-list behavior.
 
-Enrichment logic -- UPSERT semantics (owner spec, revised 2026-09-03; see
-AGENTS.md decisions log for the full history including the earlier
-all-or-nothing `style_already_enriched` design this replaces):
+Enrichment logic -- UPSERT semantics (owner spec, revised 2026-09-03,
+mapping source revised again 2026-09-09; see AGENTS.md decisions log for the
+full history including the earlier all-or-nothing `style_already_enriched`
+design this replaces):
 
   * The match key between a BOM segment and an existing DTC WIP row is the
     PAIR (Fabric Group, Mill Fabric Article #) — i.e. these two values
     together identify "this is the same fabric assignment" across runs.
-    `Placement` is explicitly EXCLUDED from the match key because it is the
-    one field expected to still legitimately change/correct itself over
-    time for an otherwise-unchanged material assignment.
+    `Placement`/`Content` are explicitly EXCLUDED from the match key because
+    they are the fields expected to still legitimately change/correct
+    themselves over time for an otherwise-unchanged material assignment.
   * Per existing WIP row, per run:
       - If the row's current (Fabric Group, Mill Fabric Article #) matches
         one of this style's CURRENT BOM segments (Main Fabric or any
-        Fabric segment) exactly: UPSERT — update `Placement` ONLY, and only
-        if it actually changed. `Fabric Group`/`Mill Fabric Article #`
-        are never blindly re-written once they already match.
+        Fabric segment) exactly: UPSERT — update `Placement` and/or
+        `Content`, each independently, ONLY if it actually changed.
+        `Fabric Group`/`Mill Fabric Article #` are never blindly re-written
+        once they already match.
       - Else if the row is still un-enriched (blank or the DTC placeholder
         `"MAIN MATERIAL CONTENT"`): apply the "Main Fabric" segment's full
         field set (first-time enrichment — unchanged from the original
@@ -70,73 +130,32 @@ all-or-nothing `style_already_enriched` design this replaces):
         reverts or blanks existing DTC data just because this run's BOM
         snapshot no longer contains a matching segment — see the next
         bullet for the even more common trigger of this rule.
-  * If the style's `bom_unified` is entirely missing/blank THIS RUN, or its
-    "Main Fabric" segment itself is absent (parses to no "Main Fabric" at
-    all): NO Fabric Group/Placement/Mill Fabric Article # action is taken
-    for the whole style — never revert. (`Content` is never touched by
-    Phase 10 at all any more — see below — so it is not part of this rule.)
-    Live-confirmed real trigger (2026-09-03): switching the source table to
-    `customer_teckpack_style_latest` (see below) left `bom_unified` NULL
-    for some previously-BOM-bearing test styles (KTB-00016, KTB-00021) —
-    this rule is what keeps their earlier, correct Phase 10 enrichment
-    intact rather than silently wiping it.
+  * If the style's `custom_fields` has no populated BOM table THIS RUN (the
+    new structure is entirely missing, `xts_data`/`TECH_PACK_EXTRACTION`/
+    `Table` is absent, or its "Main Fabric" row itself is absent): NO
+    Fabric Group/Placement/Mill Fabric Article #/Content action is taken
+    for the whole style — never revert. This is the CURRENT state for
+    every existing KTB/KONTOOR test style as of 2026-09-09 (see above) —
+    an accepted transition state, not a bug.
   * For each "Fabric" segment (0 or more) whose (Fabric Group, Mill Fabric
     Article #) key is NOT already represented by ANY existing row for this
     style: it's genuinely new — duplicate every existing row once per such
     segment (unchanged fan-out shape: N colorway rows x each new segment
     produces N new INSERTs).
-  * The value written to `Fabric Group` is the segment's own
-    `bom_detail_name` (i.e. literally "Main Fabric" or "Fabric"), NOT
-    `material_name`. `Placement` maps from `placement`.
-  * **`Mill Fabric Article #` maps from `material_name` — CORRECTED
-    2026-09-09 (owner spec, supersedes the original `material_no` mapping).**
-    Live-discovered the same day: for a newer batch of test styles
-    (KTB-00024, 00026-00028, 00031), `material_name` held values that looked
-    like material CODES (e.g. `"WV-0063"`) while `material_no` held a
-    different code format (e.g. `"LF-BD26-000005--TW"`) — the OPPOSITE of
-    what the original 2026-09-02 field-name assumption expected. Live-
-    checked against KTB-00029/KTB-00030 (owner-supplied confirmation
-    styles): `material_name` = `"LTCL6080"` / `"WV-0064"` / `"WG24-01706"` —
-    consistently article-code-shaped, confirming `material_name` (not
-    `material_no`) is the correct source for "Mill Fabric Article #" across
-    the real data, regardless of what any individual older/inconsistent
-    test style happens to show. `material_no` is no longer read by this
-    module at all.
-  * **`Content` is ALWAYS left blank by Phase 10 — CORRECTED 2026-09-09,
-    REVERSES the 2026-09-03 decision below `WIP_FIELD_CONTENT` used to
-    document.** That earlier decision had Phase 10 write `material_name`
-    into `Content`; live-discovered 2026-09-08 that for the same newer test
-    styles above, this pushed material-CODE-shaped values (e.g. `"WV-0063"`)
-    into DTC's `Content` cell — a real live-data corruption, not merely a
-    theoretical risk. Per owner spec (2026-09-09), Phase 10 no longer writes
-    `Content` at all, in any code path (first-time enrichment, upsert
-    backfill, or INSERT). The field is left exactly as DTC's own (unreliable
-    — see the trigger note this replaces) mechanism leaves it. NOTE: this
-    means `costing_chart.fabric_content` (sourced from the WIP `"Content"`
-    column, see `p9a_build_costing_chart.py`) will typically stay blank too,
-    since DTC's own Content-population trigger was already confirmed
-    unreliable in UAT — a real, accepted downstream consequence, not a bug;
-    `fabric_content` is only one of six `duty.PRODUCT_DESCRIPTION_COLS`
-    concatenated for NT Orbit, so this degrades gracefully rather than
-    blocking Phase 9b.
+  * **Field mapping (CORRECTED 2026-09-09, "2nd revision" — supersedes both
+    the 2026-09-02 and 2026-09-09-morning mappings below):**
+      - `Fabric Group`         <- `**MaterialCategory`   (e.g. "Main Fabric"/"Fabric")
+      - `Placement`            <- `**Placement`          (e.g. "BODICE"/"HEM"/"LINING")
+      - `Mill Fabric Article #`<- `**SupplierRefNo`      (e.g. "WV-0003" -- article-code-shaped)
+      - `Content`              <- `**MaterialContent`    (e.g. "Cotton 100%" -- a REAL content
+        description this time, unlike the false-start below) — **REINSTATED**
+        2026-09-09: Phase 10 writes `Content` again, now from a genuinely
+        reliable dedicated column instead of overloading `material_name`.
+    (`**MaterialCode` is NOT used for anything — it corresponds to the OLD
+    `bom_unified.material_no`, deliberately unused, same as before.)
   * A BOM segment list with neither "Main Fabric" nor "Fabric" (e.g. only
-    "Trim"/"Label"/"Stitch/Seam") is equivalent to "no Main Fabric" above —
-    zero actions, never revert.
-
-Source table (changed 2026-09-03, owner spec): reads
-`customer_teckpack_style_latest`, NOT `customer_teckpack_style_log` — the
-"latest" table pre-resolves the multi-version-per-style history the "log"
-table required this module to dedupe itself (`current_version` DESC /
-`timestamp_lf_captured` tie-break), guaranteeing at most one row per
-(`style_no`, `customer_name`, `customer_department`, `style_season`).
-NOTE `customer_department` IS part of that uniqueness key even though it is
-a constant, non-null value for KONTOOR ("Wrangler Collaborations") in this
-environment — live-confirmed 0 duplicate groups for
-`customer_name='KONTOOR'` on the full 4-column key (2026-09-03); the 3-column
-key without `customer_department` is ALSO duplicate-free for KONTOOR
-specifically today, but the 4-column key is used for correctness since the
-column is genuinely part of the table's real uniqueness constraint and other
-customers in this shared table are NOT constant on it.
+    other/blank `**MaterialCategory` values) is equivalent to "no Main
+    Fabric" above — zero actions, never revert.
 
 This module holds only the deterministic decision logic (JSON parsing, the
 upsert/no-op/insert decision, and mapping to the raw DTC field names for the
@@ -159,12 +178,11 @@ from typing import Any, Dict, List, Optional, Tuple
 # "MAIN MATERIAL CONTENT").
 PLACEHOLDER_FABRIC_GROUP = "MAIN MATERIAL CONTENT"
 
-# The only two bom_detail_name values Phase 10 cares about (corrected
-# 2026-09-02 -- was "Main Fabric"/"Body"; live data never has "Body", but
-# genuinely has "Fabric" segments in 3/16 KONTOOR rows). There is exactly ONE
-# "Main Fabric" per style by construction; "Fabric" can be zero or more.
-# Live-confirmed other values present in the source table (ignored):
-# "Stitch/Seam", "Trim", "Label".
+# The only two **MaterialCategory (formerly bom_detail_name) values Phase 10
+# cares about. There is exactly ONE "Main Fabric" per style by construction;
+# "Fabric" can be zero or more. Any other value (blank, or anything else) is
+# ignored -- matches the old "Stitch/Seam"/"Trim"/"Label" ignore-list
+# behavior under the prior bom_unified-based source.
 SEGMENT_MAIN_FABRIC = "Main Fabric"
 SEGMENT_FABRIC = "Fabric"
 
@@ -172,17 +190,26 @@ SEGMENT_FABRIC = "Fabric"
 # dynamicFields, 2026-09-02) — NOT the Delta col_* normalized names.
 WIP_FIELD_FABRIC_GROUP = "Fabric Group"
 WIP_FIELD_PLACEMENT = "Placement"
-# CORRECTED 2026-09-09 (owner spec): sourced from the BOM detail's
-# `material_name`, NOT `material_no` -- see the module docstring's spec
-# section for the live evidence (KTB-00024/26-28/31 vs. KTB-00029/00030).
+# Sourced from **SupplierRefNo (2026-09-09 "2nd revision" -- see module
+# docstring). Was `material_name` from bom_unified's per-detail dict before
+# that (2026-09-09 morning), and `material_no` before that (2026-09-02).
 WIP_FIELD_MILL_FABRIC_ARTICLE = "Mill Fabric Article #"
+# REINSTATED 2026-09-09 ("2nd revision", owner spec) -- sourced from
+# **MaterialContent, a genuinely reliable dedicated content-description
+# column in the NEW custom_fields-based source (unlike the briefly-attempted
+# 2026-09-03 mapping from bom_unified's overloaded `material_name`, reverted
+# 2026-09-09 morning after it was found to push material-CODE-shaped garbage
+# for some styles -- see AGENTS.md decisions log for that history). This is
+# a genuine field again, not a removed one.
+WIP_FIELD_CONTENT = "Content"
 
-# REMOVED 2026-09-09 (owner spec, reverses the 2026-09-03 decision this
-# constant used to document): Phase 10 no longer writes "Content" at all --
-# see the module docstring's spec section for why (live-data corruption
-# discovered 2026-09-08). If DTC's own trigger writes this cell
-# independently, that's outside this pipeline's control; this module simply
-# never targets "Content" in any PATCH/INSERT payload any more.
+# ColumnHeader names in customer_teckpack_style_log.custom_fields's BOM Table
+# entry (raw strings, prefixed "**" in the live schema -- see module
+# docstring for the exact path and a full example).
+COL_MATERIAL_CATEGORY = "**MaterialCategory"   # -> Fabric Group
+COL_MATERIAL_CONTENT = "**MaterialContent"     # -> Content
+COL_PLACEMENT = "**Placement"                  # -> Placement
+COL_SUPPLIER_REF_NO = "**SupplierRefNo"        # -> Mill Fabric Article #
 
 
 def _blank(v: Any) -> bool:
@@ -228,78 +255,135 @@ class ParsedBomSegments:
         return self.main_fabric is None and not self.fabric_list
 
 
-def parse_bom_segments(bom_unified: Any) -> ParsedBomSegments:
+def _extract_bom_table_rows(custom_fields: Any) -> List[Dict[str, Optional[str]]]:
     """
-    Parse `customer_teckpack_style_log.bom_unified` (a JSON string, or an
-    already-parsed list/dict — accepted for testability) and return a
-    `ParsedBomSegments` holding ONLY the "Main Fabric" / "Fabric" segments.
+    Parse `customer_teckpack_style_log.custom_fields` (a JSON string, or an
+    already-parsed dict — accepted for testability) and return one
+    normalized dict per raw BOM `Data` row, using the module's own
+    (Delta-agnostic) field names:
+
+        {"bom_detail_name": <**MaterialCategory>, "material_name": <**SupplierRefNo>,
+         "content": <**MaterialContent>, "placement": <**Placement>}
+
+    Path: `custom_fields -> xts_data -> TECH_PACK_EXTRACTION -> Table[] ->
+    (entries where Type == "BOM") -> ColumnHeader + Data`. See the module
+    docstring for the full structure and a real example. If more than one
+    `Type == "BOM"` table entry exists, ALL of their `Data` rows are
+    concatenated.
+
+    Never raises -- any parse failure, blank input, or unexpected shape at
+    any point in the path returns `[]` (treated uniformly as "nothing to
+    enrich for this style", same as the old bom_unified parser).
+    """
+    if _blank(custom_fields):
+        return []
+    try:
+        cf = json.loads(custom_fields) if isinstance(custom_fields, str) else custom_fields
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return []
+    if not isinstance(cf, dict):
+        return []
+    xts_data = cf.get("xts_data")
+    if not isinstance(xts_data, dict):
+        return []
+    tpe = xts_data.get("TECH_PACK_EXTRACTION")
+    if not isinstance(tpe, dict):
+        return []
+    tables = tpe.get("Table")
+    if not isinstance(tables, list):
+        return []
+
+    def _col_index(cols: List[Any], name: str) -> Optional[int]:
+        # cols can contain dict entries (e.g. {"Colorway": [...]}) alongside
+        # plain strings; .index() on a string target simply skips those.
+        try:
+            return cols.index(name)
+        except ValueError:
+            return None
+
+    def _cell(row: Any, idx: Optional[int]) -> Optional[str]:
+        if idx is None or not isinstance(row, list) or idx >= len(row):
+            return None
+        v = row[idx]
+        # Guard against a stray dict-typed cell (shouldn't happen for our 4
+        # plain-string target columns, but never let it crash/propagate).
+        return v if isinstance(v, str) else None
+
+    rows: List[Dict[str, Optional[str]]] = []
+    for t in tables:
+        if not isinstance(t, dict) or t.get("Type") != "BOM":
+            continue
+        cols = t.get("ColumnHeader")
+        data = t.get("Data")
+        if not isinstance(cols, list) or not isinstance(data, list):
+            continue
+        i_cat = _col_index(cols, COL_MATERIAL_CATEGORY)
+        i_content = _col_index(cols, COL_MATERIAL_CONTENT)
+        i_place = _col_index(cols, COL_PLACEMENT)
+        i_supref = _col_index(cols, COL_SUPPLIER_REF_NO)
+        for row in data:
+            rows.append({
+                "bom_detail_name": _cell(row, i_cat),
+                "material_name": _cell(row, i_supref),
+                "content": _cell(row, i_content),
+                "placement": _cell(row, i_place),
+            })
+    return rows
+
+
+def parse_bom_segments(custom_fields: Any) -> ParsedBomSegments:
+    """
+    Parse `customer_teckpack_style_log.custom_fields` (see
+    `_extract_bom_table_rows()` and the module docstring for the full path
+    and structure) and return a `ParsedBomSegments` holding ONLY the
+    "Main Fabric" / "Fabric" segments (by `**MaterialCategory`).
 
     Returns an empty `ParsedBomSegments` (never raises) on any parse
     failure, blank input, or a payload with no matching segments — callers
     treat that uniformly as "nothing to enrich for this style."
     """
-    if _blank(bom_unified):
-        return ParsedBomSegments()
-    try:
-        parts = json.loads(bom_unified) if isinstance(bom_unified, str) else bom_unified
-    except (json.JSONDecodeError, TypeError, ValueError):
-        return ParsedBomSegments()
-    if not isinstance(parts, list):
-        return ParsedBomSegments()
-
     main_fabric: Optional[Dict[str, Any]] = None
     fabric_list: List[Dict[str, Any]] = []
-    for part in parts:
-        if not isinstance(part, dict):
-            continue
-        for detail in part.get("details") or []:
-            if not isinstance(detail, dict):
-                continue
-            name = detail.get("bom_detail_name")
-            if name == SEGMENT_MAIN_FABRIC and main_fabric is None:
-                main_fabric = detail
-            elif name == SEGMENT_FABRIC:
-                fabric_list.append(detail)
+    for detail in _extract_bom_table_rows(custom_fields):
+        name = detail.get("bom_detail_name")
+        if name == SEGMENT_MAIN_FABRIC and main_fabric is None:
+            main_fabric = detail
+        elif name == SEGMENT_FABRIC:
+            fabric_list.append(detail)
     return ParsedBomSegments(main_fabric=main_fabric, fabric_list=fabric_list)
 
 
 def extract_enrichment_fields(detail: Dict[str, Any]) -> Dict[str, Optional[str]]:
     """
-    Map one BOM detail object ("Main Fabric" or a "Fabric" segment) to the
-    three fields Phase 10 writes, using the module's own (Delta-agnostic)
-    field names — see `to_wip_fields()` for the raw-DTC-field-name mapping
-    used for the actual PATCH.
+    Map one BOM detail dict (from `_extract_bom_table_rows()` — "Main
+    Fabric" or a "Fabric" segment) to the four fields Phase 10 writes, using
+    the module's own (Delta-agnostic) field names — see `to_wip_fields()`
+    for the raw-DTC-field-name mapping used for the actual PATCH.
 
-    IMPORTANT: `fabric_group` is the segment's own `bom_detail_name` (i.e.
-    literally "Main Fabric" or "Fabric"), NOT `material_name` — corrected
-    2026-09-02 per an explicit spec amendment.
-
-    `mill_fabric_article` is the segment's `material_name` — CORRECTED
-    2026-09-09 (owner spec; was `material_no` until this date). See the
-    module docstring's spec section for the live evidence.
-
-    There is no `content` key any more (REMOVED 2026-09-09, owner spec) —
-    Phase 10 never writes DTC's "Content" field at all. See the module
-    docstring's spec section for why (live-data corruption discovered
-    2026-09-08: `material_name` held material-code-shaped values for a
-    newer batch of test styles, not a real content/fabric description).
+    `fabric_group` <- `**MaterialCategory` (via `bom_detail_name`), NOT the
+    old bom_unified `material_name`. `mill_fabric_article` <-
+    `**SupplierRefNo` (via `material_name`) — CORRECTED 2026-09-09 "2nd
+    revision" (was `bom_unified.material_name` earlier the same day, and
+    `bom_unified.material_no` before that). `content` <- `**MaterialContent`
+    — REINSTATED 2026-09-09 (was removed entirely earlier the same day; see
+    the module docstring's field-mapping section for the full history).
     """
     return {
         "fabric_group": detail.get("bom_detail_name"),
         "placement": detail.get("placement"),
         "mill_fabric_article": detail.get("material_name"),
+        "content": detail.get("content"),
     }
 
 
 def to_wip_fields(fields: Dict[str, Optional[str]]) -> Dict[str, Optional[str]]:
     """Map `extract_enrichment_fields()`'s output to raw DTC WIP field names,
-    ready to merge into a `sheetData` PATCH/INSERT row object. No "Content"
-    key is ever produced (REMOVED 2026-09-09, owner spec) -- Phase 10 does
-    not write that field at all any more."""
+    ready to merge into a `sheetData` PATCH/INSERT row object."""
     return {
         WIP_FIELD_FABRIC_GROUP: fields.get("fabric_group"),
         WIP_FIELD_PLACEMENT: fields.get("placement"),
         WIP_FIELD_MILL_FABRIC_ARTICLE: fields.get("mill_fabric_article"),
+        WIP_FIELD_CONTENT: fields.get("content"),
     }
 
 
@@ -330,18 +414,22 @@ def is_unenriched(fabric_group_value: Optional[str]) -> bool:
     return _blank(fabric_group_value) or str(fabric_group_value).strip() == PLACEHOLDER_FABRIC_GROUP
 
 
-def build_target_segments(bom_unified: Any) -> Optional[List[Dict[str, Optional[str]]]]:
+def build_target_segments(custom_fields: Any) -> Optional[List[Dict[str, Optional[str]]]]:
     """
     Build the ordered list of enrichment-field dicts (module field names —
     see `extract_enrichment_fields`) Phase 10 targets for one style:
     [Main Fabric fields] + [Fabric segment fields, ...] (0 or more).
+
+    `custom_fields` is `customer_teckpack_style_log.custom_fields` (see the
+    module docstring for the full path/structure) — NOT `bom_unified`
+    (source changed 2026-09-09, "2nd revision").
 
     Returns None if there is no "Main Fabric" segment at all (BOM missing
     entirely this run, parse failure, or Main Fabric itself absent).
     Callers MUST treat None as "nothing to upsert for this style right
     now" — never as license to revert or blank already-enriched DTC rows.
     """
-    segments = parse_bom_segments(bom_unified)
+    segments = parse_bom_segments(custom_fields)
     if segments.main_fabric is None:
         return None
     return [extract_enrichment_fields(segments.main_fabric)] + [
@@ -364,10 +452,11 @@ class RowAction:
 
 def plan_style_enrichment(
     existing_rows: List[Dict[str, Any]],
-    bom_unified: Any,
+    custom_fields: Any,
     fabric_group_key: str = "fabric_group",
     mill_fabric_article_key: str = "mill_fabric_article",
     placement_key: str = "placement",
+    content_key: str = "content",
     row_id_key: str = "row_id",
 ) -> List[RowAction]:
     """
@@ -377,7 +466,8 @@ def plan_style_enrichment(
     docstring for the full upsert-semantics spec; summary:
 
       - Row already matches a current segment by (Fabric Group, Mill
-        Fabric Article #): update `Placement` only if it changed.
+        Fabric Article #): update `Placement` and/or `Content`, each
+        independently, only if it changed.
       - Row is still un-enriched (blank/placeholder): apply "Main Fabric"'s
         full field set (first-time enrichment).
       - Row carries some OTHER real value not in the current BOM data
@@ -388,38 +478,41 @@ def plan_style_enrichment(
       - Each "Fabric" segment not yet represented by any existing row is
         genuinely new: duplicate every existing row once per such segment.
 
-    `Content` is NEVER touched by this function (REMOVED 2026-09-09, owner
-    spec — see the module docstring's spec section and `WIP_FIELD_
-    MILL_FABRIC_ARTICLE`'s comment for the full history, including the
-    live-data corruption that triggered this reversal). There is no
-    `content_key` parameter any more.
+    `Content` is REINSTATED as a real, upsertable field (2026-09-09, "2nd
+    revision" — reverses the same-day-earlier removal; see the module
+    docstring's field-mapping section). It is treated exactly like
+    `Placement`: excluded from the match KEY (so a Content-only change never
+    looks like "a different segment"), but independently diffed/upserted on
+    an already-matched row.
 
     Args:
         existing_rows: the style's current WIP rows (one dict per colorway
             row), each containing at least `fabric_group_key` (current
             Fabric Group value), `mill_fabric_article_key` (current Mill
             Fabric Article # value), `placement_key` (current Placement
-            value), and `row_id_key` (its DTC rowId). Any other keys are
-            passed through untouched into `RowAction.base_row` for "insert"
-            actions, so the notebook can copy the FULL row when creating a
-            genuinely new DTC row.
-        bom_unified: the raw `bom_unified` JSON (string or parsed).
+            value), `content_key` (current Content value), and `row_id_key`
+            (its DTC rowId). Any other keys are passed through untouched
+            into `RowAction.base_row` for "insert" actions, so the notebook
+            can copy the FULL row when creating a genuinely new DTC row.
+        custom_fields: `customer_teckpack_style_log.custom_fields` (raw
+            JSON string or already-parsed) — NOT `bom_unified` (source
+            changed 2026-09-09, "2nd revision"; see module docstring).
 
     Returns:
         [] if there's nothing to do (no existing rows, or no "Main Fabric"
         segment this run). Otherwise a mix of `RowAction(kind="update")`
-        (Placement-only or full-field, per row) and `RowAction(kind=
-        "insert")` (one per existing row, per genuinely-new "Fabric"
+        (Placement/Content-only or full-field, per row) and `RowAction(
+        kind="insert")` (one per existing row, per genuinely-new "Fabric"
         segment).
     """
     if not existing_rows:
         return []
 
-    target_segments = build_target_segments(bom_unified)
+    target_segments = build_target_segments(custom_fields)
     if target_segments is None:
         # No Main Fabric this run (BOM missing entirely, or Main Fabric
         # itself vanished) -- never revert existing Fabric Group/Placement/
-        # Mill Fabric Article # data.
+        # Mill Fabric Article #/Content data.
         return []
     main_target, fabric_targets = target_segments[0], target_segments[1:]
 
@@ -435,13 +528,15 @@ def plan_style_enrichment(
         matched_target = next(
             (t for t in target_segments if segment_key(t) == rkey), None)
         if matched_target is not None:
-            # Already represents this exact segment -- upsert ONLY Placement
-            # (the one field expected to still legitimately drift), never
-            # re-write Fabric Group/Mill Fabric Article # (they're already
-            # correct, that's how we matched).
+            # Already represents this exact segment -- upsert ONLY
+            # Placement/Content (the fields expected to still legitimately
+            # drift), never re-write Fabric Group/Mill Fabric Article #
+            # (they're already correct, that's how we matched).
             upsert_fields: Dict[str, Optional[str]] = {}
             if row.get(placement_key) != matched_target.get("placement"):
                 upsert_fields[WIP_FIELD_PLACEMENT] = matched_target.get("placement")
+            if row.get(content_key) != matched_target.get("content"):
+                upsert_fields[WIP_FIELD_CONTENT] = matched_target.get("content")
             if upsert_fields:
                 actions.append(RowAction(
                     kind="update",

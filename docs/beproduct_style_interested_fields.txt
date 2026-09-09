@@ -77,7 +77,9 @@ Sync direction (one-way per field; see AGENTS.md "field mapping" for code locati
     2026-08-28) so the multi-line structure survives to the DTC push.
   DTC -> BeProduct (Phase 2, phase2.REVERSE_*):
     Lot#, Main Vendor (Sampling), Main Factory (Sampling),
-    Main Factory Customer ID (no BeProduct target yet -> skipped)
+    Main Factory Customer ID (wired up 2026-09-03, was unsupported),
+    Factory Production Country for Main Factory (wired up 2026-09-09,
+      value-transformed via beproduct_master_coo -- see below)
   [REMOVED Phase 6]: "Legacy Code" DTC→BP. "Customer Style#" DTC column not created.
   key (used for matching, not overwritten): BP Style# + Color / Wash (in-request);
     [Customer, BP Style#, SeasonCode, Brand] (composite/request-routing)
@@ -113,6 +115,7 @@ Lot#                       | Lot Code                       | drawing_number_wal
 Main Vendor (Sampling)     | PARENT VENDOR                  | parent_vendor            | headerData.fields[id="parent_vendor"].value                | type PartnerDropDown
 Main Factory (Sampling)    | FACTORY                        | factory                  | headerData.fields[id="factory"].value                      | type PartnerDropDown
 Main Factory Customer ID   | Customer Factory Code          | customer_factory_code    | headerData.fields[id="customer_factory_code"].value        | DTC→BP (wired up 2026-09-03, was unsupported). `LockField: true` UI property does NOT block API writes (live-tested write+revert). Present in both KTB and TEST KTB folders.
+Factory Production Country for Main Factory | COO       | country_of_origin        | headerData.fields[id="country_of_origin"].value            | DTC→BP (wired up 2026-09-09). fieldType DropDown, 249 choices (live-confirmed via folder_schema + MasterData/country_of_origin -- identical). DTC stores a 2-char ISO 3166-1 alpha-2 code (e.g. "US"); BeProduct stores the country NAME (e.g. "United States") -- VALUE TRANSFORM required, see phase2.resolve_coo_country_name(). Lookup table synced into beproduct_master_coo by p5utl_beproduct_master_data_sync.py (MASTER_DATA_FIELDS["coo"]).
 Fabric Group               | MAIN MATERIAL CONTENT          | core_main_material       | headerData.fields[id="core_main_material"].value           | INSERT-only placeholder now (default-fill, fixed 2026-09-03) -- Phase 10 (TPM/BOM data) owns real ongoing values; type LabelMaterial (value is structured, not a plain string)
 Placement                  | MAIN MATERIAL CONTENT          | core_main_material       | headerData.fields[id="core_main_material"].value           | same source field as Fabric Group; INSERT-only placeholder now (default-fill, fixed 2026-09-03) -- Phase 10 owns real ongoing values
 BP STYLE#                  | BP Style Number                | header_number            | headerData.fields[id="header_number"].value                | NEW DTC column to hold BP's style number. Populated BP→DTC. Same source as "BP Style#" match key column.

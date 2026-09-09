@@ -5,13 +5,14 @@ Phase 2 is the reverse of Phase 1: a small set of DTC-OWNED columns are written
 back from DTC into the corresponding BeProduct style. Per the agreed direction
 partition these columns are NEVER pushed BeProduct -> DTC (see sync/phase1.py):
 
-    DTC column                  BeProduct target                       level
-    --------------------------  -------------------------------------  --------
-    Customer Style#             fieldId "customer_style_number"        header
-    Main Vendor (Sampling)      fieldId "parent_vendor"                header
-    Main Factory (Sampling)     fieldId "factory"                      header
-    Main Factory Customer ID    fieldId "customer_factory_code"        header
-    Lot#                        fieldId "drawing_number_walmart"       colorway
+    DTC column                                     BeProduct target                       level
+    ---------------------------------------------  -------------------------------------  --------
+    Customer Style#                                fieldId "customer_style_number"        header
+    Main Vendor (Sampling)                         fieldId "parent_vendor"                header
+    Main Factory (Sampling)                        fieldId "factory"                      header
+    Main Factory Customer ID                       fieldId "customer_factory_code"        header
+    Factory Production Country for Main Factory    fieldId "country_of_origin" (COO)      header
+    Lot#                                           fieldId "drawing_number_walmart"       colorway
 
 Phase 6 update (2026-06-26):
     "Legacy Code" DTC column was REMOVED from REVERSE_HEADER_FIELDS. It is now
@@ -39,6 +40,23 @@ unaffected either way; it only means a genuine non-null value can't be
 manufactured by hand (a direct PATCH to a DTC lookup field is silently
 ignored) and only appears once a row's factory has a populated "Customer
 Factory ID" in real XTS Factory Master data. See AGENTS.md decisions log.
+
+"Factory Production Country for Main Factory" wired up 2026-09-09 (owner
+spec) — the first Phase 2 field requiring an actual VALUE TRANSFORM rather
+than a straight copy. DTC's WIP column stores a plain 2-char ISO 3166-1
+alpha-2 country code (live-confirmed real values: "US", "BD", "IN", ...).
+BeProduct's `country_of_origin` field ("COO", `fieldType: "DropDown"`,
+live-confirmed via both `api.style.folder_schema()` on the KTB folder and
+`api.raw_api.get("MasterData/country_of_origin")` — identical 249-choice
+list from both endpoints) stores the country NAME instead (e.g. "United
+States"), never the code. `resolve_coo_country_name()` below performs this
+lookup; the code->name table is synced into `beproduct_master_coo` by
+`beproduct/p5utl_beproduct_master_data_sync.py` (added to `MASTER_DATA_FIELDS`,
+admin-triggered, not part of the daily DAG). `build_beproduct_updates()`'s
+new `value_transforms` parameter applies this (or any future field's
+transform) to the raw DTC value BEFORE normalization/diffing/writing —
+every other Phase 2 field is unaffected (no entry in `value_transforms` ==
+passed through unchanged, the pre-existing behavior).
 
 The actual write uses the BeProduct SDK in one call per style:
 
@@ -74,7 +92,7 @@ clears.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .phase1 import norm  # reuse the same normalisation rules
 
@@ -92,6 +110,12 @@ REVERSE_HEADER_FIELDS: Dict[str, str] = {
     # Wired up 2026-09-03 (owner spec) -- previously UNSUPPORTED. Live-confirmed
     # writable via attributes_update; see module docstring.
     "Main Factory Customer ID": "customer_factory_code",
+    # Wired up 2026-09-09 (owner spec) -- requires a value transform (country
+    # code -> country name); see resolve_coo_country_name() and the module
+    # docstring. The notebook MUST pass value_transforms={"Factory Production
+    # Country for Main Factory": ...} to build_beproduct_updates() or this
+    # field will push raw 2-char codes instead of BeProduct's expected names.
+    "Factory Production Country for Main Factory": "country_of_origin",
 }
 
 # Colorway-level fields: DTC column -> colorway fieldId.
@@ -157,12 +181,60 @@ class Phase2Plan:
 
 
 # ---------------------------------------------------------------------------
+# COO (Country of Origin) value transform -- 2026-09-09
+# ---------------------------------------------------------------------------
+# DTC's "Factory Production Country for Main Factory" WIP column stores a
+# plain 2-char ISO 3166-1 alpha-2 country CODE (e.g. "US", "BD", "IN" --
+# live-confirmed against real dtc_wip_ktb data). BeProduct's "COO" field
+# (fieldId `country_of_origin`, a DropDown) stores the country NAME instead
+# (e.g. "United States"), never the code -- live-confirmed via both
+# `api.style.folder_schema()` and `api.raw_api.get("MasterData/country_of_
+# origin")` (249 unique 2-char `code` values, one per DropDown choice; both
+# endpoints return an identical Choices list). The code->name lookup table
+# is synced into `beproduct_master_coo` by
+# `beproduct/p5utl_beproduct_master_data_sync.py` (admin-triggered, not part
+# of the daily DAG -- rerun it if BeProduct's choice list ever changes).
+
+def resolve_coo_country_name(
+    dtc_country_code: Optional[str],
+    code_to_name: Dict[str, str],
+) -> Optional[str]:
+    """
+    Look up a DTC 2-char country code against BeProduct's "COO" DropDown
+    choice list (code -> country name), returning the exact country NAME
+    BeProduct's field actually stores.
+
+    Args:
+        dtc_country_code: the raw DTC value (e.g. "US", "us", " US ", or
+            blank/None).
+        code_to_name: {2-char code (any case) -> BeProduct's exact country
+            NAME string}, e.g. loaded from `beproduct_master_coo` as
+            `{row.code: row.value for row in ... if row.code}`. Callers
+            should build this with UPPERCASE keys (or rely on this
+            function's own uppercasing of the lookup key -- see below).
+
+    Returns:
+        The matching country name, or None (never the raw code) when the
+        code is blank or has no match in `code_to_name` -- pushing an
+        unrecognized raw code straight into a DropDown field would either
+        be silently rejected by BeProduct or create an invalid value, so an
+        unmatched code is treated the same as "no value" (skipped, not
+        written) rather than a fallback pass-through of the raw code.
+    """
+    code = norm(dtc_country_code)
+    if not code:
+        return None
+    return code_to_name.get(code.upper()) or code_to_name.get(code)
+
+
+# ---------------------------------------------------------------------------
 # Core computation
 # ---------------------------------------------------------------------------
 
 def build_beproduct_updates(
     rows: List[Dict[str, Any]],
     push_blanks: bool = False,
+    value_transforms: Optional[Dict[str, Callable[[Any], Any]]] = None,
 ) -> Phase2Plan:
     """
     Compute the per-style BeProduct update plan from joined DTC rows.
@@ -171,11 +243,20 @@ def build_beproduct_updates(
         rows:        list of joined-row dicts (see module docstring).
         push_blanks: if True, a blank/None DTC value clears the BeProduct field;
                      if False (default) blanks are ignored (no overwrite).
+        value_transforms: optional {DTC column: fn(raw_dtc_value) -> value}
+            applied to the raw DTC value BEFORE normalization/diffing/
+            writing -- e.g. `{"Factory Production Country for Main Factory":
+            lambda v: resolve_coo_country_name(v, code_to_name_map)}`. A
+            column absent from this dict is passed through unchanged (the
+            pre-existing behavior for every other Phase 2 field). A
+            transform that returns None is treated exactly like a blank DTC
+            value (respects `push_blanks`).
 
     Returns:
         Phase2Plan with one StyleUpdate per style that has changes, plus
         noop/skip counts and exceptions.
     """
+    value_transforms = value_transforms or {}
     plan = Phase2Plan()
 
     for r in rows:
@@ -204,7 +285,11 @@ def build_beproduct_updates(
 
         # --- header fields (style-level) ---
         for col, fid in REVERSE_HEADER_FIELDS.items():
-            new_val = norm(dtc.get(col))
+            raw_val = dtc.get(col)
+            transform = value_transforms.get(col)
+            if transform is not None:
+                raw_val = transform(raw_val)
+            new_val = norm(raw_val)
             if new_val is None and not push_blanks:
                 continue
             cur_val = norm(bp.get(col)) if has_bp else None

@@ -229,6 +229,16 @@ MASTER_DATA_FIELDS: Dict[str, str] = {
     # garment_finish omitted — free-text field, no Choices array
     "parent_vendor":        "parent_vendor",
     "factory":              "factory",
+    # Added 2026-09-09: "COO" (Country of Origin), fieldId confirmed live via
+    # both folder_schema() (KTB folder id 053ed578-6759-4f36-b6df-d1bd89b3b7be)
+    # and this same MasterData/country_of_origin endpoint — 251 choices, 249
+    # unique 2-char ISO 3166-1 alpha-2 `code` values (e.g. "US"->"United
+    # States", "BD"->"Bangladesh", "IN"->"India" — all live-confirmed against
+    # real DTC "Factory Production Country for Main Factory" values). Used by
+    # Phase 2 (dtc/python/sync/phase2.py) to translate DTC's raw 2-char
+    # country code into the country NAME BeProduct's DropDown actually stores
+    # -- see phase2.resolve_coo_country_name().
+    "coo":                  "country_of_origin",
 }
 
 print(f"\n📋 {len(MASTER_DATA_FIELDS)} MasterData fields configured")
