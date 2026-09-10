@@ -642,11 +642,30 @@ def plan_style_enrichment(
                 # expected to still legitimately drift) and, if this was a
                 # backfill match, Mill Fabric Article # itself. Never
                 # re-write Fabric Group.
+                #
+                # ONE-WAY ONLY for Placement/Content (added 2026-09-10, owner
+                # spec: "make sure no steps incidentally overwrite <blank> on
+                # content field") -- a BLANK target value is NEVER pushed,
+                # even if it differs from the row's current (possibly REAL)
+                # value. Without this guard, a genuinely-blank source segment
+                # (live-confirmed real case: KTB-00024/KTB-00026's Main
+                # Fabric `**MaterialContent` is `''` at the source, while
+                # their DTC WIP cells hold a real manually-entered value)
+                # would silently overwrite that real value with an empty
+                # string on the very next Phase 10 run -- the exact
+                # "never revert" violation this pipeline is designed to
+                # avoid everywhere else (DEFAULT_FILL_COLS, Phase 2's
+                # push_blanks default, the whole-style "no Main Fabric this
+                # run -> zero actions" rule, etc.). A target value that IS
+                # non-blank still upserts normally, including a real value
+                # replacing a DIFFERENT real value.
                 upsert_fields: Dict[str, Optional[str]] = {}
-                if _values_differ(row.get(placement_key), matched_target.get("placement")):
-                    upsert_fields[WIP_FIELD_PLACEMENT] = matched_target.get("placement")
-                if _values_differ(row.get(content_key), matched_target.get("content")):
-                    upsert_fields[WIP_FIELD_CONTENT] = matched_target.get("content")
+                _new_placement = matched_target.get("placement")
+                _new_content = matched_target.get("content")
+                if not _blank(_new_placement) and _values_differ(row.get(placement_key), _new_placement):
+                    upsert_fields[WIP_FIELD_PLACEMENT] = _new_placement
+                if not _blank(_new_content) and _values_differ(row.get(content_key), _new_content):
+                    upsert_fields[WIP_FIELD_CONTENT] = _new_content
                 if backfill_article is not None:
                     upsert_fields[WIP_FIELD_MILL_FABRIC_ARTICLE] = backfill_article
                 if upsert_fields:
@@ -656,11 +675,25 @@ def plan_style_enrichment(
                         wip_fields=upsert_fields,
                     ))
             elif is_unenriched(row.get(fabric_group_key)):
-                # Never-enriched row -- first-time enrichment from Main Fabric.
+                # Never-enriched row -- first-time enrichment from Main
+                # Fabric. `Fabric Group`/`Mill Fabric Article #` are always
+                # written here (that's the whole point of first-time
+                # enrichment). `Placement`/`Content` get the SAME one-way
+                # guard as the matched branch above (added 2026-09-10): even
+                # though `Fabric Group` is still the placeholder, the row
+                # could independently already carry a REAL Placement/Content
+                # value (e.g. DTC's own trigger, or a manual edit made before
+                # Phase 10 ever enriched Fabric Group) -- never let a blank
+                # target value clobber that.
+                _wip_fields = to_wip_fields(main_target)
+                if _blank(main_target.get("content")) and not _blank(row.get(content_key)):
+                    _wip_fields.pop(WIP_FIELD_CONTENT, None)
+                if _blank(main_target.get("placement")) and not _blank(row.get(placement_key)):
+                    _wip_fields.pop(WIP_FIELD_PLACEMENT, None)
                 actions.append(RowAction(
                     kind="update",
                     row_id=row.get(row_id_key),
-                    wip_fields=to_wip_fields(main_target),
+                    wip_fields=_wip_fields,
                 ))
             # else: row carries some OTHER real, unrecognized (Fabric Group,
             # Mill Fabric Article #) combination -- e.g. a "Fabric" segment

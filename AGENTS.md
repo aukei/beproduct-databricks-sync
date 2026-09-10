@@ -654,6 +654,94 @@ kept below for historical reference only (see decisions log):**
 
 ## Decisions on record
 
+- **Phase 10: `Content`/`Placement` can never be overwritten with a BLANK
+  value, 2026-09-10 (owner spec: "make sure no steps incidentally overwrite
+  <blank> on content field") — a live-confirmed, currently-exploitable
+  data-loss bug caught via a proactive audit, before it caused real harm on
+  the next scheduled Phase 10 run.** Reproduced with the exact live data:
+  `KTB-00024`/`KTB-00026`'s Main Fabric WIP rows carry a real, manually-set
+  `Content` value (`"100% test from ML"`), while the raw techpack source's
+  own `**MaterialContent` for that exact Main Fabric segment is genuinely
+  blank (`""`). `plan_style_enrichment()`'s existing `_values_differ()`
+  check only special-cased "both sides blank" — it happily treated "current
+  is real, new is blank" as a genuine difference and would have PATCHed
+  `{"Content": ""}`, silently wiping the real value on the very next run.
+  Live-reproduced with the actual code before fixing: `plan_style_
+  enrichment()` against this exact scenario produced `{"Placement":
+  "BODICE", "Content": ""}` for the matched row — confirming the bug was
+  real and about to fire, not theoretical.
+  **Fix, in BOTH branches that write Content/Placement**: a target value is
+  now only ever included in the PATCH if it is itself non-blank AND differs
+  from the current value — a blank target is never pushed, regardless of
+  what the current value is. This applies to (1) the "matched by (Fabric
+  Group, Mill Fabric Article #)" branch (previously only guarded Mill
+  Fabric Article # itself, added 2026-09-10 earlier the same day for the
+  KTB-00025 case — Content/Placement had no equivalent protection until
+  now), and (2) the "first-time enrichment" (still-unenriched row) branch,
+  which was found to have the identical gap: a row can independently
+  already carry a real Content/Placement value even while its Fabric Group
+  is still the placeholder (e.g. set by hand, or by DTC's own trigger,
+  before Phase 10 ever first-enriches it) — `to_wip_fields(main_target)`
+  was including a blank Content/Placement unconditionally. `Fabric Group`/
+  `Mill Fabric Article #` are unaffected by this guard and still always get
+  written on first-time enrichment (that's the whole point).
+  **Live-validated**: re-ran the real `plan_style_enrichment()` against the
+  exact KTB-00024 scenario after the fix — the update now correctly omits
+  `Content` entirely (`{"Placement": "BODICE"}` only), leaving the real
+  value in DTC completely untouched. 4 new unit tests added
+  (`dtc/tests/test_bom.py` `[11r]`-`[11t]`), covering both branches and
+  confirming a NON-blank target value still updates normally (the guard is
+  per-field, not all-or-nothing). Audited the rest of the pipeline for the
+  same class of risk (Phase 1's `FIELD_MAPPING`, Phase 2's `REVERSE_*`,
+  `build_insert_row_payload`, `p9a_build_costing_chart.py`,
+  `p9b2_push_duty_to_wip.py`) — confirmed no other code path writes
+  `Content`, so this was the only real exposure.
+
+- **Phase 9b: NULL-safe equality fix for `COSTING_KEY` joins/MERGE, 2026-09-10
+  (owner-reported gap) — live-confirmed real data-loss bug affecting BOTH
+  current `COSTING_KEY` call sites.** Owner-reported: NT Orbit successfully
+  computed and cached all 12 (4 rows × 3 markets) lookups in
+  `nt_orbit_duty_cache`, but only 1 of 4 `costing_chart` rows (`KTB-00026`)
+  actually got its `hts_code`/`duty_rate_*`/`tariff_rate` filled in.
+  **Root cause**: `p9b1_compute_duty_rates.py`'s Step 4 `MERGE INTO
+  costing_chart ... ON t.c = s.c` (one `t.c = s.c` per `COSTING_KEY` column,
+  11 columns) uses PLAIN SQL equality. Live-confirmed: `lf_style_no` is
+  genuinely `NULL` for 3 of the 4 rows (`KTB-00024`, `KTB-00025`×2) — and in
+  standard SQL, `NULL = NULL` evaluates to `NULL`, never `TRUE`, so the
+  `WHEN MATCHED` branch silently never fires for any row with a NULL key
+  column, no error, no log line pointing at it. The one row with zero NULL
+  key columns (`KTB-00026`, real `lf_style_no`) updated correctly, which is
+  exactly why only 1 of 4 appeared to work. **Live-tested the actual query
+  pattern to confirm**: cross-referenced all 11 `COSTING_KEY` columns
+  against the 4 real `costing_chart` rows — the 3 broken rows all shared
+  `lf_style_no IS NULL`; the 1 working row had no NULLs in any key column.
+  **A second occurrence of the identical root cause, found in the same
+  pass**: `p9a_build_costing_chart.py`'s Step 4b `tariff_rate` carry-forward
+  uses PySpark's `.join(other, on=list(duty.COSTING_KEY), how="left")`
+  shorthand, which ALSO compiles to plain (non-null-safe) equality under the
+  hood — so the exact same 3 styles would silently never carry forward a
+  previously-computed `tariff_rate` on any future `costing_chart` rebuild
+  either, even after this fix, without the second fix below.
+  **Fix**: `p9b1_compute_duty_rates.py`'s MERGE `ON` clause changed to
+  `t.c <=> s.c` (Spark SQL's null-safe equality operator) for every
+  `COSTING_KEY` column. `p9a_build_costing_chart.py`'s Step 4b rewritten to
+  use an explicit join condition built from `.eqNullSafe()` per column
+  (prefixing `prior_tariff`'s key columns to avoid a name collision, since
+  an explicit-condition join — unlike the `on=[list]` shorthand — doesn't
+  auto-dedupe join-key columns). Documented directly on `duty.COSTING_KEY`
+  in `dtc/python/sync/duty.py` so any future join/MERGE site built on this
+  key remembers the requirement. `p9b2_push_duty_to_wip.py`'s own WIP-row
+  lookup is UNAFFECTED by this class of bug — it uses a plain Python dict
+  keyed on a tuple, where `None == None` is `True` (Python/dict semantics
+  differ from SQL NULL semantics), confirmed by inspection, no fix needed
+  there.
+  **Live-validated end-to-end**: re-ran `compute_duty_rates`
+  (`BeProduct_DTC_sync_duty_compute` job) after deploying the fix — all 12
+  lookups served entirely from the existing persistent cache (zero new NT
+  Orbit calls needed), and this time all 4 `costing_chart` rows correctly
+  received `hts_code`/`duty_rate_us/ca/mx`/`tariff_rate` (previously only
+  1/4), including the 3 rows with `lf_style_no IS NULL`.
+
 - **Phase 10: segment-coverage decisions scoped PER COLORWAY, 2026-09-10
   (owner-reported gap) — a THIRD distinct bug found the same day as the
   Mill Fabric Article # backfill above, in the same function.**

@@ -536,13 +536,30 @@ costing_chart.groupBy("supplier_type").count().orderBy("supplier_type").show()
 # for the other duty fields, without requiring a live WIP column.
 print("\nStep 4b: Carrying forward tariff_rate from the table's own prior state …")
 try:
+    _key_cols = list(duty.COSTING_KEY)
+    # NULL-SAFE join (fixed 2026-09-10, live-confirmed real bug) -- PySpark's
+    # `.join(other, on=[col_list])` shorthand generates a standard (NOT
+    # null-safe) equi-join under the hood: `NULL = NULL` is NULL, never TRUE,
+    # so any row with a genuinely-NULL key column (e.g. `lf_style_no`, which
+    # is blank for some real test styles) NEVER matches its own prior row --
+    # `_prior_tariff_rate` silently comes back NULL for it every single
+    # rebuild, identical in root cause to the sibling bug just fixed in
+    # p9b1_compute_duty_rates.py's Step 4 MERGE (same `duty.COSTING_KEY`).
+    # Prefixing + `eqNullSafe()` (Spark's `<=>`) avoids both the NULL-match
+    # gotcha and a column-name collision from using an explicit join
+    # condition instead of the `on=[list]` shorthand.
     prior_tariff = (spark.table(output_table)
-        .select(*duty.COSTING_KEY, F.col("tariff_rate").alias("_prior_tariff_rate"))
-        .dropDuplicates(list(duty.COSTING_KEY)))
+        .select(*[F.col(c).alias(f"_pk_{c}") for c in _key_cols],
+                 F.col("tariff_rate").alias("_prior_tariff_rate"))
+        .dropDuplicates([f"_pk_{c}" for c in _key_cols]))
+    _join_cond = None
+    for c in _key_cols:
+        _cond = costing_chart[c].eqNullSafe(prior_tariff[f"_pk_{c}"])
+        _join_cond = _cond if _join_cond is None else (_join_cond & _cond)
     costing_chart = (costing_chart
-        .join(prior_tariff, on=list(duty.COSTING_KEY), how="left")
+        .join(prior_tariff, on=_join_cond, how="left")
         .withColumn("tariff_rate", F.coalesce(F.col("tariff_rate"), F.col("_prior_tariff_rate")))
-        .drop("_prior_tariff_rate"))
+        .drop(*([f"_pk_{c}" for c in _key_cols] + ["_prior_tariff_rate"])))
     carried = costing_chart.filter(F.col("tariff_rate").isNotNull()).count()
     print(f"  tariff_rate carried forward for {carried} row(s) (prior table existed)")
 except Exception as e:

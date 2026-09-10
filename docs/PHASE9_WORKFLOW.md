@@ -176,6 +176,23 @@ computed tariff value is pushed nowhere — it stays `costing_chart`-only;
 the push step logs this as a "skipped" reason rather than silently dropping
 it. Flip that flag once DTC adds the columns; no other code change needed.
 
+### Critical: `COSTING_KEY` joins/MERGE must use NULL-safe equality
+
+**Live-confirmed real bug, fixed 2026-09-10**: `lf_style_no` (and in
+principle any other `COSTING_KEY` column) can be genuinely `NULL` for a
+real style. Standard SQL/Spark equality (`t.c = s.c`, or PySpark's
+`.join(other, on=[col_list])` shorthand) treats `NULL = NULL` as `NULL`,
+never `TRUE` — so a row with a NULL key column silently never matches its
+own counterpart, no error, no log line. This affected BOTH current
+`COSTING_KEY` call sites simultaneously: `p9b1_compute_duty_rates.py`'s
+Step 4 `MERGE` (fixed with `<=>`, Spark's null-safe equality operator) and
+`p9a_build_costing_chart.py`'s Step 4b tariff carry-forward join (fixed
+with an explicit `.eqNullSafe()` condition, since the `on=[list]` shorthand
+compiles to the same non-null-safe equality). `p9b2_push_duty_to_wip.py`'s
+own WIP-row lookup is unaffected — it's a plain Python dict keyed on a
+tuple, where `None == None` is `True` (Python semantics differ from SQL).
+See the comment on `duty.COSTING_KEY` itself for the durable warning.
+
 ### Known sequencing gap (not yet structurally fixed)
 
 `push_duty_rates` (main job) and `compute_duty_rates` (`duty_compute` job)

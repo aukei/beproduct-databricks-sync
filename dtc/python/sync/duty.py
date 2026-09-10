@@ -108,6 +108,19 @@ DUTY_CACHE_KEY_COLS: Tuple[str, str, str] = (
 # use). "material_no" (2026-09-03) disambiguates Phase 10's Main-Fabric +
 # Fabric-segment duplicate rows; "supplier_type" ("Main"|"1"|"2"|"3",
 # generated from WIP structure) disambiguates the 4 transposed vendor slots.
+#
+# **IMPORTANT for any SQL/Spark join or MERGE using this key (fixed
+# 2026-09-10, live-confirmed real bug in both current call sites)**:
+# `lf_style_no` (and in principle any other column here) can be genuinely
+# NULL for a real style. Standard SQL/Spark equality (`t.c = s.c`, or
+# PySpark's `.join(other, on=[col_list])` shorthand) treats `NULL = NULL`
+# as NULL, never TRUE -- so a row with a NULL key column silently never
+# matches its own counterpart, with no error and no log line pointing at
+# it. Any join/MERGE keyed on `COSTING_KEY` MUST use NULL-safe equality
+# (Spark SQL's `<=>` operator, or PySpark's `.eqNullSafe()`) instead of
+# plain `=`/the `on=[list]` shorthand. `p9b2_push_duty_to_wip.py`'s own
+# WIP-row lookup is unaffected by this class of bug because it uses a
+# plain Python dict keyed on a tuple, where `None == None` is `True`.
 COSTING_KEY: Tuple[str, ...] = (
     "customer", "season_code", "brand", "bp_style_no", "lf_style_no",
     "color_name", "lineplan_ref", "material_no", "supplier_type", "supplier", "factory",

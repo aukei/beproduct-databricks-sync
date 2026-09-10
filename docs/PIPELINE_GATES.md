@@ -325,8 +325,12 @@ Content written from techpack data. Code: `dtc/python/sync/bom.py`,
    key since they're expected to legitimately drift):
    - Row's current key matches a CURRENT segment exactly → upsert
      `Placement` and/or `Content` **independently**, each only if it
-     actually changed (never re-writes Fabric Group/Mill Fabric Article #
-     once matched).
+     actually changed AND the new value is itself non-blank (never re-writes
+     Fabric Group/Mill Fabric Article # once matched). **A blank target
+     value is NEVER pushed** (added 2026-09-10, owner spec — fixes a live
+     bug where a genuinely-blank source segment would have silently wiped a
+     real, manually-entered `Content` value already in DTC). The identical
+     guard applies during first-time enrichment too.
    - Row's Mill Fabric Article # is currently **blank** (added 2026-09-10 —
      fixes a live "frozen row" case, `KTB-00025`/legacy `112358013`: a row
      first-enriched while the source's `**SupplierRefNo` was still blank

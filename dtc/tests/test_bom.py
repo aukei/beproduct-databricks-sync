@@ -507,6 +507,71 @@ check(not any(a.kind == "update" for a in actions_blank_pl),
       "Fabric segments still correctly insert since this style has only the "
       "one Main Fabric row so far")
 
+print("\n[11r] REAL Content is NEVER overwritten by a BLANK target value, "
+      "even on an exact-key match (added 2026-09-10, owner spec: 'make sure "
+      "no steps incidentally overwrite <blank> on content field') -- fixes a "
+      "live-confirmed real bug: KTB-00024/KTB-00026's Main Fabric rows carry "
+      "a real manually-entered Content value in DTC, while their source's "
+      "own **MaterialContent for that exact segment is genuinely blank")
+CF_BLANK_MAIN_CONTENT = bom_table(
+    ["**MaterialCategory", "**SupplierRefNo", "**MaterialContent", "**Placement"],
+    [
+        ["Main Fabric", "WV-0063", "", "BODICE"],  # blank content at the source -- real live shape
+        ["Fabric", "WV-0061", "Cotton 100%", "HEM"],
+    ],
+)
+row_with_real_content = [{"row_id": "r1", "color": "Black", "fabric_group": "Main Fabric",
+                           "mill_fabric_article": "WV-0063", "placement": None,
+                           "content": "100% test from ML"}]  # REAL value, matches live DTC exactly
+actions_real_content = plan_style_enrichment(row_with_real_content, CF_BLANK_MAIN_CONTENT)
+update_for_r1 = next((a for a in actions_real_content if a.kind == "update" and a.row_id == "r1"), None)
+check(update_for_r1 is not None and update_for_r1.wip_fields == {WIP_FIELD_PLACEMENT: "BODICE"},
+      "r1 exactly matches (Fabric Group, Mill Fabric Article #) and gets its "
+      "blank Placement legitimately filled in ('BODICE'), but 'Content' is "
+      "COMPLETELY ABSENT from the PATCH -- the source's blank content is "
+      "never pushed, so the real 'Content' value already in DTC is left "
+      "completely untouched")
+
+print("\n[11s] Same one-way guard applies to the FIRST-TIME ENRICHMENT branch too "
+      "-- a still-unenriched row (blank Fabric Group) can independently "
+      "already carry a real Content/Placement value")
+CF_BLANK_MAIN_CONTENT_AND_PLACEMENT = bom_table(
+    ["**MaterialCategory", "**SupplierRefNo", "**MaterialContent", "**Placement"],
+    [
+        ["Main Fabric", "WV-0063", "", ""],  # BOTH content and placement blank at the source
+        ["Fabric", "WV-0061", "Cotton 100%", "HEM"],
+    ],
+)
+unenriched_row_with_real_content = [{"row_id": "r1", "fabric_group": PLACEHOLDER_FABRIC_GROUP,
+                                      "mill_fabric_article": None, "placement": "PRE-SET PLACEMENT",
+                                      "content": "PRE-SET REAL CONTENT"}]
+actions_unenriched = plan_style_enrichment(unenriched_row_with_real_content, CF_BLANK_MAIN_CONTENT_AND_PLACEMENT)
+update_action = next(a for a in actions_unenriched if a.kind == "update")
+check(update_action.wip_fields.get(WIP_FIELD_FABRIC_GROUP) == "Main Fabric"
+      and update_action.wip_fields.get(WIP_FIELD_MILL_FABRIC_ARTICLE) == "WV-0063",
+      "Fabric Group / Mill Fabric Article # are still written normally -- "
+      "that's the whole point of first-time enrichment")
+check(WIP_FIELD_CONTENT not in update_action.wip_fields
+      and WIP_FIELD_PLACEMENT not in update_action.wip_fields,
+      "but Content/Placement are BOTH excluded from the PATCH -- the row's "
+      "pre-existing real values for those two fields are left completely "
+      "untouched, since the target's own Placement/Content are BOTH blank "
+      "at the source for this Main Fabric segment")
+
+print("\n[11t] ...but a NON-BLANK target Placement/Content in the first-time "
+      "branch is still written normally alongside the blank-guarded one")
+_actions_11t = plan_style_enrichment(
+    [{"row_id": "r1", "fabric_group": PLACEHOLDER_FABRIC_GROUP, "mill_fabric_article": None,
+      "placement": "PRE-SET PLACEMENT", "content": "PRE-SET REAL CONTENT"}],
+    CF_BLANK_MAIN_CONTENT)
+_update_11t = next(a for a in _actions_11t if a.kind == "update")
+check(_update_11t.wip_fields == {WIP_FIELD_FABRIC_GROUP: "Main Fabric",
+                                  WIP_FIELD_PLACEMENT: "BODICE",  # non-blank target -> written normally
+                                  WIP_FIELD_MILL_FABRIC_ARTICLE: "WV-0063"},
+      "Placement legitimately updates to 'BODICE' (non-blank target) while "
+      "Content stays excluded (blank target) -- the guard is per-field, not "
+      "all-or-nothing")
+
 # ---------------------------------------------------------------------------
 print("\n[12] build_insert_row_payload() — Style Image must never be copied forward")
 base_fields = {

@@ -423,7 +423,20 @@ if row_updates and not dry_run:
 
     spark.createDataFrame(merge_rows, UPDATE_SCHEMA).createOrReplaceTempView("_p9b_updates")
 
-    on_clause = " AND ".join(f"t.{c} = s.{c}" for c in COSTING_KEY)
+    # NULL-SAFE equality (`<=>`, NOT plain `=`) — fixed 2026-09-10, live-
+    # confirmed real bug: `lf_style_no` (and potentially other COSTING_KEY
+    # columns) is genuinely NULL for some test styles; standard SQL `NULL =
+    # NULL` evaluates to NULL (never TRUE), so a plain `t.c = s.c` ON clause
+    # silently fails to match ANY row with a NULL key column — the MERGE's
+    # WHEN MATCHED branch never fires, no error, no log, just a silently
+    # skipped row. Live-confirmed: 3 of 4 costing_chart rows (all sharing a
+    # NULL `lf_style_no`) had real cached NT Orbit results but never got
+    # written back, while the one row with zero NULL key columns updated
+    # correctly. `<=>` treats NULL <=> NULL as TRUE, matching Python/dict
+    # equality semantics (which is what p9b2_push_duty_to_wip.py's own
+    # WIP-row lookup already correctly uses, via a plain dict keyed on a
+    # tuple — unaffected by this SQL-specific gotcha).
+    on_clause = " AND ".join(f"t.{c} <=> s.{c}" for c in COSTING_KEY)
     set_clause = ", ".join(
         f"t.{c} = COALESCE(t.{c}, s.{c})"
         for c in ("hts_code", "duty_rate_us", "duty_rate_ca", "duty_rate_mx", "tariff_rate")

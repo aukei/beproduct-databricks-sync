@@ -168,7 +168,16 @@ revised again 2026-09-09, 3 more fixes 2026-09-10)
 2. Per existing row, per run:
    - If its current `(Fabric Group, Mill Fabric Article #)` matches a
      CURRENT BOM segment exactly: upsert `Placement` and/or `Content`,
-     **independently**, only if either actually changed.
+     **independently**, only if either actually changed AND the target
+     value is itself non-blank. **A blank target value is NEVER pushed**
+     (added 2026-09-10, owner spec — fixes a live-confirmed real bug:
+     `KTB-00024`/`KTB-00026` carry a real, manually-entered `Content` value
+     in DTC while the source's `**MaterialContent` for that exact segment
+     is genuinely blank; without this guard, the next run would have
+     silently PATCHed `Content: ""`, wiping the real value). The identical
+     guard applies to the first-time-enrichment branch below too — a row
+     can independently already carry a real Content/Placement value even
+     while its Fabric Group is still the placeholder.
    - **Else if `Mill Fabric Article #` is currently BLANK** (added
      2026-09-10 — fixes a live "frozen row" bug, `KTB-00025`/legacy code
      `112358013`: a row first-enriched while the source's `**SupplierRefNo`
