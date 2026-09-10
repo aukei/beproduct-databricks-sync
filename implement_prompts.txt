@@ -696,3 +696,11 @@ where cts.teckpack_style_log_id  in (
             - "**MaterialCategory" = DTC.Fabric_Group
             - "**Placement" = DTC.Placement
     - This override all fields from BOM_UNIFIED
+
+
+# more checking
+i have some doubt on the tariff_rate carry forward. the costing_chart is newly formed , but 2 rows already get tariff rate populated. 
+Should the "carry forward" be part of look up from nt_orbit_duty_cache? This should be independent to WIP too
+
+make sure no steps incidentally overwrite <blank> on content field?
+

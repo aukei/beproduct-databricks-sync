@@ -654,6 +654,48 @@ kept below for historical reference only (see decisions log):**
 
 ## Decisions on record
 
+- **Phase 9a: `costing_chart` now fills `hts_code`/`duty_rate_*`/`tariff_rate`
+  DIRECTLY from the persistent `nt_orbit_duty_cache`, independent of both
+  WIP and costing_chart's own prior-run state — 2026-09-10, owner
+  question/suggestion.** Owner observed: a freshly-rebuilt `costing_chart`
+  (6 rows, including `KTB-00030` which had never appeared in `costing_chart`
+  before) already had `tariff_rate` populated for 2 rows, and asked whether
+  the carry-forward should instead look up `nt_orbit_duty_cache` directly,
+  independent of WIP. Correct on both counts: the EXISTING Step 4b
+  carry-forward only helps `tariff_rate`, and only when the EXACT same
+  `duty.COSTING_KEY` survived from a prior `costing_chart` snapshot — a
+  genuinely NEW row (like `KTB-00030`) has no "prior row" to carry forward
+  from at all, even though the persistent cache is keyed purely on
+  `(product_description, origin_country_code, import_country_code)` with
+  ZERO dependency on style/color/lineplan/vendor identity, so it already had
+  the answer the moment ANY row (even a different style/color) shared that
+  exact product+origin+market combination.
+  **Fix**: added a new Step 4c to `p9a_build_costing_chart.py` that
+  consults `nt_orbit_duty_cache` directly and read-only (zero NT Orbit API
+  calls) for every row still missing a duty field, reusing the EXACT same
+  pure functions `p9b1_compute_duty_rates.py` uses to decide whether to
+  call the live API (`duty.markets_needing_lookup()`, `duty.cache_key()`,
+  `duty.is_cache_entry_stale()`, `duty.merge_lookup_into_row()`) — this
+  step is that identical decision logic with the live call simply never
+  made. A miss just leaves the field NULL for `duty_compute` (or a later
+  rebuild) to fill in, same as always; `write-once` semantics are inherited
+  directly from `merge_lookup_into_row()` (never overwrites an
+  already-non-blank value). Runs via a Python collect/mutate/recreate cycle
+  (costing_chart's row count is small — tens, not millions — so this is
+  cheap), same established pattern already used by `p9b1_compute_duty_
+  rates.py` itself. New widgets: `duty_cache_table` / `cache_ttl_days`
+  (same defaults as Phase 9b).
+  **Live-validated**: simulated the exact algorithm against real live data
+  with all 5 duty columns explicitly blanked first (matching Step 4's real
+  post-rebuild state) — all 6 rows, including `KTB-00030` (both colors,
+  genuinely new to `costing_chart`), correctly filled `hts_code`/
+  `duty_rate_us/ca/mx`/`tariff_rate` straight from the cache. Step 4b's
+  original COSTING_KEY-based tariff carry-forward is kept as a harmless,
+  redundant safety net (runs first; Step 4c only fills whatever it left
+  blank) rather than removed, since it costs nothing to keep and covers a
+  theoretical edge case (a real value surviving in `costing_chart` without
+  a corresponding cache row).
+
 - **Phase 10: `Content`/`Placement` can never be overwritten with a BLANK
   value, 2026-09-10 (owner spec: "make sure no steps incidentally overwrite
   <blank> on content field") — a live-confirmed, currently-exploitable

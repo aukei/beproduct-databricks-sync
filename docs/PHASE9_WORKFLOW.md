@@ -93,7 +93,32 @@ always resets `tariff_rate` to `NULL` on every full-table overwrite (no live
 WIP fallback exists for it yet, unlike `hts_code`/`duty_rate_*`), the
 existing table's own prior `tariff_rate` (keyed by `COSTING_KEY`) is
 `COALESCE`d back in before writing, so a routine `costing_chart` rebuild
-doesn't silently wipe an already-computed value.
+doesn't silently wipe an already-computed value. **Superseded in practice
+by Step 4c below (added 2026-09-10)** — kept as a harmless, redundant
+safety net only, since Step 4c is strictly more powerful (it works for
+brand-new rows Step 4b can never help, since they have no "prior row" with
+the same `COSTING_KEY` to carry forward from).
+
+**Step 4c — fill ALL duty fields directly from the persistent NT Orbit
+cache, independent of both WIP and `costing_chart`'s own prior state**
+(added 2026-09-10, owner suggestion). `nt_orbit_duty_cache` is keyed purely
+on `(product_description, origin_country_code, import_country_code)` —
+zero dependency on style/color/lineplan/vendor identity. Consulting it
+directly (read-only, zero API calls) means ANY row — including a
+genuinely brand-new one that never existed in a prior `costing_chart`
+snapshot — gets filled the instant its exact product+origin+market
+combination has EVER been looked up before (even for a completely
+different style/color). Reuses the exact same pure functions
+`p9b1_compute_duty_rates.py` uses to decide whether to call NT Orbit
+(`duty.markets_needing_lookup()`, `duty.cache_key()`, `duty.
+is_cache_entry_stale()`, `duty.merge_lookup_into_row()`) — this step is
+that identical decision logic with the live API call simply never made.
+Write-once (never overwrites an already-filled field); a cache miss just
+leaves the field `NULL` for `duty_compute` to fill in later, same as
+always. Live-validated: simulated against real data with all 5 duty
+columns explicitly blanked (matching Step 4's real post-rebuild state) —
+all rows, including a style with zero `costing_chart` history, correctly
+filled completely from the cache.
 
 ---
 
@@ -220,8 +245,8 @@ against whatever is CURRENTLY in `costing_chart` without triggering
 | `run_phase9a` | `true` | Gates `pull_lineplan_dtc`/`build_costing_chart` via `gate_phase9a` (a real DAG-level condition task is safe here, unlike Phase 1/10 — nothing downstream of Phase 9a transitively depends on it the same way). |
 | `run_phase9b` | `true` | Gates `push_duty_rates` via `gate_phase9b`. |
 | `costing_chart_table` | `lft.beproduct.costing_chart` | Testing override: `lft.beproduct.costing_chart_kei`. `costing_chart` itself has real downstream readers — always test against the `_kei` table. |
-| `duty_cache_table` | `lft.beproduct.nt_orbit_duty_cache` | Never wiped by Phase 9a's overwrite (separate table). |
-| `cache_ttl_days` | `180` | |
+| `duty_cache_table` | `lft.beproduct.nt_orbit_duty_cache` | Never wiped by Phase 9a's overwrite (separate table). Also a widget on `p9a_build_costing_chart.py` itself (added 2026-09-10) for Step 4c's direct cache fill. |
+| `cache_ttl_days` | `180` | Also a `p9a_build_costing_chart.py` widget (added 2026-09-10), same default/meaning as Phase 9b's. |
 | `orbit_parallel_calls` | `false` | Serial by default; see "Lookup logic" above. |
 
 ## Tests

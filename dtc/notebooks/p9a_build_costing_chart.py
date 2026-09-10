@@ -195,10 +195,18 @@ from pyspark.sql.types import StringType, StructType, StructField, TimestampType
 dbutils.widgets.text("catalog",   "lft",       "Catalog")
 dbutils.widgets.text("schema",    "beproduct", "Schema")
 dbutils.widgets.text("customer",  "KTB",       "Customer code")
+# Added 2026-09-10 (owner spec) for Step 4c's direct persistent-cache fill --
+# see that step's docstring below.
+dbutils.widgets.text("duty_cache_table", "lft.beproduct.nt_orbit_duty_cache",
+                     "Persistent cross-run NT Orbit result cache (fully-qualified)")
+dbutils.widgets.text("cache_ttl_days", str(duty.DEFAULT_CACHE_TTL_DAYS),
+                     "Days before a cached lookup is considered too stale to reuse here")
 
 catalog  = dbutils.widgets.get("catalog")
 schema   = dbutils.widgets.get("schema")
 customer = dbutils.widgets.get("customer").strip().upper()
+duty_cache_table = dbutils.widgets.get("duty_cache_table").strip()
+cache_ttl_days   = int(dbutils.widgets.get("cache_ttl_days") or duty.DEFAULT_CACHE_TTL_DAYS)
 
 wip_table      = f"{catalog}.{schema}.dtc_wip_{customer.lower()}"
 lineplan_table = f"{catalog}.{schema}.dtc_lineplan_{customer.lower()}"
@@ -566,6 +574,71 @@ except Exception as e:
     print(f"  ⚠️  No prior {output_table} to carry tariff_rate forward from "
           f"(first-ever run, or read failed: {e}) -- tariff_rate stays NULL, "
           f"will be filled by the next duty_compute run.")
+
+# COMMAND ----------
+
+# ── Step 4c: Fill hts_code/duty_rate_*/tariff_rate DIRECTLY from the
+#             persistent NT Orbit cache -- independent of BOTH the WIP
+#             fallback AND costing_chart's own prior-run state (added
+#             2026-09-10, owner spec) ────────────────────────────────────────
+# Step 4b above only helps `tariff_rate`, and only when the EXACT same
+# `COSTING_KEY` survived from a prior `costing_chart` snapshot -- a
+# genuinely NEW row (e.g. a style reaching costing_chart for the first
+# time) has no "prior row" to carry forward from, even if the persistent
+# cache already has the answer for its exact (product_description,
+# origin_country, market) combination (e.g. because another style/color
+# with the identical description+origin was already looked up). The
+# persistent `nt_orbit_duty_cache` table is the REAL source of truth for
+# "have we already computed this" -- it is keyed purely on
+# (product_description, origin_country_code, import_country_code), with NO
+# dependency on style/color/lineplan/vendor identity at all, so consulting
+# it directly here (read-only, zero API calls) fills in EVERY duty field
+# (not just tariff_rate) the moment a matching entry exists, regardless of
+# whether this exact row existed in a prior costing_chart build or whether
+# `push_duty_rates` ever wrote anything back to the live WIP row.
+# Reuses the EXACT same pure functions `p9b1_compute_duty_rates.py` uses to
+# decide whether to call NT Orbit (`duty.markets_needing_lookup()`,
+# `duty.cache_key()`, `duty.is_cache_entry_stale()`, `duty.
+# merge_lookup_into_row()`) -- this step is that same logic with the live
+# API call simply never made; a miss here just leaves the field NULL for
+# `duty_compute` (or a future rebuild) to fill in later, same as always.
+print(f"\nStep 4c: Filling hts_code/duty_rate_*/tariff_rate directly from the "
+      f"persistent NT Orbit cache ({duty_cache_table}) …")
+try:
+    persistent_cache_rows = spark.table(duty_cache_table).collect()
+except Exception as e:
+    persistent_cache_rows = []
+    print(f"  ⚠️  Persistent cache table unavailable ({e}) -- skipping this step.")
+
+persistent_cache = {}
+for _r in persistent_cache_rows:
+    _rd = _r.asDict()
+    persistent_cache[(_rd["product_description"], _rd["origin_country_code"],
+                       _rd["import_country_code"])] = _rd
+print(f"  Persistent cache has {len(persistent_cache)} entrie(s)")
+
+_chart_schema = costing_chart.schema
+_chart_rows = [r.asDict() for r in costing_chart.collect()]
+_filled_rows = 0
+for _row in _chart_rows:
+    _row_filled = False
+    for _market in duty.markets_needing_lookup(_row):
+        _key = duty.cache_key(_row, _market)
+        _cache_row = persistent_cache.get(_key)
+        if _cache_row is None or duty.is_cache_entry_stale(
+            _cache_row.get("looked_up_at"), now, ttl_days=cache_ttl_days
+        ):
+            continue
+        _result = duty.cache_row_to_result(_cache_row)
+        _updates = duty.merge_lookup_into_row(_row, _market, _result)
+        if _updates:
+            _row.update(_updates)
+            _row_filled = True
+    if _row_filled:
+        _filled_rows += 1
+
+print(f"  Rows with >=1 field filled directly from cache: {_filled_rows} of {len(_chart_rows)}")
+costing_chart = spark.createDataFrame(_chart_rows, _chart_schema)
 
 # COMMAND ----------
 
