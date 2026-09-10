@@ -32,7 +32,11 @@ agreeing with the request name (project guarantee).
 
 ## Fields pushed BeProduct → DTC
 
-Styles with `Product Status = "Finalized"` are **excluded** before sync.
+Styles with a terminal `Product Status` (`"Finalized"`/`"Drop"`) get one last
+push (so the terminal status itself reaches DTC), then are excluded from
+every future run until reactivated — see `dtc/python/sync/lifecycle.py` and
+`docs/PIPELINE_GATES.md` for the exact current logic (supersedes an earlier,
+simpler "excluded before sync" rule).
 Only BeProduct-owned columns are pushed (`Style Image` excluded). DTC-owned columns
 (Lot#, Main Vendor/Factory (Sampling), Main Factory Customer ID) are **not** pushed
 here — they flow the other way in Phase 2. Authoritative mapping:

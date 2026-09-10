@@ -631,6 +631,58 @@ kept below for historical reference only (see decisions log):**
 
 ## Decisions on record
 
+- **"(BACKUP)"-named request exclusion extended to the DTC WIP document,
+  2026-09-10 (owner spec).** Previously only Phase 0/XTS Master excluded
+  `(BACKUP)`-named requests (via an exact-name allow-list — not adaptable to
+  WIP's 75+ dynamically-named requests). `phase1.is_in_scope()` — the SINGLE
+  shared choke point for all WIP request registry/scoping
+  (`registry.build_registry_row()`, `registry.refresh()`'s pre-filter, and
+  `p1_dtc_request_manager`'s creation-eligibility check all call it) — now
+  also rejects any reference matching `\(backup` (case-insensitive, checked
+  against the whole string before token-parsing, not anchored to a specific
+  token position). **Deliberately NOT applied to LinePlan**:
+  `p9a_pull_lineplan_to_delta.py` has its own independent, unfiltered
+  discovery loop and never imports/calls `phase1.is_in_scope()` at all — the
+  project team has not decided on a LinePlan naming convention and
+  explicitly wants `(BACKUP)`-named LinePlan requests included (2026-09-01
+  decision, unchanged).
+  **Live-discovered the exact scope of the problem (2026-09-10)**: of 86
+  active KTB WIP requests, **81 (94%) were "(BACKUP)"-named** and were
+  incidentally parsing as in-scope under the old logic (customer + season
+  code tokens still matched even with a BACKUP marker elsewhere in the
+  string) — this is the direct root cause of the long-standing
+  "~199/227 `dtc_wip_ktb` rows have a null `bp_style_number`" data-quality
+  issue noted throughout this log. **A second live-discovered variant, same
+  day**: the marker isn't always the exact string `"(BACKUP)"` — a
+  second-generation `"(BACKUP 2)"` form also exists (e.g. `"KTB SS28
+  (BACKUP 2) Wrangler Collaborations"`), which an exact `"(backup)"`
+  substring match would have missed entirely. Fixed by matching the regex
+  `\(backup` (open-paren + "backup" prefix only, not requiring an exact
+  closing `)`) so every live-observed variant is caught regardless of what
+  follows inside the parens or where in the reference string it appears
+  (immediately after customer, in the brand portion, prepended before the
+  customer token, or appended at the very end — all four positions were
+  live-observed).
+  **Live-validated end-to-end 2026-09-10**: triggered a fresh full main-job
+  run (`run_id 728801909421944`, all 20 tasks `SUCCESS`) immediately after
+  deploying the fix, during a live rename the DTC team happened to be
+  performing in real time on the two previously-clean request names — this
+  incidentally proved the fix catches renames mid-flight too (a request
+  that had been clean moments earlier and was then renamed to include
+  `(BACKUP)`/`(BACKUP 2)` was correctly excluded on the very next run,
+  and `dtc_wip_ktb` correctly settled to containing rows from exactly the
+  ONE genuinely-in-scope request, replacing what had been ~49 distinct
+  `request_id`s' worth of accumulated stale/BACKUP data from prior runs).
+  Note the registry's `request_is_active` column is set to `'N'` by the
+  existing `reconcile_inactive()` mechanism for every request excluded by
+  scope (not just genuinely-DTC-inactive ones) — this is pre-existing,
+  by-design behavior (the reconcile step's `keep_ids` was always the
+  in-scope subset, not the full active list), now simply exercised much
+  more heavily since far more requests are correctly excluded from scope.
+  Added test coverage: `dtc/tests/test_phase1.py` (`[2b]`, 7 new
+  assertions covering both marker variants, all 4 positions, and
+  case-insensitivity).
+
 - **New Phase 2 field wired up, 2026-09-09 (owner spec): DTC "Factory
   Production Country for Main Factory" → BeProduct "COO"
   (`country_of_origin`), the FIRST Phase 2 field requiring an actual value

@@ -225,11 +225,45 @@ def is_in_scope(reference: str, customer: str) -> bool:
     """
     True if a request reference is in scope for the given customer.
 
-    In scope == reference parses cleanly AND its customer token matches the
-    target customer (case-insensitive). E.g. with customer='KTB',
-    'KTB FW26 Wrangler' is in scope while 'KON FW26 Wrangler' (developer test
-    data) is not.
+    In scope == reference does NOT contain the "(BACKUP)" marker (see below)
+    AND parses cleanly AND its customer token matches the target customer
+    (case-insensitive). E.g. with customer='KTB', 'KTB FW26 Wrangler' is in
+    scope while 'KON FW26 Wrangler' (developer test data) is not.
+
+    "(BACKUP)"-named requests are NEVER in scope (added 2026-09-10, owner
+    spec) -- closes a live-confirmed gap: ~199/227 dtc_wip_ktb rows with a
+    null bp_style_number all traced back to legacy "(BACKUP)"-named WIP
+    requests that were incidentally parsing as in-scope, since this
+    function previously only checked customer/season-code structure, never
+    the "(BACKUP)" marker itself. This is this repo's ONE shared choke point
+    for WIP request registry/scoping (registry.build_registry_row(),
+    registry.refresh()'s pre-filter, and p1_dtc_request_manager's creation
+    eligibility check all call this function) -- so this exclusion applies
+    everywhere WIP requests are discovered, registered, or created.
+
+    The check is a case-insensitive regex match on `"(backup"` (an opening
+    paren immediately followed by "backup", NOT requiring an exact "(BACKUP)"
+    closing) checked against the WHOLE reference string BEFORE token-parsing
+    -- NOT anchored to any specific token position. Live-confirmed 2026-09-10
+    against the real KTB WIP document: 81 of 86 active requests are
+    "(BACKUP)"-marked, in several variants beyond the plain "(BACKUP)" seen
+    elsewhere in this repo -- e.g. "(BACKUP 2)" (a second-generation backup,
+    with trailing text before the closing paren) -- and in different
+    positions (right after the customer token, in the brand portion, or at
+    the very end). An exact "(backup)" substring match would have missed the
+    "(BACKUP 2)" variant entirely; matching on the open-paren + "backup"
+    prefix alone catches every live-observed variant regardless of what
+    follows inside the parens.
+
+    Deliberately NOT applied to the DTC LinePlan document: `dtc/notebooks/
+    p9a_pull_lineplan_to_delta.py` has its own independent, unfiltered
+    discovery loop and never imports or calls this function at all -- the
+    project team has not decided on a LinePlan naming convention and
+    explicitly wants "(BACKUP)"-named LinePlan requests included (owner
+    decision, 2026-09-01) -- see that notebook's module docstring.
     """
+    if re.search(r"\(backup", str(reference), re.IGNORECASE):
+        return False
     try:
         parsed = parse_request_reference(reference)
     except ValueError:

@@ -63,6 +63,27 @@ for bad in ["KTB Wrangler", "KTB SPRING Wrangler", ""]:
     except ValueError:
         check(True, f"invalid reference {bad!r} raises")
 
+print("\n[2b] is_in_scope() -- '(BACKUP)' exclusion (added 2026-09-10, WIP-only)")
+check(is_in_scope("KTB (BACKUP) Wrangler", "KTB") is False,
+      "(BACKUP) right after customer token -> excluded")
+check(is_in_scope("KTB FW26 (BACKUP) Wrangler", "KTB") is False,
+      "(BACKUP) in the brand portion (real live shape) -> excluded")
+check(is_in_scope("KTB FW26 Wrangler (BACKUP)", "KTB") is False,
+      "(BACKUP) appended at the very end -> excluded")
+check(is_in_scope("KTB FW26 Wrangler Backup", "KTB") is True,
+      "the bare word 'Backup' without parens is NOT the marker -> still in scope "
+      "(only the literal '(backup)' substring is excluded)")
+check(is_in_scope("KON FW26 (BACKUP) Wrangler (Test)", "KTB") is False,
+      "real live example name (KON customer + BACKUP) -- excluded (for two "
+      "independent reasons: BACKUP marker, and customer mismatch)")
+check(is_in_scope("ktb fw26 (backup) wrangler", "KTB") is False,
+      "case-insensitive match")
+check(is_in_scope("KTB SS28 (BACKUP 2) Wrangler Collaborations", "KTB") is False,
+      "'(BACKUP 2)' variant (real live example, 2026-09-10) -- also excluded, "
+      "not just the exact '(BACKUP)' marker")
+check(is_in_scope("KTB SS28 (BACKUP 2) Wrangler Collaborations-SUPPLIER ASPGAR", "KTB") is False,
+      "'(BACKUP 2)' variant with a trailing '-SUPPLIER ...' suffix -- also excluded")
+
 print("\n[3] build_target_payload() - Style Image excluded, DTC-owned fields not pushed")
 bp = {
     # Phase 6: bp_style_number replaces lf_style_number as the match key column.
