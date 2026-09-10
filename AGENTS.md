@@ -631,6 +631,95 @@ kept below for historical reference only (see decisions log):**
 
 ## Decisions on record
 
+- **Phase 10: segment-coverage decisions scoped PER COLORWAY, 2026-09-10
+  (owner-reported gap) — a THIRD distinct bug found the same day as the
+  Mill Fabric Article # backfill above, in the same function.**
+  Owner-reported: `KTB-00029` (LF Style# `LFBP-1WTP0002`) has 2 BeProduct
+  colors ("Early Hours", "Earthy Hours") and a BOM of 3 materials (Main
+  Fabric + 2 Fabric) — expected 2×3=6 DTC WIP rows; only 4 existed, with
+  the 2nd color ("Early Hours") stuck at just its Main Fabric row.
+  **Root cause**: `p10_pull_bom_and_enrich.py` groups WIP rows by
+  `bp_style_number` ONLY (never extracted `color`/`"Color / Wash"` into the
+  row dicts passed to `plan_style_enrichment()` at all), so a style's
+  MULTIPLE colorways were combined into one flat list. The "is this Fabric
+  segment already represented?" check (`claimed_target_keys`) then operated
+  GLOBALLY across every color combined — once "Earthy Hours"'s rows (which
+  existed and got enriched first) satisfied both Fabric segments, "Early
+  Hours" (added later as a fresh placeholder row) was wrongly treated as
+  "already covered" too, and never got its own 2 Fabric-segment rows
+  inserted.
+  **Fix**: `dtc/python/sync/bom.py`'s `plan_style_enrichment()` gained a new
+  `color_key` parameter (default `"color"`) and now groups `existing_rows`
+  by color INTERNALLY, running the entire per-row match/backfill/insert
+  decision tree independently per color group — each colorway now gets its
+  own full segment coverage regardless of what any other colorway already
+  has. Rows without a color value (or a single-color style) collapse into
+  one implicit group, identical to the pre-fix behavior — zero regression
+  for callers that don't track color.
+  `dtc/notebooks/p10_pull_bom_and_enrich.py`'s Step 2 now extracts
+  `"color": row_fields.get("Color / Wash")` into each WIP row dict.
+  **A second, adjacent fix in the same pass**: `plan_style_enrichment()`'s
+  Placement/Content diff was comparing raw values directly (`!=`), so DTC's
+  current blank (`None`, via `get_json_object` on a missing cell) vs. the
+  source's own blank (`""`, a real empty string in the techpack JSON) were
+  treated as "different" — causing a spurious `{"Placement": ""}`-style
+  PATCH on every already-blank, otherwise-fully-matched row, every run
+  (violates Ground Rule #6's lean-PATCH requirement). Fixed with a new
+  `_values_differ()` helper: two blank values (by the existing `_blank()`
+  definition) are never considered different, regardless of which blank
+  REPRESENTATION each side happens to use.
+  **Live-validated**: re-ran the real `plan_style_enrichment()` against
+  `KTB-00029`'s exact real data (3-segment BOM, "Earthy Hours" fully
+  enriched, "Early Hours" stuck at 1 row) — before the fix: 0 actions for
+  "Early Hours" (bug reproduced exactly); after the fix: exactly 2 correct
+  INSERT actions for "Early Hours" (`WV-0064`/`WV-0047`, both with their
+  real Content values), and zero spurious Placement-blank-diff updates for
+  either color. 3 new unit tests added (`dtc/tests/test_bom.py` `[11o]`-
+  `[11q]`, including the color-collapse-without-color-key equivalence
+  check and the blank-vs-blank diff suppression).
+
+- **Phase 10: blank Mill Fabric Article # backfill added, 2026-09-10 (owner
+  spec) — fixes a live-confirmed "frozen row" bug.** Investigating a
+  specific reported case (KTB-00025, legacy code `112358013`: real
+  `Content`/`Fabric Group`/`Placement` but blank `Mill Fabric Article #`)
+  found the root cause: the style's 4 existing WIP rows were first-enriched
+  at a point when the source's `**SupplierRefNo` was still blank
+  (`mill_fabric_article=None` baked in), and the source has since been
+  updated with real values (`WV-0003`, `LTCL6080`, `fb01art`). Because the
+  match key is `(Fabric Group, Mill Fabric Article #)` together, a blank
+  vs. a real value never matches, so `plan_style_enrichment()` treated
+  these rows as "some other real, unrecognized value" and left them
+  permanently untouched — Mill Fabric Article # could never self-heal.
+  **Live-tested the actual `plan_style_enrichment()` code against this
+  exact case and found a SECOND, more urgent consequence**: since none of
+  the 4 existing rows' keys matched either real "Fabric" segment
+  (`LTCL6080`/LINING, `fb01art`/HEM), the very next Phase 10 run would have
+  additionally INSERTED 8 wasteful duplicate rows (4 existing rows x 2
+  unmatched segments) — the same row-explosion risk flagged during the
+  2026-09-09 "2nd revision" migration, except recurring on an ONGOING basis
+  (any row first-enriched while `SupplierRefNo` was blank will explode the
+  next time the source fills it in), not a one-time migration cost.
+  **Fix** (`dtc/python/sync/bom.py`'s `plan_style_enrichment()`): a row
+  with a currently-BLANK Mill Fabric Article # is now matched to a target
+  sharing its exact Fabric Group, disambiguated by Placement when more
+  than one target shares that Fabric Group (e.g. two "Fabric" segments);
+  if still ambiguous after that, NO backfill is attempted (never guess
+  wrong) and the row falls through to the pre-existing "leave untouched"
+  behavior. A successful backfill match (a) sets Mill Fabric Article # in
+  place, one-way only (blank -> real; a row with a REAL but
+  non-matching article # is never touched by this path, unchanged from
+  before), and (b) is excluded from the "genuinely new -> insert" fan-out,
+  so the target is fixed in place instead of ALSO being duplicated.
+  **Live-validated**: re-ran the real `plan_style_enrichment()` against
+  KTB-00025's actual data — before the fix: 0 fixes + 8 wasted inserts
+  would have resulted; after the fix: exactly 4 correct backfill UPDATEs
+  (2 Main Fabric rows -> `WV-0003`, 2 Fabric/LINING rows -> `LTCL6080`,
+  the LINING match disambiguated via Placement since 2 Fabric targets
+  existed) + exactly 4 INSERTs for the genuinely-new `fb01art`/HEM segment
+  (down from 8). 4 new unit tests added (`dtc/tests/test_bom.py`
+  `[11l]`-`[11n]`, 5 assertions), including the ambiguous-Placement-tie
+  case and the one-way-only (never overwrites a real value) guarantee.
+
 - **"(BACKUP)"-named request exclusion extended to the DTC WIP document,
   2026-09-10 (owner spec).** Previously only Phase 0/XTS Master excluded
   `(BACKUP)`-named requests (via an exact-name allow-list — not adaptable to

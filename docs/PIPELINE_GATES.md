@@ -327,6 +327,15 @@ Content written from techpack data. Code: `dtc/python/sync/bom.py`,
      `Placement` and/or `Content` **independently**, each only if it
      actually changed (never re-writes Fabric Group/Mill Fabric Article #
      once matched).
+   - Row's Mill Fabric Article # is currently **blank** (added 2026-09-10 —
+     fixes a live "frozen row" case, `KTB-00025`/legacy `112358013`: a row
+     first-enriched while the source's `**SupplierRefNo` was still blank
+     can never satisfy the exact-match key above once the source is later
+     filled in) → matched to the target sharing its exact Fabric Group,
+     disambiguated by Placement if more than one target shares that Fabric
+     Group; if still ambiguous, no backfill is guessed. A successful match
+     backfills Mill Fabric Article # in place (one-way: blank → real only)
+     and is excluded from the insert fan-out below.
    - Row is still un-enriched (blank, or the literal placeholder
      `"MAIN MATERIAL CONTENT"`) → apply the Main Fabric segment's FULL field
      set (first-time enrichment).
@@ -334,12 +343,20 @@ Content written from techpack data. Code: `dtc/python/sync/bom.py`,
      data (e.g. a vanished "Fabric" segment, or hand-edited DTC data) →
      **left completely untouched**, never reverted.
 4. **New "Fabric" segment insertion** — for each "Fabric" segment whose key
-   isn't already represented by ANY existing row for the style, it's
-   genuinely new: duplicate EVERY existing row once per such segment
-   (fan-out: N existing rows × M new segments = N×M new INSERT rows —
-   this can multiply quickly for styles with many pre-existing physical
-   rows; see AGENTS.md's 2026-09-09 decisions log for a live case study of
-   this fan-out's actual real-world impact).
+   isn't already represented by ANY existing row **of the SAME colorway**
+   for the style, it's genuinely new: duplicate every existing row of that
+   colorway once per such segment (fan-out: N rows of one color × M new
+   segments = N×M new INSERT rows for that color — this can multiply
+   quickly for styles with many pre-existing physical rows; see AGENTS.md's
+   2026-09-09 decisions log for a live case study of this fan-out's actual
+   real-world impact). **Scoped per colorway, not globally across the whole
+   style** (fixed 2026-09-10 — a live gap, `KTB-00029`/LF Style#
+   `LFBP-1WTP0002`: one color already had all 3 segments, so the OTHER
+   color was wrongly treated as "already covered" too and never got its
+   own copies inserted — 2 colors × 3 materials should be 6 DTC rows, only
+   4 existed). Rows without a color/colorway value all collapse into one
+   implicit group, matching the pre-fix behavior for any caller that
+   doesn't track color.
 5. **INSERT payload exclusions** (`build_insert_row_payload()` +
    `compute_non_writable_cols()`) — a duplicated row never copies forward
    `rowId`/`rowIndex` (identity), `"Style Image"` (image-type field, DTC

@@ -22,7 +22,7 @@ from sync import bom
 from sync.bom import (
     build_style_season, parse_bom_segments, extract_enrichment_fields,
     to_wip_fields, segment_key, is_unenriched, build_target_segments,
-    plan_style_enrichment, PLACEHOLDER_FABRIC_GROUP,
+    plan_style_enrichment, PLACEHOLDER_FABRIC_GROUP, RowAction,
     WIP_FIELD_FABRIC_GROUP, WIP_FIELD_PLACEMENT, WIP_FIELD_MILL_FABRIC_ARTICLE,
     WIP_FIELD_CONTENT,
     build_insert_row_payload, INSERT_EXCLUDE_COLS, compute_non_writable_cols,
@@ -368,6 +368,144 @@ existing_with_fabric_segments = [
 ]
 check(plan_style_enrichment(existing_with_fabric_segments, REAL_CUSTOM_FIELDS_KTB00023) == [],
       "all three segments already correctly represented -> zero actions, no duplicate insert")
+
+print("  [11l] blank Mill Fabric Article # backfill (added 2026-09-10 -- live KTB-00025/legacy 112358013 case)")
+# Real-world trigger: a row was first-enriched while **SupplierRefNo was still
+# blank at the source (Content/Placement/Fabric Group got set, but Mill Fabric
+# Article # had nothing to fill in); the source was later updated with real
+# SupplierRefNo values. Before the fix: these rows were permanently stuck with
+# a blank Mill Fabric Article #, AND every real segment got wastefully
+# re-inserted as a brand-new duplicate row on top (since the row's blank-article
+# key never matched anything). After the fix: blank-article rows are backfilled
+# in place; only genuinely-unrepresented segments still trigger inserts.
+CF_00025 = bom_table(
+    ["**MaterialCategory", "**SupplierRefNo", "**MaterialContent", "**Placement"],
+    [
+        ["Main Fabric", "WV-0003", "Cotton 100%", "BODICE"],
+        ["Fabric", "LTCL6080", "Polyester 96%, Spandex 4%", "LINING"],
+        ["Fabric", "fb01art", "Rayon 70%, Tencel 30%", "HEM"],
+    ],
+)
+existing_00025 = [
+    {"row_id": "r1", "fabric_group": "Main Fabric", "mill_fabric_article": None,
+     "placement": "BODICE", "content": "Cotton 100%"},
+    {"row_id": "r2", "fabric_group": "Main Fabric", "mill_fabric_article": None,
+     "placement": "BODICE", "content": "Cotton 100%"},
+    {"row_id": "r3", "fabric_group": "Fabric", "mill_fabric_article": None,
+     "placement": "LINING", "content": "Polyester 96%, Spandex 4%"},
+    {"row_id": "r4", "fabric_group": "Fabric", "mill_fabric_article": None,
+     "placement": "LINING", "content": "Polyester 96%, Spandex 4%"},
+]
+actions_00025 = plan_style_enrichment(existing_00025, CF_00025)
+updates_00025 = {a.row_id: a.wip_fields for a in actions_00025 if a.kind == "update"}
+inserts_00025 = [a for a in actions_00025 if a.kind == "insert"]
+check(updates_00025 == {
+    "r1": {WIP_FIELD_MILL_FABRIC_ARTICLE: "WV-0003"},
+    "r2": {WIP_FIELD_MILL_FABRIC_ARTICLE: "WV-0003"},
+    "r3": {WIP_FIELD_MILL_FABRIC_ARTICLE: "LTCL6080"},
+    "r4": {WIP_FIELD_MILL_FABRIC_ARTICLE: "LTCL6080"},
+}, "all 4 blank-article rows backfilled in place -- Main Fabric rows unambiguous "
+   "(single target), Fabric/LINING rows disambiguated by Placement")
+check(len(inserts_00025) == 4 and all(
+    a.wip_fields[WIP_FIELD_MILL_FABRIC_ARTICLE] == "fb01art" for a in inserts_00025),
+    "ONLY the genuinely-unrepresented 'fb01art'/HEM segment triggers inserts "
+    "(one per existing row) -- the LTCL6080/LINING segment is NOT also "
+    "re-inserted now that it's been correctly backfilled instead")
+
+print("  [11m] blank Mill Fabric Article # backfill -- ambiguous case (2+ candidates share Fabric Group AND Placement) -> no guess")
+CF_ambiguous = bom_table(
+    ["**MaterialCategory", "**SupplierRefNo", "**MaterialContent", "**Placement"],
+    [
+        ["Main Fabric", "MN-001", "Content A", "BODICE"],
+        ["Fabric", "FB-001", "Content B", "LINING"],
+        ["Fabric", "FB-002", "Content C", "LINING"],  # same Fabric Group AND Placement as FB-001
+    ],
+)
+ambiguous_row = [{"row_id": "r1", "fabric_group": "Fabric", "mill_fabric_article": None,
+                   "placement": "LINING", "content": "Content B"}]
+actions_ambiguous = plan_style_enrichment(ambiguous_row, CF_ambiguous)
+check(all(a.kind != "update" for a in actions_ambiguous),
+      "two Fabric candidates share BOTH Fabric Group and Placement -- "
+      "genuinely ambiguous, so NO backfill UPDATE is guessed for r1 (never "
+      "guess wrong); r1 itself is left with a blank Mill Fabric Article #")
+check(sorted(a.wip_fields[WIP_FIELD_MILL_FABRIC_ARTICLE] for a in actions_ambiguous
+             if a.kind == "insert") == ["FB-001", "FB-002"],
+      "both genuinely-unrepresented Fabric segments still correctly fan out as "
+      "inserts (pre-existing behavior, unrelated to the backfill fix) -- an "
+      "ambiguous backfill just means r1 doesn't claim either target first")
+
+print("  [11n] blank Mill Fabric Article # backfill -- one-way only (never overwrites a REAL, different article #)")
+real_article_row = [{"row_id": "r1", "fabric_group": "Fabric", "mill_fabric_article": "OLD-REAL-VALUE",
+                      "placement": "LINING", "content": "Polyester 96%, Spandex 4%"}]
+actions_real = plan_style_enrichment(real_article_row, CF_00025)
+check(all(a.kind != "update" for a in actions_real),
+      "a row with a REAL (non-blank) but non-matching Mill Fabric Article # "
+      "never gets an UPDATE from the backfill path -- only a currently-BLANK "
+      "article # is eligible for backfill, exactly as before for real-value "
+      "mismatches (the row itself is left completely untouched, matching the "
+      "pre-existing 'unrecognized real value' rule)")
+
+print("\n[11o] segment coverage is scoped PER COLOR (fixed 2026-09-10 -- live "
+      "KTB-00029/LF Style# LFBP-1WTP0002 case: 2 colors, BOM = Main Fabric + 2 "
+      "Fabric; expected 2x3=6 DTC rows, only got 4 -- the 2nd color stuck at 1)")
+CF_00029 = bom_table(
+    ["**MaterialCategory", "**SupplierRefNo", "**MaterialContent", "**Placement"],
+    [
+        ["Main Fabric", "LTCL6080", "Polyester 96%, Spandex 4%", ""],
+        ["Fabric", "WV-0064", "Cotton 97%, Spandex 3%", ""],
+        ["Fabric", "WV-0047", "Polyester 100%", ""],
+    ],
+)
+# "Earthy Hours" already fully enriched (3 rows); "Early Hours" only has its
+# Main Fabric row -- exactly the real live pre-fix state.
+multi_color_rows = [
+    {"row_id": "earthy_main", "color": "Earthy Hours", "fabric_group": "Main Fabric",
+     "mill_fabric_article": "LTCL6080", "placement": None, "content": "Polyester 96%, Spandex 4%"},
+    {"row_id": "earthy_fab1", "color": "Earthy Hours", "fabric_group": "Fabric",
+     "mill_fabric_article": "WV-0064", "placement": None, "content": "Cotton 97%, Spandex 3%"},
+    {"row_id": "earthy_fab2", "color": "Earthy Hours", "fabric_group": "Fabric",
+     "mill_fabric_article": "WV-0047", "placement": None, "content": "Polyester 100%"},
+    {"row_id": "early_main", "color": "Early Hours", "fabric_group": "Main Fabric",
+     "mill_fabric_article": "LTCL6080", "placement": None, "content": "Polyester 96%, Spandex 4%"},
+]
+actions_multi_color = plan_style_enrichment(multi_color_rows, CF_00029)
+check(actions_multi_color == [
+    RowAction(kind="insert",
+              base_row=multi_color_rows[3],
+              wip_fields={WIP_FIELD_FABRIC_GROUP: "Fabric", WIP_FIELD_PLACEMENT: "",
+                          WIP_FIELD_MILL_FABRIC_ARTICLE: "WV-0064", WIP_FIELD_CONTENT: "Cotton 97%, Spandex 3%"}),
+    RowAction(kind="insert",
+              base_row=multi_color_rows[3],
+              wip_fields={WIP_FIELD_FABRIC_GROUP: "Fabric", WIP_FIELD_PLACEMENT: "",
+                          WIP_FIELD_MILL_FABRIC_ARTICLE: "WV-0047", WIP_FIELD_CONTENT: "Polyester 100%"}),
+], "'Earthy Hours' already fully covered (3/3 matched exactly, zero actions "
+   "for it) -- 'Early Hours' correctly gets its OWN 2 missing Fabric segment "
+   "inserts, even though 'Earthy Hours' already 'claimed' those same two "
+   "segment keys; before the fix, those global claims would have wrongly "
+   "suppressed inserting them for 'Early Hours' too")
+
+print("  [11p] rows without a color_key value (or all-one-color) collapse to a single "
+      "implicit group -- identical to pre-2026-09-10 behavior")
+no_color_rows = [{k: v for k, v in r.items() if k != "color"} for r in multi_color_rows]
+check(plan_style_enrichment(no_color_rows, CF_00029) == [],
+      "WITHOUT color info, all 4 rows collapse into ONE group -- both Fabric "
+      "segments are already represented somewhere in that single group, so "
+      "(matching pre-fix behavior for callers that don't track color) no "
+      "inserts happen at all -- this is exactly the bug being fixed, "
+      "confirming color_key is what unlocks the correct per-color behavior")
+
+print("\n[11q] blank-vs-blank Placement/Content never triggers a spurious PATCH "
+      "(fixed 2026-09-10 alongside the color-scoping fix)")
+blank_placement_row = [{"row_id": "r1", "color": "C1", "fabric_group": "Main Fabric",
+                         "mill_fabric_article": "LTCL6080", "placement": None,
+                         "content": "Polyester 96%, Spandex 4%"}]
+actions_blank_pl = plan_style_enrichment(blank_placement_row, CF_00029)
+check(not any(a.kind == "update" for a in actions_blank_pl),
+      "DTC's current Placement=None vs. the source's own blank Placement=''  "
+      "-- both blank, so NOT treated as a diff -- no spurious update PATCH "
+      "for r1 itself (it's otherwise fully matched and up to date); the 2 "
+      "Fabric segments still correctly insert since this style has only the "
+      "one Main Fabric row so far")
 
 # ---------------------------------------------------------------------------
 print("\n[12] build_insert_row_payload() — Style Image must never be copied forward")

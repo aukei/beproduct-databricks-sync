@@ -85,16 +85,25 @@ all-or-nothing design):
      (the row carries some OTHER real value not in the current BOM data —
      e.g. a "Fabric" segment that has since disappeared) leave it
      COMPLETELY UNTOUCHED.
+  3b. **Blank Mill Fabric Article # backfill (added 2026-09-10, owner
+      spec)** — a row whose Mill Fabric Article # is currently BLANK (it
+      was first-enriched while `**SupplierRefNo` was still blank at the
+      source) is matched to a target sharing its exact Fabric Group,
+      disambiguated by Placement if more than one target shares that
+      Fabric Group; if still ambiguous, no backfill is guessed. A
+      successful match backfills Mill Fabric Article # in place (one-way:
+      blank -> real only) AND is excluded from the "genuinely new -> insert"
+      fan-out below, instead of being wastefully re-inserted as a brand-new
+      duplicate row. Fixes a live-confirmed case (KTB-00025, legacy code
+      112358013) — see `dtc/python/sync/bom.py`'s docstring.
   4. If `custom_fields` has no populated BOM table this run (missing/blank,
      or its "Main Fabric" segment itself is absent): take ZERO actions for
      the WHOLE style — NEVER revert or blank already-enriched DTC data.
-     This is the CURRENT state for every existing KTB test style as of
-     2026-09-09 (see above).
   5. For each "Fabric" segment whose (Fabric Group, Mill Fabric Article #)
-     key isn't already represented by ANY existing row for the style, it's
-     genuinely new: duplicate every existing row once per such segment
-     (unchanged fan-out shape: N colorway rows x each new segment produces
-     N new INSERTs).
+     key isn't already represented (by an exact match OR a blank-article
+     backfill match) by any existing row for the style, it's genuinely new:
+     duplicate every existing row once per such segment (fan-out shape: N
+     colorway rows x each new segment produces N new INSERTs).
   6. Field mapping (CORRECTED 2026-09-09, "2nd revision"): `Fabric Group`
      <- `**MaterialCategory`; `Placement` <- `**Placement`; `Mill Fabric
      Article #` <- `**SupplierRefNo`; `Content` <- `**MaterialContent`
@@ -298,6 +307,14 @@ for r in spark.table(wip_table).where(F.col("bp_style_number").isin(list(matched
         # diff/upsert Content on an already-matched row, not just at
         # first-time enrichment.
         "content": row_fields.get(bom.WIP_FIELD_CONTENT),
+        # "color" ADDED 2026-09-10 -- plan_style_enrichment() now scopes
+        # segment-coverage decisions PER COLOR (see bom.py's module
+        # docstring); without this key, every colorway of a style was
+        # wrongly treated as one combined pool (live-confirmed gap:
+        # KTB-00029/LFBP-1WTP0002, a 2nd color stuck at 1 of 3 expected
+        # rows because the 1st color's rows already "claimed" both Fabric
+        # segments globally).
+        "color": row_fields.get("Color / Wash"),
         "request_id": wr.get("request_id"),
         "data_json": wr.get("data_json"),
     })

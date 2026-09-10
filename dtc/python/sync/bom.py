@@ -219,6 +219,20 @@ def _blank(v: Any) -> bool:
     return s == "" or s.lower() in {"n/a", "na", "none", "null", "nan"}
 
 
+def _values_differ(current: Any, new: Any) -> bool:
+    """Diff helper for the Placement/Content upsert checks (added
+    2026-09-10): two BLANK values (e.g. DTC's current `None` vs. the
+    source's own blank `''`) are never considered "different", even though
+    `None != ''` in a plain Python comparison -- this avoids a spurious
+    lean-PATCH violation (Ground Rule #6) where every already-blank row
+    would otherwise get a wasteful `{"Placement": ""}`-style PATCH every
+    run just because the two blank REPRESENTATIONS differ, not their
+    actual (both-blank) meaning."""
+    if _blank(current) and _blank(new):
+        return False
+    return current != new
+
+
 # ---------------------------------------------------------------------------
 # Join key
 # ---------------------------------------------------------------------------
@@ -458,6 +472,7 @@ def plan_style_enrichment(
     placement_key: str = "placement",
     content_key: str = "content",
     row_id_key: str = "row_id",
+    color_key: str = "color",
 ) -> List[RowAction]:
     """
     Plan every action needed to upsert ONE style's existing WIP rows from
@@ -468,6 +483,10 @@ def plan_style_enrichment(
       - Row already matches a current segment by (Fabric Group, Mill
         Fabric Article #): update `Placement` and/or `Content`, each
         independently, only if it changed.
+      - Row's Mill Fabric Article # is currently BLANK, but its Fabric
+        Group uniquely identifies one current segment (see "Blank Mill
+        Fabric Article # backfill" below): treated the same as an exact
+        match, PLUS Mill Fabric Article # itself is backfilled.
       - Row is still un-enriched (blank/placeholder): apply "Main Fabric"'s
         full field set (first-time enrichment).
       - Row carries some OTHER real value not in the current BOM data
@@ -475,8 +494,9 @@ def plan_style_enrichment(
         UNTOUCHED — never reverted.
       - No "Main Fabric" segment at all this run (BOM missing/vanished):
         ZERO actions for the whole style — never reverts existing data.
-      - Each "Fabric" segment not yet represented by any existing row is
-        genuinely new: duplicate every existing row once per such segment.
+      - Each "Fabric" segment not yet represented (by an exact match OR a
+        blank-article backfill match) by any existing row is genuinely new:
+        duplicate every existing row once per such segment.
 
     `Content` is REINSTATED as a real, upsertable field (2026-09-09, "2nd
     revision" — reverses the same-day-earlier removal; see the module
@@ -485,15 +505,64 @@ def plan_style_enrichment(
     looks like "a different segment"), but independently diffed/upserted on
     an already-matched row.
 
+    **Blank Mill Fabric Article # backfill (added 2026-09-10, owner spec)**:
+    fixes a live-confirmed gap (KTB-00025, legacy code 112358013) — a row
+    first-enriched while the source's `**SupplierRefNo` was still blank has
+    `mill_fabric_article=None` baked in permanently; once the source is
+    later updated with a real `SupplierRefNo`, the exact-match key
+    (`Fabric Group`, `None`) vs. (`Fabric Group`, `"WV-0003"`) never matches
+    again, so the row was previously stuck in the "leave untouched" branch
+    FOREVER, and the real segment would ALSO get wastefully re-inserted as a
+    brand-new duplicate row (since it looked "unrepresented"). Fixed via a
+    one-way (blank -> real only, NEVER real -> different) backfill: a row
+    with a currently-blank `mill_fabric_article` is matched to a target
+    sharing its exact `Fabric Group`, disambiguated by `Placement` when more
+    than one target shares that `Fabric Group` (e.g. two "Fabric" segments);
+    if the match is still ambiguous after that (multiple candidates share
+    both Fabric Group AND Placement), NO backfill is attempted (never guess
+    wrong) and the row falls through to "leave untouched" as before. A
+    successfully backfilled target is also excluded from the "genuinely
+    new -> insert" fan-out below, so it's fixed in place rather than both
+    backfilled AND duplicated.
+
+    **Segment-coverage decisions are scoped PER COLORWAY (fixed 2026-09-10,
+    owner spec) — fixes a live-confirmed gap (KTB-00029, LF Style#
+    LFBP-1WTP0002).** `existing_rows` may span MULTIPLE colorways of the
+    same style (the notebook groups WIP rows by `bp_style_number` only, not
+    by color). Before this fix, "is this Fabric segment already
+    represented?" was checked GLOBALLY across every colorway's rows
+    combined — so once ANY ONE colorway's rows happened to satisfy a
+    segment (e.g. because that colorway existed and got enriched earlier),
+    EVERY OTHER colorway was wrongly treated as "already covered" too, and
+    never got its own copy of that segment inserted. Live-confirmed real
+    trigger: `KTB-00029` has colors "Earthy Hours" (existed early, got all
+    3 segments: Main Fabric + 2 Fabric) and "Early Hours" (added later, as
+    a fresh placeholder row) — by the time "Early Hours" was first-time
+    enriched from Main Fabric, both Fabric targets were already "claimed"
+    by "Earthy Hours"'s rows, so "Early Hours" never got its own Fabric
+    segment rows inserted (BeProduct: 2 colors x 3 materials = 6 expected
+    DTC rows; actual: only 4 — "Early Hours" stuck at 1). Fixed by grouping
+    `existing_rows` by `color_key` internally and running the ENTIRE
+    per-row match/backfill/insert decision tree independently PER color
+    group — each colorway now gets its own full segment coverage,
+    regardless of what any other colorway already has. Rows without a
+    `color_key` value (or when the style genuinely has only one color) all
+    fall into a single implicit group — identical to the pre-fix behavior,
+    so this is backward compatible for single-color styles/callers that
+    don't track color.
+
     Args:
         existing_rows: the style's current WIP rows (one dict per colorway
-            row), each containing at least `fabric_group_key` (current
-            Fabric Group value), `mill_fabric_article_key` (current Mill
-            Fabric Article # value), `placement_key` (current Placement
-            value), `content_key` (current Content value), and `row_id_key`
-            (its DTC rowId). Any other keys are passed through untouched
-            into `RowAction.base_row` for "insert" actions, so the notebook
-            can copy the FULL row when creating a genuinely new DTC row.
+            row, POSSIBLY SPANNING MULTIPLE COLORS), each containing at
+            least `fabric_group_key` (current Fabric Group value),
+            `mill_fabric_article_key` (current Mill Fabric Article # value),
+            `placement_key` (current Placement value), `content_key`
+            (current Content value), `color_key` (its colorway, used to
+            scope segment-coverage decisions independently per color — see
+            above), and `row_id_key` (its DTC rowId). Any other keys are
+            passed through untouched into `RowAction.base_row` for "insert"
+            actions, so the notebook can copy the FULL row when creating a
+            genuinely new DTC row.
         custom_fields: `customer_teckpack_style_log.custom_fields` (raw
             JSON string or already-parsed) — NOT `bom_unified` (source
             changed 2026-09-09, "2nd revision"; see module docstring).
@@ -522,49 +591,91 @@ def plan_style_enrichment(
             "mill_fabric_article": row.get(mill_fabric_article_key),
         })
 
-    actions: List[RowAction] = []
+    def find_backfill_target(row: Dict[str, Any]) -> Optional[Dict[str, Optional[str]]]:
+        """A row with a currently-blank Mill Fabric Article # is matched to
+        the unique target sharing its Fabric Group, disambiguated by
+        Placement if more than one target shares that Fabric Group. Returns
+        None (no backfill) if there's no candidate, or if it's still
+        ambiguous after the Placement tie-break -- never guess wrong."""
+        if not _blank(row.get(mill_fabric_article_key)):
+            return None
+        row_fg = _norm_key_part(row.get(fabric_group_key))
+        candidates = [t for t in target_segments
+                      if _norm_key_part(t.get("fabric_group")) == row_fg]
+        if len(candidates) == 1:
+            return candidates[0]
+        if len(candidates) > 1:
+            row_pl = _norm_key_part(row.get(placement_key))
+            placement_matches = [t for t in candidates
+                                  if _norm_key_part(t.get("placement")) == row_pl]
+            if len(placement_matches) == 1:
+                return placement_matches[0]
+        return None
+
+    # Group existing rows by colorway so segment-coverage decisions (has this
+    # Fabric segment already been inserted?) are scoped PER COLOR, not
+    # globally across every color combined -- see docstring above. Rows
+    # without a color_key value (or a style with only one color) all land in
+    # a single implicit group (key None), identical to pre-fix behavior.
+    rows_by_color: Dict[Any, List[Dict[str, Any]]] = {}
     for row in existing_rows:
-        rkey = row_key(row)
-        matched_target = next(
-            (t for t in target_segments if segment_key(t) == rkey), None)
-        if matched_target is not None:
-            # Already represents this exact segment -- upsert ONLY
-            # Placement/Content (the fields expected to still legitimately
-            # drift), never re-write Fabric Group/Mill Fabric Article #
-            # (they're already correct, that's how we matched).
-            upsert_fields: Dict[str, Optional[str]] = {}
-            if row.get(placement_key) != matched_target.get("placement"):
-                upsert_fields[WIP_FIELD_PLACEMENT] = matched_target.get("placement")
-            if row.get(content_key) != matched_target.get("content"):
-                upsert_fields[WIP_FIELD_CONTENT] = matched_target.get("content")
-            if upsert_fields:
+        rows_by_color.setdefault(row.get(color_key), []).append(row)
+
+    actions: List[RowAction] = []
+    for rows_for_color in rows_by_color.values():
+        claimed_target_keys: set = set()  # segment_key() of every target
+                                           # already matched within THIS color
+        for row in rows_for_color:
+            rkey = row_key(row)
+            matched_target = next(
+                (t for t in target_segments if segment_key(t) == rkey), None)
+            backfill_article: Optional[str] = None
+            if matched_target is None:
+                matched_target = find_backfill_target(row)
+                if matched_target is not None:
+                    backfill_article = matched_target.get("mill_fabric_article")
+
+            if matched_target is not None:
+                claimed_target_keys.add(segment_key(matched_target))
+                # Already represents this segment (exactly, or via blank-
+                # article backfill) -- upsert Placement/Content (the fields
+                # expected to still legitimately drift) and, if this was a
+                # backfill match, Mill Fabric Article # itself. Never
+                # re-write Fabric Group.
+                upsert_fields: Dict[str, Optional[str]] = {}
+                if _values_differ(row.get(placement_key), matched_target.get("placement")):
+                    upsert_fields[WIP_FIELD_PLACEMENT] = matched_target.get("placement")
+                if _values_differ(row.get(content_key), matched_target.get("content")):
+                    upsert_fields[WIP_FIELD_CONTENT] = matched_target.get("content")
+                if backfill_article is not None:
+                    upsert_fields[WIP_FIELD_MILL_FABRIC_ARTICLE] = backfill_article
+                if upsert_fields:
+                    actions.append(RowAction(
+                        kind="update",
+                        row_id=row.get(row_id_key),
+                        wip_fields=upsert_fields,
+                    ))
+            elif is_unenriched(row.get(fabric_group_key)):
+                # Never-enriched row -- first-time enrichment from Main Fabric.
                 actions.append(RowAction(
                     kind="update",
                     row_id=row.get(row_id_key),
-                    wip_fields=upsert_fields,
+                    wip_fields=to_wip_fields(main_target),
                 ))
-        elif is_unenriched(row.get(fabric_group_key)):
-            # Never-enriched row -- first-time enrichment from Main Fabric.
-            actions.append(RowAction(
-                kind="update",
-                row_id=row.get(row_id_key),
-                wip_fields=to_wip_fields(main_target),
-            ))
-        # else: row carries some OTHER real, unrecognized (Fabric Group,
-        # Mill Fabric Article #) combination -- e.g. a "Fabric" segment
-        # that's since disappeared, or hand-edited DTC data. NEVER revert
-        # or overwrite it; leave completely untouched.
+            # else: row carries some OTHER real, unrecognized (Fabric Group,
+            # Mill Fabric Article #) combination -- e.g. a "Fabric" segment
+            # that's since disappeared, or hand-edited DTC data. NEVER
+            # revert or overwrite it; leave completely untouched.
 
-    existing_keys = {row_key(row) for row in existing_rows}
-    for target in fabric_targets:
-        if segment_key(target) in existing_keys:
-            continue  # already represented by some existing row -- no insert needed
-        for row in existing_rows:
-            actions.append(RowAction(
-                kind="insert",
-                base_row=row,
-                wip_fields=to_wip_fields(target),
-            ))
+        for target in fabric_targets:
+            if segment_key(target) in claimed_target_keys:
+                continue  # already represented within THIS color -- no insert needed
+            for row in rows_for_color:
+                actions.append(RowAction(
+                    kind="insert",
+                    base_row=row,
+                    wip_fields=to_wip_fields(target),
+                ))
 
     return actions
 
