@@ -19,6 +19,9 @@ This document is the single reference for **components**, **data flow**, and the
 - Directory/XTS field-mapping SSOT: `beproduct_directory_xts_interested_fields.txt`
 - Phase 5 (Master Data): `PHASE5_WORKFLOW.md`
 - Phase 7 (Sample history): `PHASE7_WORKFLOW.md`
+- Phase 9 (LinePlan + Costing Chart + NT Orbit Duty): `PHASE9_WORKFLOW.md`
+- Phase 10 (BOM enrichment): `PHASE10_WORKFLOW.md`
+- Every gating condition across all phases: `PIPELINE_GATES.md`
 - Pipeline diagram (Mermaid source, render locally): `DIAGRAM.md`
 - Verified API behaviour & invariants: `../AGENTS.md`
 

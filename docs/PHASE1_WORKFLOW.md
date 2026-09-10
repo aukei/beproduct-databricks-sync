@@ -25,8 +25,18 @@ requests are **created** (and shared) by `p1_dtc_request_manager` — see
 | In-scope request name | `"${customer} ${DTC seasoncode} ${brands}"`, e.g. `KTB FW26 Wrangler` |
 
 Other requests of the same Document with different naming conventions are **out of
-scope** and ignored (e.g. developer `KON …` requests). One brand per request,
-agreeing with the request name (project guarantee).
+scope** and ignored (e.g. developer `KON …` requests). **Any request whose name
+contains a `"(BACKUP"` marker (case-insensitive, any position, any variant
+e.g. `"(BACKUP 2)"`) is ALSO out of scope** (`phase1.is_in_scope()`, added
+2026-09-10) — this closed a major live data-quality gap: 81 of 86 active
+KTB WIP requests (94%) were `(BACKUP)`-named and were incidentally being
+pulled before this fix, the direct root cause of the long-standing
+"~199/227 `dtc_wip_ktb` rows have a null `bp_style_number`" issue. See
+`docs/PIPELINE_GATES.md`'s "Request-level scoping" section and `AGENTS.md`'s
+decisions log for the full detail, including why this does NOT apply to the
+DTC LinePlan document (which intentionally reads all requests, no naming
+convention). One brand per request, agreeing with the request name (project
+guarantee).
 
 ---
 
@@ -117,10 +127,12 @@ populated by `00_init_request_registry.py`.
 - **Manual override:** pass `request_ids` (comma-separated) to `00_init_request_registry`
   to register only those.
 
-In-scope = reference parses as `<customer> <seasonCode> <brand>` AND the customer
-token matches (e.g. `KTB …` in, `KON …` out). During **auto-discovery** the scan
+In-scope = reference does NOT contain a `"(backup"` marker (case-insensitive,
+any position/variant — added 2026-09-10) AND parses as `<customer> <seasonCode>
+<brand>` AND the customer token matches (e.g. `KTB …` in, `KON …` out, any
+`(BACKUP...)`-named request out). During **auto-discovery** the scan
 pre-filters on the listed `requestReference` and **only reads/registers in-scope
-requests** — out-of-scope/foreign requests are skipped entirely (no by-id
+requests** — out-of-scope/foreign/backup requests are skipped entirely (no by-id
 `get_request`, so no HTTP 400 and no registry rows). A request/view may be empty
 (0 rows). (Explicit `request_ids` are read by-id without the reference pre-filter.)
 

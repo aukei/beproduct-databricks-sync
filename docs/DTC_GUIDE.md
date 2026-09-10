@@ -76,8 +76,11 @@ Connector methods: `search_requests`, `get_request`, `get_views`,
 | `dtc/notebooks/p8a_pull_fabric_to_delta.py` | ⚠️ **RETIRED 2026-09-01** (superseded by MaterialLib) — kept as manual-fallback only, no longer scheduled. | `dtc_fabric_<customer>`, `dtc_fabric_registry` |
 | `dtc/notebooks/p9a_pull_lineplan_to_delta.py` | Phase 9a: pull KTB LinePlan (LINEPLAN_ITS_USE → Full fallback). | `dtc_lineplan_<customer>`, `dtc_lineplan_registry` |
 | `dtc/notebooks/p9a_build_costing_chart.py` | Phase 9a: join WIP × LinePlan on "Lineplan Ref #"; transpose 4 vendor/factory slots. | `costing_chart` (full overwrite) |
-| `dtc/notebooks/p9b_fill_duty_rates.py` | Phase 9b: NT Orbit Duty Tools HTS/Duty/Tariff fill, with a persistent cross-run cache. | `costing_chart`, `nt_orbit_duty_cache`, `nt_orbit_oauth_state` (+ optional DTC WIP push) |
-| `dtc/notebooks/p2_push_dtc_to_beproduct.py` | Phase 2 pushback of DTC-owned fields (Vendor, Factory, Lot#). | BeProduct (+ `dtc_to_beproduct_sync_log`) |
+| `dtc/notebooks/p9b1_compute_duty_rates.py` | Phase 9b part 1/2 (own job `BeProduct_DTC_sync_duty_compute`): NT Orbit Duty Tools HTS/Duty/Tariff lookups, persistent cross-run cache. Zero DTC dependency. | `costing_chart`, `nt_orbit_duty_cache`, `nt_orbit_oauth_state` |
+| `dtc/notebooks/p9b2_push_duty_to_wip.py` | Phase 9b part 2/2 (main job): re-reads `costing_chart`, diffs against live WIP, pushes only changed fields. | DTC WIP (per-slot HTS/Duty) |
+| `dtc/notebooks/p9b_fill_duty_rates.py` | ⚠️ SUPERSEDED 2026-09-03 (split into the 2 notebooks above) — kept as manual-fallback only, no longer scheduled. | — |
+| `dtc/notebooks/p10_pull_bom_and_enrich.py` | Phase 10: BOM enrichment (Fabric Group/Placement/Mill Fabric Article #/Content) from `customer_teckpack_style_log.custom_fields` (2026-09-09 "2nd revision" — was `customer_teckpack_style_latest.bom_unified`); runs on serverless compute (Lakebase source). | DTC WIP (per-row PATCH/INSERT) |
+| `dtc/notebooks/p2_push_dtc_to_beproduct.py` | Phase 2 pushback of DTC-owned fields (Vendor, Factory, Lot#, Customer Factory ID, COO). | BeProduct (+ `dtc_to_beproduct_sync_log`) |
 
 `beproduct/p1_dtc_request_manager.py` (BeProduct-side, but DTC-writing) resolves /
 **creates** / **shares** WIP requests and writes `dtc_request_mapping`.

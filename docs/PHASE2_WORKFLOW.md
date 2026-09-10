@@ -34,6 +34,7 @@ Each field syncs in exactly ONE direction. A field is never pushed both ways.
 | **Main Factory (Sampling)**|**DTC → BeProduct**| header `factory`                              | |
 | **Lot#**                  | **DTC → BeProduct**| **colorway `drawing_number_walmart`**         | |
 | **Main Factory Customer ID**| **DTC → BeProduct**| header `customer_factory_code`               | Wired up 2026-09-03 (was unsupported) |
+| **Factory Production Country for Main Factory**| **DTC → BeProduct**| header `country_of_origin` ("COO") | Wired up 2026-09-09. First field needing a **value transform**: DTC stores a 2-char country code, BeProduct stores the country NAME — see "Value transforms" below. |
 | Style Image               | BeProduct → DTC (image only) | `front_image_url` (Phase 3, binary) | See `PHASE3_WORKFLOW.md` |
 | *Sample status columns (×6)* | BeProduct → DTC | sample apps `proto`/`preline`/`sms`/`fit`/`pp`/`top` | Phase 7; JSON list per app |
 
@@ -91,7 +92,7 @@ evaluated and chosen for simplicity and correctness (see point 4 of the design).
 ## Phase 2 pushback (`p2_push_dtc_to_beproduct.py`)
 
 1. Build an identity map from staging: `(request, LF Style#, Color) → (style_id, colorway_id)`.
-2. Read DTC rows from `dtc_wip_<customer>`, extract the 5 DTC-owned values from
+2. Read DTC rows from `dtc_wip_<customer>`, extract the 6 DTC-owned values from
    `data_json` (exact column names), keep rows with at least one value.
 3. Join each DTC row to a BeProduct identity. Unmatched rows (style moved / not in
    BeProduct) are logged and skipped.
@@ -106,6 +107,22 @@ evaluated and chosen for simplicity and correctness (see point 4 of the design).
    so future unsupported columns have an obvious place to land.
 8. Everything is logged to `lft.beproduct.dtc_to_beproduct_sync_log`. `dry_run=true`
    computes + logs without writing.
+
+### Value transforms (added 2026-09-09)
+
+`build_beproduct_updates()` accepts an optional `value_transforms: Dict[str,
+Callable]` mapping a DTC column name to a function applied to its raw value
+BEFORE normalization/diffing/writing. Currently used by exactly one field:
+`"Factory Production Country for Main Factory"` → `phase2.
+resolve_coo_country_name(dtc_country_code, code_to_name)`, which looks up
+DTC's 2-char country code against BeProduct's "COO" DropDown choice list
+(synced into `lft.beproduct.beproduct_master_coo` by the admin-triggered
+`beproduct/p5utl_beproduct_master_data_sync.py` — `MASTER_DATA_FIELDS["coo"]
+= "country_of_origin"`). An unresolved/unrecognized code returns `None`,
+treated exactly like a blank DTC value (never a raw-code fallback into
+BeProduct's DropDown). A column absent from `value_transforms` is passed
+through unchanged — this is a general mechanism, not COO-specific, so any
+future field needing a lookup-based transform can reuse it.
 
 ---
 

@@ -1,7 +1,7 @@
 # BeProduct ⇄ DTC Sync — Pipeline Data-Flow Diagram
 
 > Databricks-centred view of all implemented sync pipelines. Updated
-> 2026-09-08 to reflect the current repo: the pipeline is **3 independent
+> 2026-09-10 to reflect the current repo: the pipeline is **3 independent
 > Databricks jobs** (split 2026-09-03 — see AGENTS.md decisions log):
 > `BeProduct_DTC_sync_dag` (main, unchanged job ID 294837488757511, 20 tasks
 > — Phase 0/1/2/10/9a + Phase 9b's DTC WIP push), `BeProduct_DTC_sync_duty_compute`
@@ -9,14 +9,21 @@
 > `BeProduct_DTC_sync_images` (single task, Phase 3 image upload only). All 3
 > share a Databricks Instance Pool for fast cluster warm-up while remaining
 > fully independent — separate schedules, separate clusters per run. Also
-> reflects: `customer_teckpack_style_latest` (not `_log`) as Phase 10's BOM
-> source; Phase 10's `Content` field; the "Main Fabric" only filter on
-> `costing_chart` (2026-09-07); `tariff_rate` carry-forward across rebuilds;
-> `EXCLUDED_STATUSES = {"Finalized", "Drop"}`; and `gate_phase1`/`gate_phase10`
-> removal (checked inside their notebooks instead). Phase 8a/8b (FABRIC →
-> Material Master) remain retired, superseded by a separate "MaterialLib"
-> application. Gate (`gate_phase*`) tasks and control/audit tables are shown
-> explicitly.
+> reflects (superseding the 2026-09-08 note below, kept for history):
+> Phase 10's BOM source **CHANGED AGAIN 2026-09-09** ("2nd revision") to
+> `customer_teckpack_style_log.custom_fields` (via `customer_teckpack_style_
+> latest.latest_techpack_style_log_id`, which is now only used to resolve
+> which log row is current, NOT the BOM data itself); Phase 10's field
+> mapping corrected (`**SupplierRefNo`/`**MaterialContent`/etc., not
+> `material_no`/`material_name`); a live "frozen row" Mill Fabric Article #
+> blank-backfill fix and a per-colorway segment-coverage fix, both
+> 2026-09-10; the `"(BACKUP)"` request-name exclusion extended from Phase 0
+> (XTS Master) to the much larger DTC WIP document, also 2026-09-10; and
+> the new Phase 2 COO field (`country_of_origin`, DTC 2-char code →
+> BeProduct country name via `beproduct_master_coo`), 2026-09-09. Phase
+> 8a/8b (FABRIC → Material Master) remain retired, superseded by a separate
+> "MaterialLib" application. Gate (`gate_phase*`) tasks and control/audit
+> tables are shown explicitly.
 >
 > **Render locally:**
 > ```bash
@@ -48,7 +55,7 @@ flowchart TB
 
     subgraph LAKEBASE ["⚡  alb_tpm_uat / alb_tpm_prd  (Lakebase, Unity Catalog)"]
         direction TB
-        BOM_SRC(["customer_teckpack_style_latest\nbom_unified JSON\nSERVERLESS compute ONLY"])
+        BOM_SRC(["customer_teckpack_style_latest (resolves latest log id)\n+ customer_teckpack_style_log.custom_fields JSON (actual BOM data, 2026-09-09)\nSERVERLESS compute ONLY"])
     end
 
 %% ─── Azure Databricks ────────────────────────────────────────────────────────
@@ -216,9 +223,11 @@ flowchart TB
 %% (dbutils.notebook.exit as a no-op). fill_bom_data depends on repull_dtc
 %% (S7), NOT pull_master_dtc (S3) directly -- it must enrich the COMPLETE
 %% post-Phase-1 style x color state, which only repull_dtc makes visible in
-%% Delta (S3's snapshot predates phase1_push). NO BeProduct fallback for
-%% Content (reversed 2026-09-07, project team: "keep DTC WIP true to BOM
-%% extraction") -- a missing/null bom_unified means zero action, period.
+%% Delta (S3's snapshot predates phase1_push). SOURCE CHANGED 2026-09-09
+%% ("2nd revision"): BOM data now comes from customer_teckpack_style_log.
+%% custom_fields (via latest_techpack_style_log_id), NOT bom_unified -- a
+%% missing/null custom_fields BOM table means zero action, period (never
+%% reverts existing enrichment).
     S7        ==> S10A
     BOM_SRC   ==>|"INNER JOIN\nstyle_no + style_season"| S10A
     S10A      ==>|"PATCH update / INSERT new row\nFabric Group/Placement/Mill Fabric Article #/Content\n(no-op + exit if run_phase10=false)"| DTC_WIP
@@ -338,6 +347,7 @@ is NOT a Phase 1 field at all and does not appear in this table.
 | `Main Vendor (Sampling)` | `parent_vendor` | header |
 | `Main Factory (Sampling)` | `factory` | header |
 | `Main Factory Customer ID` | `customer_factory_code` (wired up 2026-09-03) | header |
+| `Factory Production Country for Main Factory` | `country_of_origin` / "COO" (wired up 2026-09-09; value-transformed 2-char code → country name via `beproduct_master_coo`) | header |
 | `Lot#` | `drawing_number_walmart` | colorway |
 
 ### DTC FABRIC → Delta (Phase 8a) — ⚠️ RETIRED and DROPPED 2026-09-01
@@ -353,34 +363,43 @@ Class`, `Fabric Type`, `Mill Fabric Article #`, `Mill Name`, `KB Fabric Code
 
 ### `alb_tpm_<env>` BOM → DTC WIP `Fabric Group`/`Placement`/`Mill Fabric Article #`/`Content` (Phase 10)
 
-Source table changed 2026-09-03: `customer_teckpack_style_latest`, NOT
-`customer_teckpack_style_log` — pre-resolves the multi-version-per-style
-history the old table required this notebook to dedupe itself. Join key:
-`ktb_styles.bp_style_number = customer_teckpack_style_latest.style_no` AND
-`(ktb_styles.season || " - " || ktb_styles.year) = style_season` (**INNER
-JOIN** — reverted from a same-week LEFT JOIN experiment on 2026-09-07, see
-next paragraph). Parses `bom_unified` JSON for "Main Fabric" (exactly 1) and
-"Fabric" (0+) segments; `Fabric Group` = the segment's own `bom_detail_name`,
-not `material_name`; `Content` (added 2026-09-03) = the segment's
-`material_name`. Runs on **serverless compute** (source is a Lakebase
-database) and BEFORE Phase 9a's costing chart build, so up-to-date material
-data reaches the `duty_compute` job's NT Orbit calls. Upsert semantics: a
-row matching a CURRENT segment gets only `Placement`/blank-`Content`
-upserted; an un-enriched row gets the full field set (first-time
-enrichment); a row with unrecognized real data is left untouched; each new
-"Fabric" segment duplicates every existing row once. See
-`docs/PHASE10_WORKFLOW.md`.
+**Source revised again 2026-09-09 ("2nd revision") — supersedes the
+`bom_unified` description this section used to have.** The BOM developer
+refused to add new fields to `customer_teckpack_style_latest` again; the
+actual BOM data now comes from `customer_teckpack_style_log.custom_fields`
+(path: `xts_data.TECH_PACK_EXTRACTION.Table[Type="BOM"].ColumnHeader`/
+`Data`), fetched via a two-hop join:
+`customer_teckpack_style_latest.latest_techpack_style_log_id →
+customer_teckpack_style_log.teckpack_style_log_id`. `customer_teckpack_
+style_latest` is still used, but only to resolve which log row is current.
+Join to `ktb_styles`: `ktb_styles.bp_style_number = ....style_no` AND
+`(ktb_styles.season || " - " || ktb_styles.year) = ....style_season` (INNER
+JOIN throughout, both hops).
 
-**No BeProduct fallback for `Content`** (decided 2026-09-07, project team:
-"keep DTC WIP true to BOM extraction") — if `bom_unified` is missing/null
-for a style, `Content` (and everything else) is left exactly as-is, even
-though BeProduct's own `core_main_material` header field may hold a
-plausible value. A same-day-earlier LEFT-JOIN + `fallback_content` attempt
-was implemented, live-validated, then explicitly reversed. As long as a
-style's Product Status is not in `("Finalized", "Drop")` (see
-`EXCLUDED_STATUSES` in `p1p7_beproduct_style_sync.py`), its BOM extraction
-is expected to keep updating over time, so a currently-missing techpack
-match is not a permanent gap.
+Field mapping (corrected 2026-09-09): `Fabric Group` ← `**MaterialCategory`;
+`Placement` ← `**Placement`; `Mill Fabric Article #` ← `**SupplierRefNo`
+(NOT `material_no`/`material_name` from the old `bom_unified` shape);
+`Content` ← `**MaterialContent` (REINSTATED as a real Phase 10 output —
+was briefly removed entirely earlier the same day after the
+`bom_unified.material_name` mapping was found pushing material-CODE-shaped
+garbage into live DTC for some styles). Runs on **serverless compute**
+(source is a Lakebase database) and BEFORE Phase 9a's costing chart build.
+
+Upsert semantics: a row matching a CURRENT segment gets `Placement`/
+`Content` upserted independently, only if either changed; a row with a
+currently-BLANK `Mill Fabric Article #` is matched to a target sharing its
+Fabric Group (disambiguated by Placement if ambiguous) and backfilled
+in-place, one-way only (added 2026-09-10 — fixes a live "frozen row" bug,
+see `docs/PHASE10_WORKFLOW.md`); an un-enriched row gets the full field set
+(first-time enrichment); a row with unrecognized real data is left
+untouched; each new "Fabric" segment duplicates every existing row of the
+**same colorway** once (segment coverage is scoped PER COLORWAY as of
+2026-09-10 — a style's multiple colors are no longer treated as one
+combined pool, fixing a live gap where a 2nd color could get permanently
+stuck missing its Fabric segments). Blank-vs-blank Placement/Content values
+(`None` vs. `""`) are never treated as a diff (added 2026-09-10, avoids a
+spurious lean-PATCH violation). See `docs/PHASE10_WORKFLOW.md` for the full,
+current spec.
 
 ### DTC LinePlan + WIP × LinePlan → Costing Chart (Phase 9a)
 

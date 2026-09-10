@@ -105,45 +105,65 @@ sheets), staged through **Databricks/Delta**.
   `dtc/python/sync/duty.py` / `dtc/tests/test_duty.py`.
 - **Phase 10 — BOM enrichment from externally-processed techpack data**:
   fulfills a Phase 1 gap (BOM data isn't in the BeProduct API at all).
-  Sourced from `alb_tpm_uat.public.customer_teckpack_style_log` /
-  `alb_tpm_prd.public.customer_teckpack_style_log` — live-confirmed
-  directly reachable Unity Catalog catalogs, joined onto `ktb_styles` by
-  `(bp_style_number=style_no, season||" - "||year=style_season)`, INNER
-  JOIN only. Parses `bom_unified` JSON for "Main Fabric" (exactly 1 by
-  construction) and "Fabric" (0 or more) segments ONLY — corrected
-  2026-09-02, an earlier iteration used "Body" instead of "Fabric" (never
-  appears in live data) and `material_name` instead of `bom_detail_name`
-  for the `Fabric Group` value (see decisions log). A style's WIP rows are
-  enriched only if NONE already have real `Fabric Group` data; "Main
-  Fabric" fills the existing row(s), each "Fabric" segment ALSO duplicates
-  each row into a new one. **CRITICAL**: `alb_tpm_*` catalogs are Lakebase
-  databases registered in Unity Catalog — queryable ONLY from serverless
-  compute, not the classic shared job cluster (live-confirmed 2026-09-02,
-  `UnauthorizedAccessException`). `fill_bom_data`'s task therefore runs on
-  SERVERLESS compute (`nb_task(..., serverless=True)`), the only task in
-  this job that does. Runs BEFORE `build_costing_chart` (owner decision
-  2026-09-02) so up-to-date material names reach Phase 9b's NT Orbit
-  calls; since it never mutates Delta directly (DTC push only), a
-  dedicated `repull_dtc_bom` task (full `p1_pull_masters_to_delta`
-  re-pull, `run_if=ALL_DONE`) runs immediately after so `build_costing_chart`
-  sees the enrichment. **Depends on `repull_dtc`, NOT `pull_master_dtc`
-  directly** (changed 2026-09-02) — Phase 10 must enrich the COMPLETE
-  post-`phase1_push` style×color state (`pull_master_dtc`'s snapshot
-  predates `phase1_push` and can be missing rows it just created this same
-  run); `repull_dtc` is what makes those rows visible in Delta, and is now
-  a SHARED, unconditional prerequisite for both `phase3_images` and
-  `fill_bom_data` (no longer gated by `gate_phase3` — only `phase3_images`
-  itself still checks `run_phase3`). Gated by `run_phase10` (deployed job
-  default still `false` pending an explicit go-live decision, but now
-  **live-validated with a REAL push, not just dry-run** — see next
-  paragraph), checked INSIDE the notebook itself (NOT via a DAG-level
+  **Source (CHANGED 2026-09-09, "2nd revision", supersedes the original
+  design below)**: `customer_teckpack_style_log.custom_fields` (path:
+  `xts_data.TECH_PACK_EXTRACTION.Table[Type="BOM"].ColumnHeader`/`Data`),
+  fetched via a two-hop join —
+  `customer_teckpack_style_latest.latest_techpack_style_log_id →
+  customer_teckpack_style_log.teckpack_style_log_id` (the "latest" table
+  now only resolves WHICH log row is current; it is no longer the BOM data
+  source itself, reversing the 2026-09-03 design). Joined onto `ktb_styles`
+  by `(bp_style_number=style_no, season||" - "||year=style_season)`, INNER
+  JOIN throughout both hops. Parses for "Main Fabric" (exactly 1 by
+  construction) and "Fabric" (0 or more) segments by `**MaterialCategory`
+  ONLY. **Field mapping (corrected 2026-09-09)**: `Fabric Group` ←
+  `**MaterialCategory`; `Placement` ← `**Placement`; `Mill Fabric Article #`
+  ← `**SupplierRefNo`; `Content` ← `**MaterialContent` (REINSTATED as a
+  real Phase 10 output — briefly removed entirely the same day after an
+  earlier `bom_unified.material_name` mapping was found pushing
+  material-CODE-shaped garbage into live DTC for some styles).
+  **Upsert semantics (revised 2026-09-03, refined 2026-09-10)** — NOT the
+  original all-or-nothing design (a single already-enriched row used to
+  short-circuit the WHOLE style to a no-op): per existing row, per run, a
+  match by `(Fabric Group, Mill Fabric Article #)` upserts `Placement`/
+  `Content` independently, a row with a currently-BLANK `Mill Fabric
+  Article #` is backfilled in place (one-way, disambiguated by Placement
+  when needed — fixes a live "frozen row" bug, `KTB-00025`), an un-enriched
+  row gets full first-time enrichment, and any other real value is left
+  completely untouched (never revert). Each new "Fabric" segment duplicates
+  every existing row of the SAME COLORWAY once — **scoped per colorway, not
+  globally across the whole style** (fixed 2026-09-10 — a style's multiple
+  colors used to share one combined "is this segment represented?" pool,
+  permanently starving a 2nd color of its own segments once a 1st color
+  already claimed them; see decisions log, `KTB-00029`). Blank-vs-blank
+  Placement/Content values (`None` vs `""`) are never treated as a diff
+  (also fixed 2026-09-10, avoiding a spurious lean-PATCH violation).
+  **CRITICAL**: `alb_tpm_*` catalogs are Lakebase databases registered in
+  Unity Catalog — queryable ONLY from serverless compute, not the classic
+  shared job cluster (live-confirmed 2026-09-02, `UnauthorizedAccessException`;
+  also blocks running this specific notebook via an ad-hoc CLASSIC debug
+  cluster/Command Execution session — only a serverless context works).
+  `fill_bom_data`'s task therefore runs on SERVERLESS compute
+  (`nb_task(..., serverless=True)`), the only task in this job that does.
+  Runs BEFORE `build_costing_chart` so up-to-date material data reaches
+  Phase 9b's NT Orbit calls; since it never mutates Delta directly (DTC
+  push only), a dedicated `repull_dtc_bom` task (full
+  `p1_pull_masters_to_delta` re-pull, `run_if=ALL_DONE`) runs immediately
+  after so `build_costing_chart` sees the enrichment. **Depends on
+  `repull_dtc`, NOT `pull_master_dtc` directly** — Phase 10 must enrich the
+  COMPLETE post-`phase1_push` style×color state; `repull_dtc` is what makes
+  those rows visible in Delta, and is a SHARED, unconditional prerequisite
+  for both `phase3_images` and `fill_bom_data`. Gated by `run_phase10`
+  (**deployed job default is `true`** — flipped 2026-09-03 after extensive
+  live validation), checked INSIDE the notebook itself (NOT via a DAG-level
   condition task, unlike most other phases — a `gate_phase10` condition
   task caused a Databricks `EXCLUDED`-status cascade that broke Phase 9a/9b
   whenever it evaluated false; see decisions log). `gate_phase1` was removed
-  the same way (2026-09-02) for the identical reason, now that the whole
-  Phase 3/9/10 chain transitively depends on `phase1_push` via `repull_dtc`.
-  Notebook: `dtc/notebooks/p10_pull_bom_and_enrich.py`; pure logic + tests:
-  `dtc/python/sync/bom.py` / `dtc/tests/test_bom.py`.
+  the same way for the identical reason, now that the whole Phase 3/9/10
+  chain transitively depends on `phase1_push` via `repull_dtc`. Notebook:
+  `dtc/notebooks/p10_pull_bom_and_enrich.py`; pure logic + tests:
+  `dtc/python/sync/bom.py` / `dtc/tests/test_bom.py`. Full current spec:
+  `docs/PHASE10_WORKFLOW.md`; every gating condition: `docs/PIPELINE_GATES.md`.
 
 Each field syncs **one way only** (no loops). Direction table below.
 Components, data flow, and the full ADB data model: `docs/ARCHITECTURE.md`.
@@ -286,16 +306,19 @@ this stays true by construction; verify it stays true after any change).
    `LF Style#`, `Legacy Code`, `Gender`, `Supplier` (hardcoded prefill
    default-fill value, not sourced from BeProduct), `Fabric Group`,
    `Placement`, `Mill Fabric Article #` (Phase 10 sources this from BOM
-   `material_name`, NOT `material_no` — corrected 2026-09-09, see decisions
-   log), `Proto Sample - Sample Status`, `Pre-line Sample - Status`,
-   `SMS - Sample Status`, `2nd Fit Sample Approval Status`, `PP Sample
-   Submission Approval Status`, `TOP Sample Approval Status`. `Style Image`
-   is explicitly EXCLUDED from every sheetData PATCH (image cells can ONLY
-   be set via Phase 3's separate multipart `/images` endpoint — DTC rejects
-   any sheetData write to it). **`Content` is likewise NEVER a Phase 1/10
-   PATCH key** (REMOVED 2026-09-09, reverses an earlier 2026-09-03 decision
-   — see decisions log): Phase 10 no longer writes it at all, leaving it to
-   DTC's own (previously-unreliable-in-UAT) Content-population trigger.
+   `**SupplierRefNo` via `customer_teckpack_style_log.custom_fields` —
+   corrected 2026-09-09 "2nd revision", was `bom_unified.material_name`
+   before that and `material_no` before that), `Proto Sample - Sample
+   Status`, `Pre-line Sample - Status`, `SMS - Sample Status`, `2nd Fit
+   Sample Approval Status`, `PP Sample Submission Approval Status`, `TOP
+   Sample Approval Status`. `Style Image` is explicitly EXCLUDED from every
+   sheetData PATCH (image cells can ONLY be set via Phase 3's separate
+   multipart `/images` endpoint — DTC rejects any sheetData write to it).
+   **`Content` IS a Phase 1/10 PATCH key** (REINSTATED 2026-09-09 "2nd
+   revision", sourced from BOM `**MaterialContent` — reverses the
+   2026-09-09-morning removal, which itself had reversed the original
+   2026-09-03 decision to write it from the since-abandoned
+   `bom_unified.material_name`; see decisions log for the full history).
 
    **Phase 9b fields** (`duty.WIP_HTS_COL` / `duty.WIP_DUTY_COL` /
    `duty.WIP_TARIFF_COL` — costing/duty data, written at Step 55, a

@@ -23,7 +23,12 @@ Phase 0 logically precedes Style/Material/Costing sync: BeProduct partner
 ## Source
 
 DTC workspace `KTB`, document `XTS Master`, 2 exact requests in scope
-(their `(BACKUP)`-named siblings are deliberately excluded):
+(their `(BACKUP)`-named siblings are deliberately excluded — via an
+exact-name allow-list here, since only 2 valid names exist; the SAME
+`(BACKUP)` exclusion principle was extended to the much larger, dynamically-
+named DTC WIP document on 2026-09-10 via a genuine pattern match instead —
+see `docs/PHASE1_WORKFLOW.md`'s "Scope & conventions" and
+`docs/PIPELINE_GATES.md`'s "Request-level scoping" section):
 
 | Request reference | partner_type | DTC view |
 |---|---|---|

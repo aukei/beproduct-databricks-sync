@@ -43,7 +43,9 @@ remaining fully independent (separate schedules, separate clusters).
 | [docs/PHASE3_WORKFLOW.md](docs/PHASE3_WORKFLOW.md) | BeProduct image → DTC "Style Image" |
 | [docs/PHASE5_WORKFLOW.md](docs/PHASE5_WORKFLOW.md) | BeProduct Master Data & Directory sync (admin utility, not in DAG) |
 | [docs/PHASE7_WORKFLOW.md](docs/PHASE7_WORKFLOW.md) | Sample-app submit history → DTC status columns |
+| [docs/PHASE9_WORKFLOW.md](docs/PHASE9_WORKFLOW.md) | LinePlan + Costing Chart (9a) → NT Orbit Duty Tools (9b) |
 | [docs/PHASE10_WORKFLOW.md](docs/PHASE10_WORKFLOW.md) | BOM enrichment from externally-processed techpack data (serverless compute) |
+| [docs/PIPELINE_GATES.md](docs/PIPELINE_GATES.md) | Every gating condition across all phases (why isn't my row showing up?) |
 | [docs/BEPRODUCT_GUIDE.md](docs/BEPRODUCT_GUIDE.md) | BeProduct SDK/API + BeProduct tables on ADB |
 | [docs/DTC_GUIDE.md](docs/DTC_GUIDE.md) | DTC API + DTC tables on ADB |
 | [docs/DIAGRAM.md](docs/DIAGRAM.md) | Pipeline data-flow Mermaid diagram (render locally — PNG/SVG not committed) |
@@ -77,8 +79,10 @@ dtc/
 │   ├── p8a_pull_fabric_to_delta.py         # RETIRED 2026-09-01 (superseded by MaterialLib) — kept as manual fallback only
 │   ├── p9a_pull_lineplan_to_delta.py       # Phase 9a: pull KTB LinePlan → dtc_lineplan_ktb
 │   ├── p9a_build_costing_chart.py          # Phase 9a: WIP × LinePlan join → costing_chart
-│   ├── p9b_fill_duty_rates.py              # Phase 9b: NT Orbit Duty Tools HTS/Duty/Tariff fill
-│   ├── p10_pull_bom_and_enrich.py          # Phase 10: BOM enrichment from techpack extraction (serverless task)
+│   ├── p9b1_compute_duty_rates.py          # Phase 9b part 1/2: NT Orbit Duty Tools lookups → costing_chart (own job, zero DTC dependency)
+│   ├── p9b2_push_duty_to_wip.py            # Phase 9b part 2/2: costing_chart → DTC WIP push, diff-checked (main job)
+│   ├── p9b_fill_duty_rates.py              # SUPERSEDED 2026-09-03 — kept as manual-fallback artifact only
+│   ├── p10_pull_bom_and_enrich.py          # Phase 10: BOM enrichment from techpack extraction (serverless task; source = customer_teckpack_style_log.custom_fields, 2026-09-09)
 │   └── p2_push_dtc_to_beproduct.py     # Phase 2: DTC → BeProduct pushback
 ├── python/                             # Importable modules (deployed as Workspace files)
 │   ├── client/rest_client.py           # Generic REST client (retry, multipart)
