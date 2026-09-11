@@ -173,10 +173,18 @@ from typing import Any, Dict, List, Optional, Tuple
 # Constants
 # ---------------------------------------------------------------------------
 
-# The DTC placeholder value that means "no real BOM data yet" — confirmed
-# live in dtc_wip_ktb (e.g. KTB-00016 before enrichment: Fabric Group =
-# "MAIN MATERIAL CONTENT").
-PLACEHOLDER_FABRIC_GROUP = "MAIN MATERIAL CONTENT"
+# DUMMY sentinel values that mean "no real BOM data yet" (owner spec,
+# 2026-09-11 -- supersedes the old single "MAIN MATERIAL CONTENT" placeholder
+# below, kept for history). Phase 1 (sync/phase1.py) stages these two
+# constants directly at INSERT time via FIELD_MAPPING/DEFAULT_FILL_COLS
+# (Phase 1 has no BOM data of its own to offer); Phase 10 upgrades them to
+# real segment data in place the first time a "Main Fabric" segment resolves
+# -- see `is_unenriched()` and `plan_style_enrichment()`'s first-time
+# enrichment branch. No backward-compatibility concern: all pre-existing live
+# DTC WIP data is being purged, so there is no legacy "MAIN MATERIAL CONTENT"
+# value left to recognize.
+DUMMY_FABRIC_GROUP = "NO TPM BOM"
+DUMMY_FABRIC_ARTICLE = "NO TPM BOM"
 
 # The only two **MaterialCategory (formerly bom_detail_name) values Phase 10
 # cares about. There is exactly ONE "Main Fabric" per style by construction;
@@ -424,8 +432,9 @@ def segment_key(fields: Dict[str, Optional[str]]) -> Tuple[Optional[str], Option
 
 def is_unenriched(fabric_group_value: Optional[str]) -> bool:
     """True if a WIP row's current Fabric Group means "never enriched yet""
-    -- blank, or still the DTC placeholder."""
-    return _blank(fabric_group_value) or str(fabric_group_value).strip() == PLACEHOLDER_FABRIC_GROUP
+    -- blank, or still the DUMMY_FABRIC_GROUP sentinel Phase 1 stages at
+    INSERT time (see module docstring)."""
+    return _blank(fabric_group_value) or str(fabric_group_value).strip() == DUMMY_FABRIC_GROUP
 
 
 def build_target_segments(custom_fields: Any) -> Optional[List[Dict[str, Optional[str]]]]:

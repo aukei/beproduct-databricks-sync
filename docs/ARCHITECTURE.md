@@ -244,10 +244,16 @@ A field is never synced in both directions (no loops). SSOT: `beproduct_style_in
 
 ### Denormalization (transform)
 
-One BeProduct style explodes to **one row per colorway**. The current phase
-hardcodes **one BOM/fabric line** per (style × color):
-`Fabric Group = "MAIN MATERIAL CONTENT"`, `Placement = main_material_content`.
-(A future `style × bom` table will allow (style × color × bom) rows.) Each staging
+"WIP = style x color x material" (2026-09-11): one BeProduct style explodes
+to one row per colorway — or exactly ONE row with `Color / Wash =
+DUMMY_COLOR` ("NO BP COLORWAY") if the style has zero colorways, so a
+colorless style still always reaches DTC instead of being dropped from
+staging. Each row is staged with `Fabric Group`/`Mill Fabric Article #` set
+to the `DUMMY_FABRIC_GROUP`/`DUMMY_FABRIC_ARTICLE` sentinels ("NO TPM BOM")
+and a blank `Placement` — Phase 1 has no BOM data of its own; Phase 10
+(`dtc/notebooks/p10_pull_bom_and_enrich.py`) is the sole owner of real
+material data and fans a style×color out into one physical DTC row per
+material segment, upgrading these dummy values in place. Each staging
 row carries `beproduct_style_id` and `colorway_id` so Phase 2 can write the
 colorway-level Lot# back by id.
 

@@ -188,9 +188,10 @@ revised again 2026-09-09, 3 more fixes 2026-09-10)
      A successful match backfills `Mill Fabric Article #` in place
      (one-way: blank → real only) and counts as "represented" for the
      insert-fan-out step below (never both backfilled AND duplicated).
-   - Else if the row is still un-enriched (blank or the placeholder
-     `"MAIN MATERIAL CONTENT"`): apply the "Main Fabric" segment's FULL
-     field set (first-time enrichment).
+   - Else if the row is still un-enriched (blank or Phase 1's INSERT-time
+     `DUMMY_FABRIC_GROUP` sentinel `"NO TPM BOM"`, 2026-09-11 — supersedes
+     the old `"MAIN MATERIAL CONTENT"` placeholder): apply the "Main Fabric"
+     segment's FULL field set (first-time enrichment).
    - Else (the row carries some OTHER real value not in the current BOM
      data — e.g. a "Fabric" segment that's since disappeared, or hand-edited
      DTC data): leave it COMPLETELY UNTOUCHED. Phase 10 NEVER reverts or

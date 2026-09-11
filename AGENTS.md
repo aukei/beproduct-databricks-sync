@@ -206,9 +206,14 @@ this stays true by construction; verify it stays true after any change).
   BP Style# (new match key, pending DTC col), LF Style# (optional), Legacy Code (optional);
   Supplier (default-fill "Supplier" when blank; pending DTC col).
   **Filter**: styles with Product Status = "Finalized" are excluded from staging/DTC sync.
-  Fabric Group / Placement are default-fill ONLY (fixed 2026-09-03) — Phase 1
-  sets the "MAIN MATERIAL CONTENT" placeholder on INSERT alone; Phase 10
-  (TPM/BOM data) is the sole ongoing owner of real values — see decisions log.
+  Fabric Group / Mill Fabric Article # / Placement are default-fill ONLY
+  (fixed 2026-09-03, extended 2026-09-11 "WIP = style x color x material") —
+  Phase 1 sets `DUMMY_FABRIC_GROUP`/`DUMMY_FABRIC_ARTICLE` ("NO TPM BOM",
+  `sync/bom.py`) on INSERT alone; Phase 10 (TPM/BOM data) is the sole ongoing
+  owner of real values — see decisions log. Color / Wash also gets a dummy
+  sentinel (`DUMMY_COLOR`, "NO BP COLORWAY", `sync/phase1.py`) for a style
+  with zero BeProduct colorways, so a colorless or BOM-less style still
+  always reaches DTC instead of being dropped from staging.
 - **BeProduct → DTC (Phase 7, sample submit history)**: All 6 apps mapped.
   Proto → "Proto Sample - Sample Status", PreLine → "Pre-line Sample - Status",
   SMS → "SMS - Sample Status", Fit → "2nd Fit Sample Approval Status",
@@ -653,6 +658,84 @@ kept below for historical reference only (see decisions log):**
   sanity assertion (should now always be a no-op).
 
 ## Decisions on record
+
+- **"WIP = style x color x material" — Phase 1's matching engine rebuilt
+  around dummy sentinels for blank colorway/BOM state, 2026-09-11 (owner
+  spec).** Two real, live gaps prompted this: (1) a style with ZERO
+  BeProduct colorways was SILENTLY DROPPED from staging entirely (the
+  colorway-explode step filtered it out), never reaching DTC at all; (2)
+  once Phase 10 fans one (BP Style#, Color / Wash) out into MULTIPLE
+  physical DTC rows (one per material segment), `phase1.compute_upsert()`'s
+  old `dtc_index` was a plain dict keyed on that pair — "last one wins" — so
+  every physical row but one silently stopped receiving Phase 1's own
+  style-level field updates (Product Status, Description, etc.) after the
+  first Phase 10 fan-out, with no error or log line pointing at it.
+  **Design considered and rejected**: extending Phase 1's own match key to a
+  literal 4-tuple `(BP Style#, Color/Wash, Fabric Group, Mill Fabric
+  Article#)` and merging Phase 10/9b's logic directly into the Phase 1
+  transform/push notebooks (eliminating `repull_dtc`/`repull_dtc_bom`/
+  `push_duty_rates` as separate tasks). Judged not worth it for now: the
+  measured cost of those tasks is small (`docs/PERFORMANCE.md`: repulls
+  ~5-17s, `push_duty_rates` a fast diff-check) against the real cost of
+  rewriting the core matching engine (hardened over ~15+ live-bug-fix
+  cycles) and Phase 10/9b together in one pass, and it would lengthen this
+  pipeline's live-DTC-contact window right when the 3-job split (2026-09-03)
+  was specifically designed to shorten it. Deferred as a separate, smaller
+  future initiative if the DAG-task-count reduction is ever wanted on its
+  own merits.
+  **What was implemented instead** (`dtc/python/sync/phase1.py`,
+  `dtc/python/sync/bom.py`, `beproduct/p1p7_beproduct_to_dtc_transform.py`):
+  1. `phase1.compute_upsert()` indexes existing DTC rows by the (BP Style#,
+     Color / Wash) key as a LIST, not a single row, and broadcasts Phase 1's
+     own field diffs to EVERY physical row sharing that key — fixes gap (2)
+     with no new match-key dimension needed at all.
+  2. The transform notebook no longer drops colorless styles: it emits
+     exactly one row per such style with `Color / Wash = DUMMY_COLOR`
+     ("NO BP COLORWAY", `phase1.DUMMY_COLOR`) — fixes gap (1). Symmetrically,
+     every INSERT now stages `Fabric Group`/`Mill Fabric Article #` as
+     `DUMMY_FABRIC_GROUP`/`DUMMY_FABRIC_ARTICLE` ("NO TPM BOM",
+     `sync/bom.py`, superseding the old single "MAIN MATERIAL CONTENT"
+     placeholder) instead of the retired pre-Phase-10 "hardcode 1 BOM line
+     from `main_material_content`" hack; `Placement` is simply left blank
+     until Phase 10 fills it. Both new dummy strings are meaningful,
+     user-facing reminders in the live DTC sheet, not an arbitrary sentinel.
+  3. **Dummy -> real transitions are plain in-place `UPDATE`s, never
+     insert+delete** (explicitly considered and rejected the alternative,
+     per owner's own suggestion to weigh it): when a style's first real
+     colorway appears, `compute_upsert()` finds that style's currently
+     unclaimed `Color / Wash == DUMMY_COLOR` row(s) — there can be MORE than
+     one if Phase 10 already fanned the single dummy row out across
+     materials before any real colorway ever existed — and claims/upgrades
+     ALL of them in place via their existing `rowId`, changing `Color /
+     Wash` (plus any other diffed fields) directly. A style's SECOND (and
+     any subsequent) real colorway, once the dummy row(s) are already
+     claimed, gets a genuinely fresh INSERT as before. The material
+     dimension already worked this way (Phase 10's `is_unenriched()` +
+     first-time-enrichment branch, unchanged) — `DUMMY_FABRIC_GROUP` simply
+     replaces the old placeholder string there, no algorithm change needed.
+     Insert+delete was rejected because: (a) DTC's delete endpoint keys off
+     `rowIndex`, which SHIFTS on every delete, forcing a live re-read
+     between the inserts and the delete just to resolve current indexes —
+     extra live-DTC round trips an in-place UPDATE never needs; (b) a plain
+     UPDATE automatically preserves anything a DTC user already typed onto
+     the placeholder row (vendor, factory, notes, ...), since it only ever
+     touches the fields it explicitly sets — insert+delete would need to
+     explicitly copy those fields forward instead.
+  4. **Idempotent by construction**: every write path (broadcast UPDATE,
+     dummy-anchor UPDATE, or INSERT) is derived from a fresh live-sheet read
+     each run (`connector.get_sheet()`, unchanged) — a dummy row already
+     upgraded (or a segment already inserted) on a prior run simply
+     exact-matches its real key on the next run and produces a NOOP; nothing
+     is ever re-inserted, re-claimed, or reverted.
+  **No backward-compatibility handling needed**: all pre-existing live DTC
+  WIP data carrying the old "MAIN MATERIAL CONTENT" placeholder is being
+  purged, so `is_unenriched()`/the dummy constants have no legacy value to
+  additionally recognize.
+  New/changed unit tests: `dtc/tests/test_phase1.py` cases `[5b]`-`[5f]`
+  (multi-row broadcast, single- and multi-anchor dummy claim, fresh insert
+  after claim, rerun idempotency) and `[13]`-`[14]` (constant/FIELD_MAPPING
+  updates); `dtc/tests/test_bom.py` constant renames throughout. Full
+  9-file pure-Python test suite re-run clean, zero regressions.
 
 - **Phase 9a: `costing_chart` now fills `hts_code`/`duty_rate_*`/`tariff_rate`
   DIRECTLY from the persistent `nt_orbit_duty_cache`, independent of both

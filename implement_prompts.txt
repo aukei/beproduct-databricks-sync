@@ -717,3 +717,20 @@ New Styles will enter costing chart in later job stage, and be filled in future 
 The repull before forming costing chart maybe redundant since after phase 3 the new WIP image is stable except image field.
 
 So only phase 3 (Image) write geniuely require a repull - and we don't do it now either (which works fine).
+
+DTC WIP key should be (BP Style#, Color/Wash, Fabric Group, Mill Fabric Article#) - looking at BOM, no rule forbid  Main Fabric could be same as one of Fabric.  Note during different lifecycle of style, some of these full maybe null / blank. A blank BOM and/or blank Color should not stop style data written to WIP, having dummy Color / Fabric Group / Fabric Article#.   We already assigned a dummy value for Fabric Group "MAIN MATERIAL CONTENT", I would think a meaningful dummy value would double as reminder to user:
+- dummy color: "NO BP COLORWAY"
+- dummy  Fabric groudsp: "NO TPM BOM"
+- dummy Fabric Article #: "NO TPM BOM"
+
+there are no DTC data with 'MAIN MATERIAL CONTENT' lived - they will all be purged - so backward compatibility is unnecessary. Essentially fully implement WIP = style x color x material.
+the watch out point is the DAG is expected to run time to time so it must be idempotent.
+
+one more point on the 'dummy -> real' transform: if this is easier, it doesn't harm to insert new rows AND delete the now redundant row. In this case whatever values user might have updated in DTC on the obsoleting row should bring forward to all new rows being inserted. 
+
+Note DTC API require a repull after delete since it will affect all rowNum - rows shift up on screen - so it is advantages to add all the rows first (patch / insert), then fire DELETE  after repull.
+
+judge overall complexity whether this is worth.
+
+implement the 4-key/dummy-value/self-healing-delete redesign as its own change, scoped to phase1.py + the existing transform/push notebooks + bom.py's fan-out logic called from there (this is the real, valuable fix). Keep Phase 9b (push_duty_rates) and the repull_dtc/repull_dtc_bom DAG simplification as a separate, smaller follow-up (still worth doing — those two repulls genuinely are redundant once the 4-key model makes Phase 1's own live-sheet read authoritative) rather than one monolithic notebook merge.
+

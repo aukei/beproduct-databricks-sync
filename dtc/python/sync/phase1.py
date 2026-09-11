@@ -37,6 +37,48 @@ value that actually distinguishes rows inside a request is the colorway. Hence
 the row identity used for matching is (BP Style#, Color / Wash). RowIndex is
 therefore numbered per request (= per season+brand).
 
+WIP = style x color x material (owner spec, 2026-09-11)
+--------------------------------------------------------
+Phase 10 can fan ONE (BP Style#, Color / Wash) out into MULTIPLE physical DTC
+rows -- one per material segment (Main Fabric + zero or more Fabric segments),
+disambiguated by (Fabric Group, Mill Fabric Article #). Phase 1 itself never
+originates that fan-out (it has no BOM data), but `compute_upsert()` MUST be
+aware multiple physical rows can share one (BP Style#, Color / Wash) key so it
+broadcasts its own (style-level, material-independent) field updates to EVERY
+such row -- previously the code indexed existing rows by this key with
+"last one wins", silently leaving every row but one un-updated by Phase 1 once
+Phase 10 had fanned a style x color out (a real, live gap fixed 2026-09-11).
+
+Blank colorway / blank BOM must NOT prevent a style from reaching DTC at all
+(owner spec, 2026-09-11) -- a style with zero BeProduct colorways still gets
+exactly one DTC row, using a DUMMY sentinel color value (`DUMMY_COLOR`,
+"NO BP COLORWAY") instead of being silently dropped from staging (the prior
+behavior). Symmetrically, `sync.bom` uses `DUMMY_FABRIC_GROUP`/
+`DUMMY_FABRIC_ARTICLE` ("NO TPM BOM") for a style with no BOM/Main Fabric
+match yet -- Phase 1 stages these two constants directly (via FIELD_MAPPING,
+DEFAULT_FILL_COLS) at INSERT time since Phase 1 has no BOM data of its own to
+offer; Phase 10 later upgrades them in place exactly like it already upgrades
+any other un-enriched row (see sync/bom.py's `is_unenriched()`).
+
+Dummy -> real transitions are plain in-place UPDATEs, never insert+delete
+--------------------------------------------------------------------------
+When a style's first REAL colorway appears in BeProduct, `compute_upsert()`
+finds that style's existing `Color / Wash == DUMMY_COLOR` row(s) (there can be
+more than one if Phase 10 already fanned the single dummy row out across
+materials before any real color ever arrived) and UPDATEs each one's Color
+field (plus any other diffed fields) in place via its existing `rowId` --
+never deletes and re-inserts. This is deliberately simpler than an
+insert-then-delete design (which would additionally require a live re-read
+before the DELETE call, since DTC's delete endpoint keys off `rowIndex`,
+which shifts on every delete) and has the side benefit that anything a DTC
+user already typed onto that placeholder row (vendor, factory, notes, ...) is
+automatically preserved -- an UPDATE only ever touches the fields it
+explicitly sets. A style's SECOND (and any subsequent) real colorway, once
+the dummy row(s) are already claimed, gets a genuinely fresh INSERT, same as
+today. This is fully idempotent: once a dummy row is upgraded (or a segment
+inserted), the next run's live-sheet read finds it under its real key and
+simply NOOPs/updates it normally -- nothing is ever re-inserted or deleted.
+
 Phase 1 pushes only BeProduct-OWNED columns (Product Status, Style Description,
 Class, Sub Class, Division, Brand, Garment Finish, Tech Pack Stage,
 Gender, BP Style#, LF Style# (optional), Legacy Code (optional);
@@ -83,7 +125,20 @@ STYLE_IMAGE_COL = "Style Image"  # never written in Phase 1 (requirement 3a)
 
 # In-request row identity (see module docstring).
 # Phase 6: changed from ("LF Style#", "Color / Wash") to ("BP Style#", "Color / Wash").
+# NOTE (2026-09-11): this key can now match MULTIPLE physical DTC rows at once
+# (Phase 10's style x color x material fan-out) -- compute_upsert() broadcasts
+# to all of them. See module docstring.
 MATCH_KEY_COLS: Tuple[str, str] = ("BP Style#", "Color / Wash")
+
+# Dummy sentinel written to "Color / Wash" for a style with ZERO BeProduct
+# colorways (owner spec, 2026-09-11) -- a style must still reach DTC (visible
+# with its style-level fields) rather than being silently dropped from
+# staging, which was the prior behavior. See module docstring's "WIP = style
+# x color x material" section. The companion material-dimension dummy values
+# (`DUMMY_FABRIC_GROUP`/`DUMMY_FABRIC_ARTICLE`, "NO TPM BOM") live in
+# sync/bom.py (Phase 10's domain); Phase 1 only stages them as constants (see
+# FIELD_MAPPING/DEFAULT_FILL_COLS below) since it has no BOM data itself.
+DUMMY_COLOR = "NO BP COLORWAY"
 
 # BeProduct staging column -> DTC WIP_ITS_USE column display name.
 # Only columns that actually exist in the view are mapped; anything else would
@@ -108,6 +163,11 @@ FIELD_MAPPING: Dict[str, str] = {
     # see DEFAULT_FILL_COLS and the module docstring's 2026-09-03 note) ---
     "fabric_group": "Fabric Group",
     "placement": "Placement",
+    # Staged by the transform as a literal DUMMY_FABRIC_ARTICLE constant
+    # ("NO TPM BOM") -- Phase 1 has no BOM data of its own; Phase 10 upgrades
+    # this in place the first time real BOM data resolves (2026-09-11, "WIP =
+    # style x color x material" -- see module docstring).
+    "mill_fabric_article": "Mill Fabric Article #",
     "gender": "Gender",                # Phase 6: new field (pending DTC column creation)
     # --- Phase 7: sample-app submit history (BeProduct → DTC, all 6 apps) ---
     # Formatted by sync.samples.format_sample_field in the transform; each value is
@@ -143,7 +203,11 @@ FIELD_MAPPING: Dict[str, str] = {
 # Columns that are only filled when the DTC cell is currently blank — existing
 # non-blank DTC values are NEVER overwritten (write-once default fill).
 # Used in diff_updatable_fields() and respected for UPDATE ops; INSERT always fills.
-DEFAULT_FILL_COLS: frozenset = frozenset({"Supplier", "Fabric Group", "Placement"})
+# "Mill Fabric Article #" added 2026-09-11 (WIP = style x color x material) --
+# Phase 1 stages the DUMMY_FABRIC_ARTICLE constant at INSERT only; Phase 10 is
+# the sole ongoing owner, same write-once pattern as Fabric Group/Placement.
+DEFAULT_FILL_COLS: frozenset = frozenset(
+    {"Supplier", "Fabric Group", "Placement", "Mill Fabric Article #"})
 
 # Sentinel written to a stale DTC row's "Product Status" when the BeProduct style
 # behind it has moved to a different request (key change). It is intentionally NOT
@@ -407,24 +471,48 @@ def compute_upsert(
         UpsertPlan with updates/inserts/noops/exceptions. rowIndex values for
         inserts are assigned sparsely from max(existing rowIndex)+1 upward
         (partition = this request = one season+brand).
+
+    WIP = style x color x material (2026-09-11, see module docstring):
+    Phase 10 can fan ONE (BP Style#, Color / Wash) key out into MULTIPLE
+    physical DTC rows (one per material segment). This function therefore:
+      1. Indexes existing DTC rows by the (BP Style#, Color / Wash) key as a
+         LIST, not a single row -- every physical row sharing that key gets
+         Phase 1's (material-independent) field updates broadcast to it.
+      2. When a BeProduct row's exact key has NO existing DTC rows at all, but
+         the style has an unclaimed `Color / Wash == DUMMY_COLOR` row (or
+         several, if Phase 10 already fanned the placeholder out across
+         materials before any real colorway existed), those are upgraded IN
+         PLACE (Color, plus any other diffed fields) rather than inserting a
+         new row and leaving the dummy behind -- see the module docstring's
+         "Dummy -> real transitions" section. Every such row for the style is
+         claimed at once (a style can have more than one dummy-color row if
+         Phase 10 already fanned it out by material).
+      3. Otherwise, a genuinely new (style, color) combination is INSERTed.
     """
     plan = UpsertPlan()
 
     req_season = norm(request_scope.get("season_code"))
     req_brand = norm(request_scope.get("brand"))
 
-    # Index current DTC rows by (LF Style#, Color / Wash).
-    lf_col, color_col = MATCH_KEY_COLS
-    dtc_index: Dict[Tuple, Dict[str, Any]] = {}
+    style_col, color_col = MATCH_KEY_COLS
+
+    # Existing DTC rows indexed by exact (BP Style#, Color / Wash) key -> LIST
+    # (Phase 10 material fan-out means more than one physical row can share a
+    # key). Also index this style's currently-unclaimed dummy-color rows
+    # separately, keyed by BP Style# alone, for the dummy->real upgrade path.
+    dtc_index: Dict[Tuple, List[Dict[str, Any]]] = {}
+    dummy_color_rows_by_style: Dict[Optional[str], List[Dict[str, Any]]] = {}
     for r in dtc_rows:
-        key = _match_key(r, lf_col, color_col)
+        key = _match_key(r, style_col, color_col)
         if key == (None, None):
             continue  # skip fully-empty rows (e.g. pre-created blanks)
-        # Last one wins if the sheet itself has dupes; flagged below.
-        dtc_index[key] = r
+        dtc_index.setdefault(key, []).append(r)
+        if norm(r.get(color_col)) == DUMMY_COLOR:
+            dummy_color_rows_by_style.setdefault(key[0], []).append(r)
 
     next_index = max_row_index(dtc_rows)
     seen_bp_keys: set = set()
+    claimed_dummy_row_ids: set = set()
 
     for bp in bp_rows:
         key = (norm(bp.get("bp_style_number")), norm(bp.get("color")))
@@ -458,33 +546,69 @@ def compute_upsert(
             continue
         seen_bp_keys.add(key)
 
-        existing = dtc_index.get(key)
-        if existing is not None:
-            row_id = existing.get("rowId")
-            if not row_id:
-                plan.exceptions.append(UpsertException(
-                    "missing_row_id", key,
-                    "matched DTC row has no rowId; cannot UPDATE"))
-                continue
-            changed = diff_updatable_fields(existing, bp, allowed_cols=allowed_cols)
-            if changed:
-                plan.updates.append(UpsertOp(
-                    op="UPDATE", match_key=key, fields=changed, row_id=row_id,
-                    row_index=existing.get("rowIndex")))
-            else:
-                plan.noops.append(UpsertOp(
-                    op="NOOP", match_key=key, row_id=row_id,
-                    row_index=existing.get("rowIndex")))
-        else:
-            payload = build_target_payload(bp, allowed_cols=allowed_cols, include_keys=True)
-            if not payload:
-                plan.exceptions.append(UpsertException(
-                    "empty_payload", key,
-                    "no mappable values to insert"))
-                continue
-            next_index += 1
-            plan.inserts.append(UpsertOp(
-                op="INSERT", match_key=key, fields=payload, row_index=next_index))
+        existing_list = dtc_index.get(key, [])
+        if existing_list:
+            # Broadcast Phase 1's own (material-independent) field updates to
+            # EVERY physical row sharing this (style, color) key.
+            for existing in existing_list:
+                row_id = existing.get("rowId")
+                if not row_id:
+                    plan.exceptions.append(UpsertException(
+                        "missing_row_id", key,
+                        "matched DTC row has no rowId; cannot UPDATE"))
+                    continue
+                changed = diff_updatable_fields(existing, bp, allowed_cols=allowed_cols)
+                if changed:
+                    plan.updates.append(UpsertOp(
+                        op="UPDATE", match_key=key, fields=changed, row_id=row_id,
+                        row_index=existing.get("rowIndex")))
+                else:
+                    plan.noops.append(UpsertOp(
+                        op="NOOP", match_key=key, row_id=row_id,
+                        row_index=existing.get("rowIndex")))
+            continue
+
+        # No exact match. If this is a REAL color, check for this style's
+        # unclaimed dummy-color anchor row(s) to upgrade in place instead of
+        # inserting a new row and leaving the dummy behind (see module
+        # docstring). Claim ALL of them at once -- more than one can exist if
+        # Phase 10 already fanned the single dummy row out by material before
+        # any real colorway ever arrived.
+        anchors: List[Dict[str, Any]] = []
+        if key[1] != DUMMY_COLOR:
+            anchors = [r for r in dummy_color_rows_by_style.get(key[0], [])
+                       if r.get("rowId") not in claimed_dummy_row_ids]
+
+        if anchors:
+            for anchor in anchors:
+                row_id = anchor.get("rowId")
+                if not row_id:
+                    continue
+                claimed_dummy_row_ids.add(row_id)
+                changed = diff_updatable_fields(anchor, bp, allowed_cols=allowed_cols)
+                new_color = norm(bp.get("color"))
+                if (allowed_cols is None or color_col in allowed_cols) and \
+                        new_color is not None and norm(anchor.get(color_col)) != new_color:
+                    changed[color_col] = new_color
+                if changed:
+                    plan.updates.append(UpsertOp(
+                        op="UPDATE", match_key=key, fields=changed, row_id=row_id,
+                        row_index=anchor.get("rowIndex")))
+                else:
+                    plan.noops.append(UpsertOp(
+                        op="NOOP", match_key=key, row_id=row_id,
+                        row_index=anchor.get("rowIndex")))
+            continue
+
+        payload = build_target_payload(bp, allowed_cols=allowed_cols, include_keys=True)
+        if not payload:
+            plan.exceptions.append(UpsertException(
+                "empty_payload", key,
+                "no mappable values to insert"))
+            continue
+        next_index += 1
+        plan.inserts.append(UpsertOp(
+            op="INSERT", match_key=key, fields=payload, row_index=next_index))
 
     return plan
 

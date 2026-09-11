@@ -55,7 +55,7 @@ here — they flow the other way in Phase 2. Authoritative mapping:
 | DTC column        | BeProduct source (fieldId)         | Notes |
 |-------------------|------------------------------------|-------|
 | BP Style# **(key)** | header `header_number`           | Phase 6 match key; was "LF Style#" |
-| Color / Wash **(key)** | colorway `colorName`          | In-request match key |
+| Color / Wash **(key)** | colorway `colorName`          | In-request match key; a style with ZERO colorways gets `DUMMY_COLOR` ("NO BP COLORWAY") instead of being dropped (2026-09-11, "WIP = style x color x material") |
 | Brand **(routing)** | header `brand_hk`               | Phase 6; constant per request |
 | Product Status    | header `style_status`              | |
 | Style Description | header `header_name`               | |
@@ -63,7 +63,8 @@ here — they flow the other way in Phase 2. Authoritative mapping:
 | Division          | header `division_hk`               | |
 | Garment Finish    | header `garment_finish`            | |
 | Tech Pack Stage   | header `techpack_stage`            | |
-| Fabric Group / Placement | header `core_main_material` | **Default-fill ONLY** (fixed 2026-09-03): INSERT-time "MAIN MATERIAL CONTENT" placeholder only; Phase 10 (TPM/BOM data) owns real ongoing values, never re-pushed on UPDATE — see AGENTS.md decisions log |
+| Fabric Group / Mill Fabric Article # | *(constants)* | **Default-fill ONLY** (fixed 2026-09-03, extended 2026-09-11): INSERT-time `DUMMY_FABRIC_GROUP`/`DUMMY_FABRIC_ARTICLE` ("NO TPM BOM") only, not sourced from BeProduct at all anymore (retires the old `core_main_material`-derived placeholder); Phase 10 (TPM/BOM data) owns real ongoing values, never re-pushed on UPDATE — see AGENTS.md decisions log |
+| Placement | *(blank)* | INSERT-time blank; Phase 10 fills the real value once BOM data resolves |
 | Gender            | header `gender`                    | Phase 6; DTC col confirmed in view |
 | LF Style#         | header `lf_style_number`           | Phase 6 optional (new separate field) |
 | Legacy Code       | header `customer_style_number`     | Phase 6 optional; was DTC→BP before |
@@ -203,9 +204,22 @@ explicit `request_ids` (partial) and for empty listings (treated as a failed sca
   `(LF Style#, Color / Wash)` — matches the table above). Season & brand are
   fixed per request, so they don't vary within it; the denormalized colorway
   is what distinguishes rows.
-- **UPDATE**: matched row → PATCH changed non-key fields by `rowId`; original
+- **"WIP = style x color x material" (2026-09-11)**: this key can match
+  MULTIPLE physical DTC rows at once, since Phase 10 fans one (style, color)
+  out into one row per material segment. `compute_upsert()` indexes existing
+  rows by this key as a LIST and broadcasts every Phase-1-owned field update
+  to ALL of them, not just one.
+- **UPDATE**: matched row(s) → PATCH changed non-key fields by `rowId`; original
   `rowIndex` preserved.
-- **INSERT**: new row → key + mapped fields, `rowIndex = max(rowIndex)+1` within the
+- **Dummy colorway upgrade**: a style with zero colorways stages one row with
+  `Color / Wash = DUMMY_COLOR`. The first time a real colorway appears,
+  `compute_upsert()` finds that style's currently-unclaimed dummy-color row(s)
+  (there can be more than one if Phase 10 already fanned it out by material)
+  and UPDATEs each one's `Color / Wash` field in place — never insert+delete.
+  A style's second (and later) real colorway gets a genuinely fresh INSERT.
+- **INSERT**: new row → key + mapped fields (including the
+  `DUMMY_FABRIC_GROUP`/`DUMMY_FABRIC_ARTICLE` material defaults — see the
+  field table above), `rowIndex = max(rowIndex)+1` within the
   request (sparse-aware; partition = season+brand).
 - Updates and inserts are pushed as **separate** PATCH batches (the API rejects a
   mixed rowId/rowIndex body).

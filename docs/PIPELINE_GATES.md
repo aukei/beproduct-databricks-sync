@@ -95,8 +95,14 @@ therefore eligible for the Phase 1 (field push) / Phase 7 (sample-history
 push) upsert. Code: `beproduct/p1p7_beproduct_to_dtc_transform.py` +
 `dtc/python/sync/lifecycle.py`.
 
-1. **Has at least one colorway** — a style with zero colorways is dropped at
-   the colorway-explosion step (Cell 3) and never reaches staging.
+1. **Colorway presence is NO LONGER a gate (fixed 2026-09-11, "WIP = style x
+   color x material")** — a style with zero colorways used to be silently
+   dropped entirely at the colorway-explosion step (Cell 3); it now gets
+   exactly one staging row with `color = DUMMY_COLOR` ("NO BP COLORWAY")
+   instead, so every style reaches DTC regardless of colorway state. The
+   first time a real colorway appears, `phase1.compute_upsert()` upgrades
+   that dummy row in place (see `docs/PHASE1_WORKFLOW.md`'s "Match key,
+   rowIndex & upsert" section) rather than it ever being a gate again.
 2. **Lifecycle gating (Cell 7b, `lifecycle.should_include_in_staging()`)** —
    the ACTIVE terminal-status filter (superseded the older, now-dormant
    `EXCLUDED_STATUSES` filter in `p1p7_beproduct_style_sync.py`, which only
@@ -120,7 +126,9 @@ push) upsert. Code: `beproduct/p1p7_beproduct_to_dtc_transform.py` +
    that **raises and aborts the whole run** if violated, not a per-row silent
    skip; a row with a `NULL` here signals an upstream data problem (e.g. no
    `dtc_seasoncode_mapping` entry for the style's `(customer, season)`) that
-   needs fixing, not something the pipeline quietly works around.
+   needs fixing, not something the pipeline quietly works around. `color`
+   should never actually trigger this anymore since gate #1's `DUMMY_COLOR`
+   fallback guarantees a non-null value even for a colorless style.
 5. **DTC request name format** — must match `^[A-Z]+ [A-Z]{2}[0-9]{2} .+$`
    (also a validation-FAIL/raise, not a silent skip).
 
@@ -340,9 +348,10 @@ Content written from techpack data. Code: `dtc/python/sync/bom.py`,
      Group; if still ambiguous, no backfill is guessed. A successful match
      backfills Mill Fabric Article # in place (one-way: blank → real only)
      and is excluded from the insert fan-out below.
-   - Row is still un-enriched (blank, or the literal placeholder
-     `"MAIN MATERIAL CONTENT"`) → apply the Main Fabric segment's FULL field
-     set (first-time enrichment).
+   - Row is still un-enriched (blank, or Phase 1's INSERT-time
+     `DUMMY_FABRIC_GROUP` sentinel `"NO TPM BOM"`, 2026-09-11 — supersedes
+     the old `"MAIN MATERIAL CONTENT"` placeholder) → apply the Main Fabric
+     segment's FULL field set (first-time enrichment).
    - Row holds some other real, recognized value not in the current BOM
      data (e.g. a vanished "Fabric" segment, or hand-edited DTC data) →
      **left completely untouched**, never reverted.

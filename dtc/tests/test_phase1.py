@@ -24,8 +24,9 @@ from sync import phase1
 from sync.phase1 import (
     norm, parse_request_reference, is_in_scope, build_target_payload,
     diff_updatable_fields, compute_upsert, to_sheet_data, max_row_index,
-    STYLE_IMAGE_COL, DEFAULT_FILL_COLS,
+    STYLE_IMAGE_COL, DEFAULT_FILL_COLS, DUMMY_COLOR,
 )
+from sync.bom import DUMMY_FABRIC_GROUP, DUMMY_FABRIC_ARTICLE
 
 _failures = []
 
@@ -171,6 +172,95 @@ check(plan.updates[0].row_index == 1, "update preserves original rowIndex 1")
 check(plan.inserts[0].row_index == 6, "insert rowIndex = max(5)+1 = 6 (sparse-aware)")
 check(plan.exceptions[0].reason == "brand_mismatch", "Lee row flagged brand_mismatch")
 
+print("\n[5b] compute_upsert() — WIP = style x color x material: broadcast to"
+      " MULTIPLE physical rows sharing one (style, color) key (2026-09-11)")
+# Phase 10 fanned S1/Black out into 2 physical rows (Main Fabric + a Fabric
+# segment) BEFORE Phase 10 ran on this fixture -- both must get Phase 1's own
+# field update, not just "last one wins" as the old (pre-fix) code did.
+dtc_rows_fanned = [
+    {"rowId": "m1", "rowIndex": 1, "BP Style#": "S1", "Color / Wash": "Black",
+     "Brand": "Wrangler", "Product Status": "Proto", "Fabric Group": "Main Fabric",
+     "Mill Fabric Article #": "WV-0003"},
+    {"rowId": "m2", "rowIndex": 2, "BP Style#": "S1", "Color / Wash": "Black",
+     "Brand": "Wrangler", "Product Status": "Proto", "Fabric Group": "Fabric",
+     "Mill Fabric Article #": "WV-0061"},
+]
+bp_rows_fanned = [
+    {"bp_style_number": "S1", "color": "Black", "brand": "Wrangler",
+     "season_code": "FW26", "product_status": "Production"},
+]
+plan_fanned = compute_upsert(scope, dtc_rows_fanned, bp_rows_fanned, allowed_cols=allowed2)
+check(plan_fanned.summary()["updates"] == 2,
+      "BOTH physical rows sharing (S1, Black) get updated, not just one")
+check({op.row_id for op in plan_fanned.updates} == {"m1", "m2"},
+      "update targets are exactly m1 and m2")
+check(all(op.fields.get("Product Status") == "Production" for op in plan_fanned.updates),
+      "both rows get the same Phase-1-owned field value")
+
+print("\n[5c] compute_upsert() — dummy-color anchor upgrade (single anchor)")
+# Style S1 has zero BeProduct colorways so far -> one DUMMY_COLOR row exists.
+# BeProduct now reports a real first colorway -> UPGRADE that row in place
+# (Color field + any other diffs), never insert+delete.
+dtc_rows_dummy = [
+    {"rowId": "d1", "rowIndex": 1, "BP Style#": "S1", "Color / Wash": DUMMY_COLOR,
+     "Brand": "Wrangler", "Product Status": "Proto"},
+]
+bp_rows_first_color = [
+    {"bp_style_number": "S1", "color": "Black", "brand": "Wrangler",
+     "season_code": "FW26", "product_status": "Production"},
+]
+plan_anchor = compute_upsert(scope, dtc_rows_dummy, bp_rows_first_color, allowed_cols=allowed2)
+check(plan_anchor.summary() == {"updates": 1, "inserts": 0, "noops": 0, "exceptions": 0},
+      "first real color upgrades the dummy row (UPDATE), no INSERT")
+check(plan_anchor.updates[0].row_id == "d1", "upgrade targets the dummy row's own rowId")
+check(plan_anchor.updates[0].fields.get("Color / Wash") == "Black",
+      "dummy Color / Wash is overwritten with the real color")
+check(plan_anchor.updates[0].fields.get("Product Status") == "Production",
+      "other diffed fields are included in the same upgrade UPDATE")
+
+print("\n[5d] compute_upsert() — multiple unclaimed dummy rows for one style"
+      " are ALL claimed at once (Phase 10 already fanned the placeholder by"
+      " material before any real colorway existed)")
+dtc_rows_multi_dummy = [
+    {"rowId": "d1", "rowIndex": 1, "BP Style#": "S1", "Color / Wash": DUMMY_COLOR,
+     "Brand": "Wrangler", "Fabric Group": "Main Fabric"},
+    {"rowId": "d2", "rowIndex": 2, "BP Style#": "S1", "Color / Wash": DUMMY_COLOR,
+     "Brand": "Wrangler", "Fabric Group": "Fabric"},
+]
+plan_multi_anchor = compute_upsert(scope, dtc_rows_multi_dummy, bp_rows_first_color,
+                                    allowed_cols=allowed2)
+check(plan_multi_anchor.summary()["updates"] == 2,
+      "both dummy rows (one per material) are upgraded, none left behind")
+check({op.row_id for op in plan_multi_anchor.updates} == {"d1", "d2"},
+      "both d1 and d2 are claimed")
+check(all(op.fields.get("Color / Wash") == "Black" for op in plan_multi_anchor.updates),
+      "both claimed rows get the real color")
+
+print("\n[5e] compute_upsert() — a SECOND real color, once the dummy is already"
+      " claimed, gets a genuinely fresh INSERT (not another claim)")
+bp_rows_two_colors = [
+    {"bp_style_number": "S1", "color": "Black", "brand": "Wrangler",
+     "season_code": "FW26", "product_status": "Production"},
+    {"bp_style_number": "S1", "color": "Blue", "brand": "Wrangler",
+     "season_code": "FW26", "product_status": "Production"},
+]
+plan_two_colors = compute_upsert(scope, dtc_rows_dummy, bp_rows_two_colors, allowed_cols=allowed2)
+check(plan_two_colors.summary() == {"updates": 1, "inserts": 1, "noops": 0, "exceptions": 0},
+      "first color claims the dummy row (UPDATE), second color is a fresh INSERT")
+check(plan_two_colors.updates[0].match_key == ("S1", "Black"), "Black claims the dummy anchor")
+check(plan_two_colors.inserts[0].match_key == ("S1", "Blue"), "Blue is a fresh insert")
+
+print("\n[5f] compute_upsert() — idempotent: rerunning after a dummy row was"
+      " already upgraded produces a NOOP, never re-inserts or re-claims")
+dtc_rows_already_upgraded = [
+    {"rowId": "d1", "rowIndex": 1, "BP Style#": "S1", "Color / Wash": "Black",
+     "Brand": "Wrangler", "Product Status": "Production"},
+]
+plan_rerun = compute_upsert(scope, dtc_rows_already_upgraded, bp_rows_first_color,
+                             allowed_cols=allowed2)
+check(plan_rerun.summary() == {"updates": 0, "inserts": 0, "noops": 1, "exceptions": 0},
+      "next run's live-sheet read finds the real key directly -> pure NOOP")
+
 print("\n[6] missing bp_style_number -> exception (Phase 6: was missing_lf_style)")
 missing_key = compute_upsert(scope, [], [
     {"bp_style_number": None, "color": "Black", "brand": "Wrangler", "season_code": "FW26"},
@@ -265,26 +355,40 @@ check("BP Style#" in phase1.KEY_DTC_COLS, "'BP Style#' in KEY_DTC_COLS")
 check("LF Style#" not in phase1.KEY_DTC_COLS, "'LF Style#' NOT in KEY_DTC_COLS (optional now)")
 check("Supplier" in phase1.DEFAULT_FILL_COLS, "'Supplier' in DEFAULT_FILL_COLS")
 check("Gender" not in phase1.DEFAULT_FILL_COLS, "'Gender' NOT in DEFAULT_FILL_COLS (full overwrite)")
+check(DUMMY_COLOR == "NO BP COLORWAY", "phase1.DUMMY_COLOR sentinel value")
 
-print("\n[14] Fabric Group / Placement are DEFAULT_FILL_COLS (fixed 2026-09-03 -- see AGENTS.md decisions log)")
-check("Fabric Group" in phase1.DEFAULT_FILL_COLS and "Placement" in phase1.DEFAULT_FILL_COLS,
-      "'Fabric Group'/'Placement' in DEFAULT_FILL_COLS -- Phase 10 owns ongoing updates, not Phase 1")
-dtc_already_enriched = {"BP Style#": "S1", "Color / Wash": "Black", "Fabric Group": "Fabric", "Placement": "Body Front"}
-dtc_still_placeholder = {"BP Style#": "S1", "Color / Wash": "Black",
-                          "Fabric Group": "MAIN MATERIAL CONTENT", "Placement": "MAIN MATERIAL CONTENT"}
+print("\n[14] Fabric Group / Placement / Mill Fabric Article # are DEFAULT_FILL_COLS"
+      " (fixed 2026-09-03, extended 2026-09-11 -- see AGENTS.md decisions log)")
+check("Fabric Group" in phase1.DEFAULT_FILL_COLS and "Placement" in phase1.DEFAULT_FILL_COLS
+      and "Mill Fabric Article #" in phase1.DEFAULT_FILL_COLS,
+      "'Fabric Group'/'Placement'/'Mill Fabric Article #' in DEFAULT_FILL_COLS -- "
+      "Phase 10 owns ongoing updates, not Phase 1")
+check(phase1.FIELD_MAPPING.get("mill_fabric_article") == "Mill Fabric Article #",
+      "FIELD_MAPPING stages mill_fabric_article -> 'Mill Fabric Article #'")
+check(DUMMY_FABRIC_GROUP == "NO TPM BOM" and DUMMY_FABRIC_ARTICLE == "NO TPM BOM",
+      "bom.py's dummy sentinel values (2026-09-11, supersedes 'MAIN MATERIAL CONTENT')")
+dtc_already_enriched = {"BP Style#": "S1", "Color / Wash": "Black", "Fabric Group": "Fabric",
+                         "Placement": "Body Front", "Mill Fabric Article #": "WV-0061"}
+dtc_still_dummy = {"BP Style#": "S1", "Color / Wash": "Black",
+                   "Fabric Group": DUMMY_FABRIC_GROUP, "Placement": None,
+                   "Mill Fabric Article #": DUMMY_FABRIC_ARTICLE}
 bp_fabric_row = {"bp_style_number": "S1", "color": "Black", "brand": "Wrangler",
-                  "fabric_group": "MAIN MATERIAL CONTENT", "placement": "MAIN MATERIAL CONTENT"}
-allowed_fab = {"BP Style#", "Color / Wash", "Brand", "Fabric Group", "Placement"}
+                  "fabric_group": DUMMY_FABRIC_GROUP, "placement": None,
+                  "mill_fabric_article": DUMMY_FABRIC_ARTICLE}
+allowed_fab = {"BP Style#", "Color / Wash", "Brand", "Fabric Group", "Placement",
+               "Mill Fabric Article #"}
 diff_vs_enriched = diff_updatable_fields(dtc_already_enriched, bp_fabric_row, allowed_cols=allowed_fab)
-check("Fabric Group" not in diff_vs_enriched and "Placement" not in diff_vs_enriched,
-      "a scheduled Phase 1 UPDATE never reverts Phase 10's real enrichment back to the placeholder")
-diff_vs_placeholder = diff_updatable_fields(dtc_still_placeholder, bp_fabric_row, allowed_cols=allowed_fab)
-check("Fabric Group" not in diff_vs_placeholder and "Placement" not in diff_vs_placeholder,
-      "still-placeholder DTC row is ALSO left alone (norm() sees a non-blank value already) -- "
+check("Fabric Group" not in diff_vs_enriched and "Placement" not in diff_vs_enriched
+      and "Mill Fabric Article #" not in diff_vs_enriched,
+      "a scheduled Phase 1 UPDATE never reverts Phase 10's real enrichment back to the dummy")
+diff_vs_dummy = diff_updatable_fields(dtc_still_dummy, bp_fabric_row, allowed_cols=allowed_fab)
+check("Fabric Group" not in diff_vs_dummy and "Mill Fabric Article #" not in diff_vs_dummy,
+      "still-dummy DTC row is ALSO left alone (norm() sees a non-blank value already) -- "
       "Phase 10, not Phase 1, is what will later fill it for real")
 ins_fabric_payload = build_target_payload(bp_fabric_row, allowed_cols=allowed_fab, include_keys=True)
-check(ins_fabric_payload.get("Fabric Group") == "MAIN MATERIAL CONTENT",
-      "INSERT (brand-new row) still sets the placeholder -- Phase 10's is_unenriched() check depends on it")
+check(ins_fabric_payload.get("Fabric Group") == DUMMY_FABRIC_GROUP
+      and ins_fabric_payload.get("Mill Fabric Article #") == DUMMY_FABRIC_ARTICLE,
+      "INSERT (brand-new row) sets the dummy sentinels -- Phase 10's is_unenriched() check depends on it")
 
 print("\n" + "=" * 70)
 if _failures:

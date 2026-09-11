@@ -22,7 +22,7 @@ from sync import bom
 from sync.bom import (
     build_style_season, parse_bom_segments, extract_enrichment_fields,
     to_wip_fields, segment_key, is_unenriched, build_target_segments,
-    plan_style_enrichment, PLACEHOLDER_FABRIC_GROUP, RowAction,
+    plan_style_enrichment, DUMMY_FABRIC_GROUP, RowAction,
     WIP_FIELD_FABRIC_GROUP, WIP_FIELD_PLACEMENT, WIP_FIELD_MILL_FABRIC_ARTICLE,
     WIP_FIELD_CONTENT,
     build_insert_row_payload, INSERT_EXCLUDE_COLS, compute_non_writable_cols,
@@ -216,7 +216,7 @@ check(segment_key({"fabric_group": "Fabric", "mill_fabric_article": "X"})
       != segment_key({"fabric_group": "Main Fabric", "mill_fabric_article": "X"}),
       "different Fabric Group -> different key even with same article #")
 
-check(is_unenriched(PLACEHOLDER_FABRIC_GROUP) is True, "placeholder -> unenriched")
+check(is_unenriched(DUMMY_FABRIC_GROUP) is True, "placeholder -> unenriched")
 check(is_unenriched(None) is True, "None -> unenriched")
 check(is_unenriched("") is True, "blank string -> unenriched")
 check(is_unenriched("Main Fabric") is False, "real value -> NOT unenriched")
@@ -250,7 +250,7 @@ SINGLE_MAIN_ONLY = bom_table(COLUMN_HEADER, [DATA_ROWS_00023[0]])  # just the Ma
 
 print("  [11b] first-time enrichment: single row, Main Fabric only -> one full UPDATE (incl. Content)")
 actions = plan_style_enrichment(
-    existing_rows=[{"row_id": "r1", "fabric_group": PLACEHOLDER_FABRIC_GROUP,
+    existing_rows=[{"row_id": "r1", "fabric_group": DUMMY_FABRIC_GROUP,
                      "mill_fabric_article": None, "placement": None, "content": None}],
     custom_fields=SINGLE_MAIN_ONLY,
 )
@@ -266,7 +266,7 @@ check(actions[0].wip_fields[WIP_FIELD_CONTENT] == "Cotton 100%",
 
 print("  [11c] first-time enrichment: single row, Main Fabric + 2 Fabric segments -> 1 UPDATE + 2 INSERTs")
 actions = plan_style_enrichment(
-    existing_rows=[{"row_id": "r1", "fabric_group": PLACEHOLDER_FABRIC_GROUP,
+    existing_rows=[{"row_id": "r1", "fabric_group": DUMMY_FABRIC_GROUP,
                      "mill_fabric_article": None, "placement": None, "content": None,
                      "color": "RedGingham"}],
     custom_fields=REAL_CUSTOM_FIELDS_KTB00023,
@@ -293,9 +293,9 @@ multi_fabric_cf = bom_table(COLUMN_HEADER, [
 ])
 actions = plan_style_enrichment(
     existing_rows=[
-        {"row_id": "r1", "fabric_group": PLACEHOLDER_FABRIC_GROUP, "mill_fabric_article": None,
+        {"row_id": "r1", "fabric_group": DUMMY_FABRIC_GROUP, "mill_fabric_article": None,
          "placement": None, "content": None, "color": "Black"},
-        {"row_id": "r2", "fabric_group": PLACEHOLDER_FABRIC_GROUP, "mill_fabric_article": None,
+        {"row_id": "r2", "fabric_group": DUMMY_FABRIC_GROUP, "mill_fabric_article": None,
          "placement": None, "content": None, "color": "White"},
     ],
     custom_fields=multi_fabric_cf,
@@ -318,7 +318,7 @@ check(plan_style_enrichment([already_enriched_row], no_interesting) == [],
 
 print("  [11f] Fabric segment(s) present but NO Main Fabric -> ZERO actions (not insert-only)")
 actions = plan_style_enrichment(
-    [{"row_id": "r1", "fabric_group": PLACEHOLDER_FABRIC_GROUP, "mill_fabric_article": None,
+    [{"row_id": "r1", "fabric_group": DUMMY_FABRIC_GROUP, "mill_fabric_article": None,
       "placement": None, "content": None}],
     fabric_only,
 )
@@ -542,7 +542,7 @@ CF_BLANK_MAIN_CONTENT_AND_PLACEMENT = bom_table(
         ["Fabric", "WV-0061", "Cotton 100%", "HEM"],
     ],
 )
-unenriched_row_with_real_content = [{"row_id": "r1", "fabric_group": PLACEHOLDER_FABRIC_GROUP,
+unenriched_row_with_real_content = [{"row_id": "r1", "fabric_group": DUMMY_FABRIC_GROUP,
                                       "mill_fabric_article": None, "placement": "PRE-SET PLACEMENT",
                                       "content": "PRE-SET REAL CONTENT"}]
 actions_unenriched = plan_style_enrichment(unenriched_row_with_real_content, CF_BLANK_MAIN_CONTENT_AND_PLACEMENT)
@@ -561,7 +561,7 @@ check(WIP_FIELD_CONTENT not in update_action.wip_fields
 print("\n[11t] ...but a NON-BLANK target Placement/Content in the first-time "
       "branch is still written normally alongside the blank-guarded one")
 _actions_11t = plan_style_enrichment(
-    [{"row_id": "r1", "fabric_group": PLACEHOLDER_FABRIC_GROUP, "mill_fabric_article": None,
+    [{"row_id": "r1", "fabric_group": DUMMY_FABRIC_GROUP, "mill_fabric_article": None,
       "placement": "PRE-SET PLACEMENT", "content": "PRE-SET REAL CONTENT"}],
     CF_BLANK_MAIN_CONTENT)
 _update_11t = next(a for a in _actions_11t if a.kind == "update")
@@ -577,7 +577,7 @@ print("\n[12] build_insert_row_payload() — Style Image must never be copied fo
 base_fields = {
     "rowId": "r1", "rowIndex": 3, "BP Style#": "KTB-00023",
     "Color / Wash": "Indigo", "Style Image": "https://cdn.example/img.jpg",
-    "Fabric Group": "MAIN MATERIAL CONTENT",
+    "Fabric Group": "NO TPM BOM",
 }
 wip = {"Fabric Group": "Fabric", "Placement": "yoke", "Mill Fabric Article #": "FB-999",
        "Content": "50% Wool, 50% Nylon"}

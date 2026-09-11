@@ -126,9 +126,11 @@ DAG placement (owner decision 2026-09-02): this notebook runs BEFORE
 `build_costing_chart`, not after — the intent is to get up-to-date material
 content into `costing_chart`'s `fabric_content` (part of
 `product_description`) so Phase 9b's NT Orbit duty classification is computed
-against real BOM data, not the "MAIN MATERIAL CONTENT" placeholder. Now that
-Content is reinstated (2026-09-09), this original intent is live again once
-the BOM developer populates `custom_fields` for KTB styles. Since this
+against real BOM data, not Phase 1's DUMMY_FABRIC_GROUP/DUMMY_FABRIC_ARTICLE
+placeholder ("NO TPM BOM", renamed 2026-09-11 from the retired "MAIN MATERIAL
+CONTENT" string — see sync/bom.py's module docstring). Now that Content is
+reinstated (2026-09-09), this original intent is live again once the BOM
+developer populates `custom_fields` for KTB styles. Since this
 notebook never mutates Delta directly, `scripts/deploy_job.py` runs a
 dedicated `repull_dtc_bom` task (a full `p1_pull_masters_to_delta` re-pull)
 immediately afterward, and `build_costing_chart` depends on THAT re-pull,

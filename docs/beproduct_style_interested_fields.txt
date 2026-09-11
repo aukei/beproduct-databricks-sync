@@ -54,12 +54,16 @@ Sync direction (one-way per field; see AGENTS.md "field mapping" for code locati
     Garment Finish, Tech Pack Stage, Gender (pending DTC col);
     BP Style# (new key; pending DTC col), LF Style# (optional), Legacy Code (optional);
     Supplier (default-fill "Supplier" when DTC cell blank; pending DTC col);
-    Fabric Group, Placement (default-fill ONLY -- fixed 2026-09-03: these are
-    Phase 10's fields now, sourced from TPM/BOM data, not BeProduct; Phase 1
-    only sets the initial "MAIN MATERIAL CONTENT" placeholder on INSERT and
-    NEVER re-pushes on UPDATE once the DTC cell holds any value -- a scheduled
-    Phase 1 run was live-observed silently reverting Phase 10's real
-    enrichment before this fix; see AGENTS.md decisions log)
+    Fabric Group, Mill Fabric Article #, Placement (default-fill ONLY --
+    fixed 2026-09-03, extended 2026-09-11 "WIP = style x color x material":
+    these are Phase 10's fields now, sourced from TPM/BOM data, not
+    BeProduct; Phase 1 only sets the initial DUMMY_FABRIC_GROUP /
+    DUMMY_FABRIC_ARTICLE ("NO TPM BOM") constants on INSERT (Placement stays
+    blank) and NEVER re-pushes on UPDATE once the DTC cell holds any value --
+    a scheduled Phase 1 run was live-observed silently reverting Phase 10's
+    real enrichment before this fix; see AGENTS.md decisions log)
+    Color / Wash (a style with ZERO colorways gets DUMMY_COLOR, "NO BP
+    COLORWAY", instead of being dropped from staging entirely -- 2026-09-11)
   BeProduct -> DTC (Phase 7, sample-app submit history; sync.samples.format_sample_field):
     All 6 apps mapped (confirmed live 2026-08-28, 204-field WIP_ITS_USE view):
     Proto -> "Proto Sample - Sample Status", PreLine -> "Pre-line Sample - Status",
@@ -116,8 +120,10 @@ Main Vendor (Sampling)     | PARENT VENDOR                  | parent_vendor     
 Main Factory (Sampling)    | FACTORY                        | factory                  | headerData.fields[id="factory"].value                      | type PartnerDropDown
 Main Factory Customer ID   | Customer Factory Code          | customer_factory_code    | headerData.fields[id="customer_factory_code"].value        | DTC→BP (wired up 2026-09-03, was unsupported). `LockField: true` UI property does NOT block API writes (live-tested write+revert). Present in both KTB and TEST KTB folders.
 Factory Production Country for Main Factory | COO       | country_of_origin        | headerData.fields[id="country_of_origin"].value            | DTC→BP (wired up 2026-09-09). fieldType DropDown, 249 choices (live-confirmed via folder_schema + MasterData/country_of_origin -- identical). DTC stores a 2-char ISO 3166-1 alpha-2 code (e.g. "US"); BeProduct stores the country NAME (e.g. "United States") -- VALUE TRANSFORM required, see phase2.resolve_coo_country_name(). Lookup table synced into beproduct_master_coo by p5utl_beproduct_master_data_sync.py (MASTER_DATA_FIELDS["coo"]).
-Fabric Group               | MAIN MATERIAL CONTENT          | core_main_material       | headerData.fields[id="core_main_material"].value           | INSERT-only placeholder now (default-fill, fixed 2026-09-03) -- Phase 10 (TPM/BOM data) owns real ongoing values; type LabelMaterial (value is structured, not a plain string)
-Placement                  | MAIN MATERIAL CONTENT          | core_main_material       | headerData.fields[id="core_main_material"].value           | same source field as Fabric Group; INSERT-only placeholder now (default-fill, fixed 2026-09-03) -- Phase 10 owns real ongoing values
+Fabric Group               | (none -- constant)             | (n/a)                    | (n/a)                                                       | INSERT-only DUMMY_FABRIC_GROUP constant ("NO TPM BOM", default-fill, fixed 2026-09-03, extended 2026-09-11) -- no longer sourced from core_main_material at all; Phase 10 (TPM/BOM data) owns real ongoing values
+Mill Fabric Article #      | (none -- constant)             | (n/a)                    | (n/a)                                                       | INSERT-only DUMMY_FABRIC_ARTICLE constant ("NO TPM BOM", default-fill, added 2026-09-11) -- Phase 10 owns real ongoing values
+Placement                  | (none -- blank)                | (n/a)                    | (n/a)                                                       | left blank at INSERT (no longer sourced from core_main_material, retired 2026-09-11) -- Phase 10 owns real ongoing values
+Color / Wash               | DUMMY_COLOR when no colorway   | (n/a)                    | (n/a)                                                       | "NO BP COLORWAY" constant for a style with zero BeProduct colorways (added 2026-09-11) -- upgraded in place the first time a real colorway appears
 BP STYLE#                  | BP Style Number                | header_number            | headerData.fields[id="header_number"].value                | NEW DTC column to hold BP's style number. Populated BP→DTC. Same source as "BP Style#" match key column.
 Proto Sample - Sample Status | Proto Sample app           | proto_sample (app)       | app_get(Proto).data.submits[]    (first size per submit)   | Phase 7 BP→DTC. Value = one quoted line per submit "name","status","date" (not JSON, no brackets); multiple submits newline-separated. staging col proto_sample_status. sync.samples.format_sample_field.
 Pre-line Sample - Status   | PreLine Sample app             | preline_sample (app)     | app_get(PreLine).data.submits[]  (first size per submit)   | Phase 7 BP→DTC. Note: lowercase 'l' in "line", dash separator. staging col preline_sample_status.

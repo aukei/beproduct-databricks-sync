@@ -7,15 +7,25 @@ Transforms BeProduct's normalized data structure into DTC's flat denormalized st
 
 Process:
 1. Read BeProduct styles (with colorways)
-2. Explode colorways: 1 style → N rows (one per color)
-3. Add fabric row: Each (style × color) → 1 hardcoded row
-   (Fabric Group = "MAIN MATERIAL CONTENT", Placement = main_material_content)
+2. Explode colorways: 1 style → N rows (one per color). A style with ZERO
+   BeProduct colorways still gets exactly ONE row, using the DUMMY_COLOR
+   sentinel ("NO BP COLORWAY") instead of being dropped from staging (owner
+   spec, 2026-09-11, "WIP = style x color x material" -- see
+   dtc/python/sync/phase1.py's module docstring).
+3. Stage material-dimension DEFAULTS: each (style × color) row gets Fabric
+   Group = DUMMY_FABRIC_GROUP / Mill Fabric Article # = DUMMY_FABRIC_ARTICLE
+   (both "NO TPM BOM") and a blank Placement — Phase 1 has no BOM data of its
+   own; Phase 10 (dtc/notebooks/p10_pull_bom_and_enrich.py) is the SOLE owner
+   of real material data and upgrades these in place (see sync/bom.py). This
+   retires the pre-Phase-10 "hardcode 1 BOM line from main_material_content"
+   design.
 4. Map BeProduct season/year to DTC season code (SS26, FW27, etc.)
 5. Derive DTC request name: "<Customer> <SeasonCode> <Brand>"
 6. Map all fields to DTC column names
 7. Write to staging table
 
-Result: N colors × 1 fabric row = N rows per style
+Result: every style reaches DTC with at least 1 row (real or dummy color),
+which Phase 10 later fans out by material.
 
 Schedule: Daily at 12pm UTC (after style sync at 11am)
 
@@ -58,6 +68,8 @@ for _p in ("/Workspace/Repos/beproduct-sync/DTC/python",
         sys.path.append(_p)
 from sync.samples import format_sample_field, SAMPLE_SUBMIT_FIELDS
 from sync import lifecycle
+from sync.phase1 import DUMMY_COLOR
+from sync.bom import DUMMY_FABRIC_GROUP, DUMMY_FABRIC_ARTICLE
 
 # Spark UDF wrapper: raw {prefix}_sample_json (JSON string) -> DTC status string.
 format_sample_udf = udf(format_sample_field, StringType())
@@ -173,16 +185,26 @@ try:
     ]))
     df_parsed = df_source.withColumn("cw_detail", from_json(col("colorways_json"), cw_schema))
 
-    # Filter out styles with no colorways
+    # "WIP = style x color x material" (owner spec, 2026-09-11): a style with
+    # ZERO BeProduct colorways must still reach DTC (visible with its
+    # style-level fields), not be silently dropped from staging as before.
+    # Split into styles WITH real colorways (exploded normally) and styles
+    # WITHOUT any (given exactly one synthetic DUMMY_COLOR row each), then
+    # union the two back together.
     df_with_colors_raw = df_parsed.where(
         col("cw_detail").isNotNull() & (size(col("cw_detail")) > 0)
     )
+    df_without_colors_raw = df_parsed.where(
+        col("cw_detail").isNull() | (size(col("cw_detail")) == 0)
+    )
     styles_with_colors = df_with_colors_raw.count()
+    styles_without_colors = df_without_colors_raw.count()
 
     print(f"   Styles with colorways: {styles_with_colors} / {source_count}")
+    print(f"   Styles WITHOUT colorways (get 1 dummy-color row each): {styles_without_colors}")
 
     # Explode to one row per color, carrying color name + colorway_id.
-    df_exploded_colors = (
+    df_exploded_real_colors = (
         df_with_colors_raw
         .withColumn("cw", explode(col("cw_detail")))
         .withColumn("color", col("cw.color_name"))
@@ -190,10 +212,25 @@ try:
         .drop("cw", "cw_detail")
     )
 
+    # Colorless styles: exactly one row each, color = DUMMY_COLOR ("NO BP
+    # COLORWAY"), colorway_id = NULL. If BeProduct later adds a real
+    # colorway, phase1.compute_upsert() finds and upgrades this row IN PLACE
+    # (never inserts a duplicate + deletes the dummy — see phase1.py's module
+    # docstring "Dummy -> real transitions").
+    df_dummy_colors = (
+        df_without_colors_raw
+        .withColumn("color", lit(DUMMY_COLOR))
+        .withColumn("colorway_id", lit(None).cast(StringType()))
+        .drop("cw_detail")
+    )
+
+    df_exploded_colors = df_exploded_real_colors.unionByName(df_dummy_colors)
+
     exploded_count = df_exploded_colors.count()
     print(f"✅ Exploded to {exploded_count} rows (style × color)")
     if styles_with_colors:
-        print(f"   Avg colors per style: {exploded_count / styles_with_colors:.1f}")
+        print(f"   Avg colors per style (real colorways only): "
+              f"{df_exploded_real_colors.count() / styles_with_colors:.1f}")
 
     # Show sample
     print(f"\n   Sample after colorway explosion:")
@@ -208,21 +245,30 @@ except Exception as e:
 # COMMAND ----------
 
 # ============================================================================
-# CELL 4: Add Fabric Group and Placement (1 Row per Style × Color)
+# CELL 4: Add Fabric Group / Placement / Mill Fabric Article # defaults
+# (1 initial row per Style × Color; Phase 10 fans out real materials later)
 # ============================================================================
 
 print("\n" + "=" * 80)
-print("Step 3: Add Fabric Group and Placement")
+print("Step 3: Add Fabric Group / Placement / Mill Fabric Article # defaults")
 print("=" * 80)
 
 try:
-    print(f"🔄 Adding Fabric Group and Placement columns...")
-    print(f"   Per requirements: 1 row per (style × color)")
-    print(f"     - Fabric Group: hardcoded to 'MAIN MATERIAL CONTENT'")
-    print(f"     - Placement: value of main_material_content")
-    
-    df_denormalized = df_exploded_colors.withColumn("fabric_group", lit("MAIN MATERIAL CONTENT")) \
-                                        .withColumn("placement", col("main_material_content"))
+    print(f"🔄 Adding material-dimension default columns...")
+    print(f"   'WIP = style x color x material' (2026-09-11): Phase 1 has no BOM")
+    print(f"   data of its own, so it stages DUMMY sentinel values Phase 10 later")
+    print(f"   upgrades in place the first time real BOM data resolves:")
+    print(f"     - Fabric Group: '{DUMMY_FABRIC_GROUP}'")
+    print(f"     - Mill Fabric Article #: '{DUMMY_FABRIC_ARTICLE}'")
+    print(f"     - Placement: left blank (Phase 10 fills it; no dummy needed)")
+    print(f"   Retires the pre-Phase-10 'hardcode 1 BOM line from")
+    print(f"   main_material_content' hack — Phase 10 is now the sole source")
+    print(f"   of real material data.")
+
+    df_denormalized = (df_exploded_colors
+        .withColumn("fabric_group", lit(DUMMY_FABRIC_GROUP))
+        .withColumn("mill_fabric_article", lit(DUMMY_FABRIC_ARTICLE))
+        .withColumn("placement", lit(None).cast(StringType())))
     
     denorm_count = df_denormalized.count()
     print(f"✅ Processed to {denorm_count} rows (style × color)")
@@ -232,11 +278,11 @@ try:
     # Show sample
     print(f"\n   Sample denormalized data:")
     df_denormalized.select(
-        "lf_style_number", "color", "fabric_group", "placement"
+        "lf_style_number", "color", "fabric_group", "mill_fabric_article", "placement"
     ).orderBy("lf_style_number", "color").show(6, truncate=50)
     
 except Exception as e:
-    print(f"❌ Failed to add Fabric Group and Placement: {e}")
+    print(f"❌ Failed to add material-dimension defaults: {e}")
     raise
 
 # COMMAND ----------
@@ -432,6 +478,10 @@ try:
         "color": "Color / Wash",
         "fabric_group": "Fabric Group",
         "placement": "Placement",
+        # 2026-09-11 "WIP = style x color x material": Phase 1 stages the
+        # DUMMY_FABRIC_ARTICLE constant at INSERT only; Phase 10 owns real
+        # ongoing values (see phase1.DEFAULT_FILL_COLS / bom.py).
+        "mill_fabric_article": "Mill Fabric Article #",
 
         # Image (deferred to separate notebook)
         "front_image_url": "Style Image URL",  # Not pushed yet
@@ -453,6 +503,7 @@ try:
         col("colorway_id"),                # carried for Phase 2 DTC -> BeProduct Lot# pushback
         col("fabric_group"),
         col("placement"),
+        col("mill_fabric_article"),
 
         # DTC columns
         col("brand"),                      # Phase 6: from brand_hk (key field)
