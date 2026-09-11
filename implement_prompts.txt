@@ -704,3 +704,16 @@ Should the "carry forward" be part of look up from nt_orbit_duty_cache? This sho
 
 make sure no steps incidentally overwrite <blank> on content field?
 
+best when phase10 BOM update merge into phase1 directly:
+- pull style from BeProduct
+- pull whatever related BOM are available
+- handle the massage in same Transform Stage
+- write to DTC in same Stage
+
+By same logic, phase 9b is also best to merge into phase 1:
+- transform fill in whatever relevant Duty / Tariff / HS_Code are available in costing_chart
+
+New Styles will enter costing chart in later job stage, and be filled in future round.
+The repull before forming costing chart maybe redundant since after phase 3 the new WIP image is stable except image field.
+
+So only phase 3 (Image) write geniuely require a repull - and we don't do it now either (which works fine).
