@@ -721,8 +721,16 @@ kept below for historical reference only (see decisions log):**
     proven in v1: `fill_bom_data` has run serverless since 2026-09-02 with the
     same Workspace-Files `sys.path` pattern; NO task declares `libraries`; the
     notebooks import only `requests`/`pandas`; and an audit found no
-    `sparkContext`, no `.rdd`, no `spark.conf.set`, no Python UDFs, with
-    `createDataFrame` always called with an explicit schema. Removes
+    `sparkContext`, no `.rdd`, no `spark.conf.set`, no pandas_udf/
+    applyInPandas/toPandas, with `createDataFrame` always called with an
+    explicit schema. CORRECTION to a first-pass claim: the transform DOES use
+    3 scalar Python UDFs (`format_sample_field`,
+    `lifecycle.should_include_in_staging`, `is_wip_row_dropped`). Scalar
+    Python UDFs are supported on serverless, so not a blocker, but it is the
+    construct here that differs most from classic and must be the FIRST thing
+    validated on the v2 transform; all 3 wrap pure, already-unit-tested
+    functions over ~145 styles, so falling back to plain Python over collected
+    rows is cheap if needed. Removes
     `wait_cluster`, the job cluster and the instance pool — and removes the
     Lakebase constraint that forced the BOM read into its own task, so it
     collapses into the transform. COST is the open question, not feasibility:

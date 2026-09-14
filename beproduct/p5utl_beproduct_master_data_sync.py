@@ -172,6 +172,20 @@ logger = logging.getLogger(__name__)
 
 # ── Widget definitions ────────────────────────────────────────────────────────
 # Use schema_name (not schema) to avoid shadowing pyspark StructType variables.
+# ── Run flag (v2 has NO condition tasks) ────────────────────────────────────
+# In the v2 DAG this notebook is Stage 00's push step (mode=PUSH_DIRECTORY), so
+# it honours run_phase0 itself rather than sitting behind a gate_phase0
+# condition task -- Databricks propagates a condition task's EXCLUDED outcome to
+# every downstream dependent unconditionally, ignoring run_if. See
+# docs/PIPELINE.md design rule 4.
+#
+# Defaults to "true", so ad-hoc admin runs in any other mode are unaffected;
+# only an explicit "false" skips.
+dbutils.widgets.text("run_phase0", "true", "Run Phase 0 (false = no-op)")
+if (dbutils.widgets.get("run_phase0") or "true").strip().lower() != "true":
+    print("run_phase0=false -- skipping entirely (no reads, no writes).")
+    dbutils.notebook.exit("SKIPPED_run_phase0_false")
+
 dbutils.widgets.text("catalog", "lft", "Catalog Name")
 dbutils.widgets.text("schema_name", "beproduct", "Schema Name")
 dbutils.widgets.dropdown(

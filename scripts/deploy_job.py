@@ -716,9 +716,11 @@ def build_v2_tasks():
     }))
     tasks.append(v2_task("phase0_upsert", f"{NB_BP_V2}/p0_xts_master_to_directory_upsert", {
         "catalog": CAT, "schema": SCH, "customer": CUST, "dry_run": DRY,
+        "run_phase0": P("run_phase0"),
     }, depends=[dep("phase0_pull")]))
     tasks.append(v2_task("phase0_push", f"{NB_BP_V2}/p5utl_beproduct_master_data_sync", {
         "catalog": CAT, "schema": SCH, "mode": "PUSH_DIRECTORY", "dry_run": DRY,
+        "run_phase0": P("run_phase0"),
     }, depends=[dep("phase0_upsert")]))
 
     # ── Stage 10: three independent source pulls, in parallel ───────────────
@@ -730,9 +732,12 @@ def build_v2_tasks():
         "catalog": CAT, "schema": SCH, "customer": CUST, "dtc_workspace": WS,
         "dtc_document": DOC, "dtc_environment": ENV,
     }, depends=[dep("phase0_push")]))
+    # Gated by run_costing, not a flag of its own: this pull exists only to feed
+    # build_costing, so disabling that makes it pure waste.
     tasks.append(v2_task("pull_lineplan_dtc", f"{NB_DTC_V2}/p9a_pull_lineplan_to_delta", {
         "catalog": CAT, "schema": SCH, "customer": CUST, "dtc_workspace": WS,
         "dtc_document": LINEPLAN_DOC, "dtc_environment": ENV,
+        "run_costing": P("run_costing"),
     }, depends=[dep("phase0_push")]))
 
     # ── Stage 20: transform -> style x color x material staging (NEW) ───────

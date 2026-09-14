@@ -49,7 +49,40 @@ NOTE: Lineplan field names are uppercase in the "Full" view.
 # COMMAND ----------
 
 import sys
-sys.path.append("/Workspace/Repos/beproduct-sync/DTC/python")
+
+# ── Python module root ──────────────────────────────────────────────────────
+# The `sync` / `connectors` / `client` packages are deployed as Workspace FILES
+# (not notebooks) and added to sys.path here. This is a PARAMETER rather than a
+# literal because v2 deploys them under its own workspace root
+# (/Workspace/Repos/beproduct-sync-v2/DTC/python), so checking out the v2 branch
+# can never change what the live v1 job imports. The default is the v1 path, so
+# a task that does not pass `module_path` behaves exactly as before.
+# See docs/MIGRATION_V1_V2.md ("Workspace isolation").
+_DEFAULT_MODULE_PATH = "/Workspace/Repos/beproduct-sync/DTC/python"
+dbutils.widgets.text("module_path", _DEFAULT_MODULE_PATH, "Python module root")
+_MODULE_PATH = (dbutils.widgets.get("module_path") or "").strip() or _DEFAULT_MODULE_PATH
+# The lowercase-"dtc" sibling is a harmless no-op when it does not exist; it
+# preserves the defensive both-cases behaviour some notebooks already had.
+for _p in (_MODULE_PATH, _MODULE_PATH.replace("/DTC/", "/dtc/")):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+# ── Run flag (v2 has NO condition tasks) ────────────────────────────────────
+# v2 reads every run_* flag HERE and exits as a genuine SUCCESS no-op when
+# disabled, instead of sitting behind a gate_* condition task. Databricks
+# propagates a condition task's EXCLUDED outcome to every downstream dependent
+# UNCONDITIONALLY, ignoring run_if -- and v2's chain is linear enough that one
+# gate evaluating false would silently excise the whole DTC push. v1 learned
+# this twice (gate_phase1, gate_phase10). See docs/PIPELINE.md design rule 4.
+#
+# Defaults to "true", so an ad-hoc/interactive run that passes nothing is
+# completely unaffected; only an explicit "false" skips.
+# Gated by run_costing, not a flag of its own: the LinePlan pull exists only
+# to feed build_costing, so disabling that makes this pull pure waste.
+dbutils.widgets.text("run_costing", "true", "Run costing chain (false = no-op)")
+if (dbutils.widgets.get("run_costing") or "true").strip().lower() != "true":
+    print("run_costing=false -- skipping entirely (no reads, no writes).")
+    dbutils.notebook.exit("SKIPPED_run_costing_false")
 
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed

@@ -108,13 +108,27 @@ and test-only, never imported by a notebook.
 
 Audited for APIs that break under Spark Connect — clean:
 
-- No `sparkContext`, no `.rdd`, no `spark.conf.set`, no Python UDFs anywhere in
-  `beproduct/` or `dtc/notebooks/`.
+- No `sparkContext`, no `.rdd`, no `spark.conf.set`, no `pandas_udf` /
+  `applyInPandas` / `mapInPandas` / `toPandas`.
 - `createDataFrame` is always called with an **explicit schema** (a deliberate
   choice — see the "never infers from all-NULL columns" comments), which is the
   supported form.
 - `createOrReplaceTempView` + `spark.sql("MERGE …")` works.
 - `dbutils.widgets` / `.secrets` / `.notebook.exit` / `.jobs.taskValues` all work.
+
+**One caveat, corrected after a closer audit:** the transform *does* use three
+scalar Python UDFs — `format_sample_field` (sample-app JSON → DTC status string)
+and `lifecycle.should_include_in_staging` / `is_wip_row_dropped`
+(`p1p7_beproduct_to_dtc_transform.py`). Scalar Python UDFs are supported on
+serverless, so this is not a blocker, but it is the one construct in this
+codebase where serverless behaviour differs most from the classic cluster, and
+it should be the **first thing validated** on the v2 transform.
+
+If it does misbehave, the fix is cheap and arguably an improvement: all three
+wrap pure functions already unit-tested in `sync/samples.py` and
+`sync/lifecycle.py`, over a dataset of ~145 styles. Applying them in plain
+Python over collected rows — as `v2_wip_push` already does for the whole plan —
+removes the UDF boundary entirely at no meaningful cost.
 
 **Port:** drop `job_cluster_key` from every task, drop `wait_cluster`, retire the
 instance pool.
@@ -208,19 +222,38 @@ v2   /Workspace/Repos/beproduct-sync-v2/{beproduct,DTC/notebooks,DTC/python}
 
 `scripts/upload_notebooks.py --root` selects the target.
 
-> **Open implementation item.** Every notebook hardcodes
-> `sys.path.append("/Workspace/Repos/beproduct-sync/DTC/python")`, so a v2
-> notebook uploaded to the v2 root would still import v1's modules. Fix before
-> the first v2 run: add a `module_path` job parameter (default = the v1 path) and
-> have each notebook append that instead of the literal. Small, mechanical, and
-> must land with the first v2 notebook.
+**Done (stage 1).** Every notebook previously hardcoded
+`sys.path.append("/Workspace/Repos/beproduct-sync/DTC/python")`, so a v2 notebook
+uploaded to the v2 root would still have imported v1's modules. All 17 sites now
+read a **`module_path`** widget instead, defaulting to the v1 path — so a task
+that passes nothing behaves exactly as before, and the v2 job overrides it to
+`/Workspace/Repos/beproduct-sync-v2/DTC/python`.
+
+### Run flags replacing condition tasks
+
+**Done (stage 1).** The reused notebooks relied on `gate_phase*` condition tasks
+that v2 does not have, so they would have run unconditionally. Each now reads its
+own flag and exits as a SUCCESS no-op when disabled:
+
+| Notebook | Flag | Was |
+|---|---|---|
+| `p0_pull_xts_master_to_delta` | `run_phase0` | `gate_phase0` |
+| `p0_xts_master_to_directory_upsert` | `run_phase0` | downstream of `gate_phase0` |
+| `p5utl_beproduct_master_data_sync` | `run_phase0` | downstream of `gate_phase0` |
+| `p2_push_dtc_to_beproduct` | `run_phase2` | `gate_phase2` |
+| `p9a_pull_lineplan_to_delta` | `run_costing` | `gate_phase9a` |
+
+All default to `"true"`, so ad-hoc and interactive runs that pass nothing are
+unaffected; only an explicit `"false"` skips. `p9a_pull_lineplan_to_delta` is
+gated on `run_costing` rather than a flag of its own because the LinePlan pull
+exists solely to feed `build_costing`.
 
 ### Stages of work
 
 | # | Deliverable | Reduces windows to | Status |
 |---|---|---|---|
 | 0 | Branch, consolidated docs, `BeProduct_DTC_sync_v2` job definition | — | **done** |
-| 1 | Serverless port; `module_path` parameter | — | next |
+| 1 | Serverless port; `module_path` parameter; in-notebook run flags | — | **done** |
 | 2 | `sync/wip_plan.py` + `test_wip_plan.py` — composition, zero-diff-zero-write, delta filter | — | |
 | 3 | `v2_build_wip_staging` + `v2_wip_push`; drop `repull_dtc` | 3 → 2 | |
 | 4 | `v2_build_costing_chart` off staging; drop `repull_dtc_bom` | 2 → 2 | |
@@ -256,7 +289,8 @@ diff-gated.
 
 **Blocking the first v2 run**
 
-- `module_path` parameter (above).
+- The three `NEW` notebooks (`v2_build_wip_staging`, `v2_build_costing_chart`,
+  `v2_wip_push`) and `sync/wip_plan.py`. Stages 2–5.
 
 **Cadence-limiting, independent of this refactor**
 

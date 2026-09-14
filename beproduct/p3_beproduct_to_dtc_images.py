@@ -66,7 +66,16 @@ try:
 except Exception:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "Pillow"])
 
-sys.path.append("/Workspace/Repos/beproduct-sync/DTC/python")
+# ── Python module root ──────────────────────────────────────────────────────
+# Parameterized rather than hardcoded so v2 can deploy the modules under its own
+# workspace root without the v2 branch ever changing what the live v1 job
+# imports. Default = the v1 path. See docs/MIGRATION_V1_V2.md.
+_DEFAULT_MODULE_PATH = "/Workspace/Repos/beproduct-sync/DTC/python"
+dbutils.widgets.text("module_path", _DEFAULT_MODULE_PATH, "Python module root")
+_MODULE_PATH = (dbutils.widgets.get("module_path") or "").strip() or _DEFAULT_MODULE_PATH
+for _p in (_MODULE_PATH, _MODULE_PATH.replace("/DTC/", "/dtc/")):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 import io
 import json

@@ -82,7 +82,23 @@ Costing chart table name is a PARAMETER (widget ``costing_chart_table``):
 # COMMAND ----------
 
 import sys
-sys.path.append("/Workspace/Repos/beproduct-sync/DTC/python")
+
+# ── Python module root ──────────────────────────────────────────────────────
+# The `sync` / `connectors` / `client` packages are deployed as Workspace FILES
+# (not notebooks) and added to sys.path here. This is a PARAMETER rather than a
+# literal because v2 deploys them under its own workspace root
+# (/Workspace/Repos/beproduct-sync-v2/DTC/python), so checking out the v2 branch
+# can never change what the live v1 job imports. The default is the v1 path, so
+# a task that does not pass `module_path` behaves exactly as before.
+# See docs/MIGRATION_V1_V2.md ("Workspace isolation").
+_DEFAULT_MODULE_PATH = "/Workspace/Repos/beproduct-sync/DTC/python"
+dbutils.widgets.text("module_path", _DEFAULT_MODULE_PATH, "Python module root")
+_MODULE_PATH = (dbutils.widgets.get("module_path") or "").strip() or _DEFAULT_MODULE_PATH
+# The lowercase-"dtc" sibling is a harmless no-op when it does not exist; it
+# preserves the defensive both-cases behaviour some notebooks already had.
+for _p in (_MODULE_PATH, _MODULE_PATH.replace("/DTC/", "/dtc/")):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
