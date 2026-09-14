@@ -133,10 +133,59 @@ removes the UDF boundary entirely at no meaningful cost.
 **Port:** drop `job_cluster_key` from every task, drop `wait_cluster`, retire the
 instance pool.
 
-**Cost is the open question, not feasibility.** Serverless DBU rates are higher per
-second, but the pooled VMs stop being paid for between runs and the ~3 min pool
-startup disappears (~36 min/day saved at 12 runs/day). Measure one real run before
-deleting the pool.
+### Live-validated 2026-09-14 (run `66807905429726`)
+
+Everything above was argued from static analysis; this is the confirmation, on
+real serverless compute. **12/12 checks passed.** Re-run any time with:
+
+```bash
+python scripts/upload_notebooks.py --root /Workspace/Repos/beproduct-sync-v2
+python scripts/run_v2_smoke.py
+```
+
+`dtc/notebooks/v2_smoke_check.py` is read-only — no Delta write, no DTC or
+BeProduct API call, no secret value printed — so it is safe to run while the v1
+job is running.
+
+| Confirmed | Evidence |
+|---|---|
+| **Startup ~5 s** (vs ~3 min from the pool) | `setup_duration=5.0s`, total run 70 s |
+| **Workspace Files import, v2-isolated** | `sync.phase1.__file__` → `…/beproduct-sync-v2/DTC/python/sync/phase1.py` |
+| **Scalar Python UDFs work** | `format_sample_field` + both `lifecycle` predicates round-tripped |
+| **Lakebase readable from an ordinary task** | `alb_tpm_uat.public.customer_teckpack_style_latest` |
+| Spark Connect surfaces | explicit-schema `createDataFrame`, temp view + `spark.sql`, `spark.table`, `<=>` |
+| dbutils | `secrets.get`, `jobs.taskValues.set` |
+
+The module-isolation check **asserts** the resolved path rather than merely
+importing successfully — an import that silently fell through to v1's copy would
+otherwise look identical.
+
+**The startup number is the headline.** ~175 s saved per run, ~35 min/day at 12
+runs/day, and it lands before any of the merge work.
+
+**Cost is still the open question, not feasibility.** Serverless DBU rates are
+higher per second, but the pooled VMs stop being paid for between runs. Measure
+one real full run before deleting the pool.
+
+**Two things the smoke check turned up that affect how v2 is built:**
+
+- **The Jobs API does not return notebook stdout for serverless runs.**
+  `get_run_output(...).logs` is empty; only the `dbutils.notebook.exit` value
+  comes back. Any v2 notebook whose result needs to be readable from outside the
+  UI should exit a JSON summary, as `v2_smoke_check` now does. This matters for
+  `wip_push`, whose per-contribution counters are the main compensation for
+  collapsing three task run_ids into one.
+- **`upload_notebooks.py` could not deploy to a fresh workspace root at all** —
+  the notebook importer does not create parent folders (unlike
+  `workspace.upload()`), so all 24 notebooks failed. Never surfaced because the
+  v1 root has existed for months. Fixed with an idempotent recursive `mkdirs`
+  pass.
+
+> **The UAT validation dataset is small.** Whole-table counts at validation
+> time: `ktb_styles`=8, `dtc_wip_ktb`=60, `dtc_request_registry`=85. The v1
+> performance figures in `PERFORMANCE.md` were measured against the ~145-style
+> `KTB` folder, not the current `TEST KTB` one — so v2 timings taken now will
+> **not** extrapolate. Correctness validation is unaffected.
 
 **Consequence for the plan:** because the whole job is serverless, the Lakebase
 constraint that forced Phase 10 into its own task costs nothing, and the BOM read

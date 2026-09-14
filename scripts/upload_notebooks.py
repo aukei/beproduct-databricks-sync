@@ -31,7 +31,7 @@ from __future__ import annotations
 import base64
 import os
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Optional
 
 # ── Ensure project root is importable ────────────────────────────────────────
@@ -189,6 +189,19 @@ def upload_notebooks_to_databricks(
     w = WorkspaceClient(host=host, token=token)
     uploaded = 0
     failed = 0
+
+    # The notebook importer does NOT create parent folders (unlike
+    # workspace.upload(), which does), so every notebook fails with "The parent
+    # folder ... does not exist" against a brand-new workspace root. This never
+    # surfaced while the only root was the long-existing v1 one; it does the
+    # moment you deploy to a fresh root such as the v2 one. mkdirs is
+    # idempotent and recursive, so this is safe to call unconditionally.
+    parents = {str(PurePosixPath(remote).parent) for _, remote in notebooks}
+    for parent in sorted(parents):
+        try:
+            w.workspace.mkdirs(parent)
+        except Exception as e:  # noqa: BLE001
+            print(WARN(f"  ⚠  Could not create {parent}: {e}"))
 
     for local_path, remote_path in notebooks:
         try:

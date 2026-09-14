@@ -364,6 +364,51 @@ this stays true by construction; verify it stays true after any change).
 
 ## Verified discoveries log (append-dated; do not delete)
 
+**v2 serverless smoke check (validated live 2026-09-14, run 66807905429726):**
+- A one-off `jobs.submit` with NO cluster spec runs on SERVERLESS. 12/12 checks
+  passed. Notebook: `dtc/notebooks/v2_smoke_check.py` (read-only, writes
+  nothing); runner: `scripts/run_v2_smoke.py`. Re-runnable at any time,
+  including while the v1 job is running.
+- **Serverless startup is ~5 s** (`setup_duration`), vs ~3 min from the
+  instance pool. Total run 70 s, of which 64 s execution. At 12 runs/day that is
+  ~35 min/day of pure startup latency removed — the single biggest runtime win
+  of the v2 port, and it lands before any of the merge work.
+- **Workspace Files on `sys.path` work under serverless, and the v1/v2 module
+  isolation holds**: `sync.phase1.__file__` resolved to
+  `/Workspace/Repos/beproduct-sync-v2/DTC/python/sync/phase1.py`, i.e. the
+  `module_path` widget really does redirect imports to the v2 root. The smoke
+  check ASSERTS this rather than just importing successfully — an import that
+  silently resolved to v1's copy would otherwise look identical.
+- **Scalar Python UDFs work under serverless** (`F.udf(...)` over
+  `samples.format_sample_field` and the two `lifecycle` predicates). This was
+  the one open serverless risk after the first-pass audit wrongly reported no
+  UDFs; it is now closed. `lifecycle.should_include_in_staging` returned
+  `[True, False]` for (non-terminal, terminal-caught-up) as expected.
+- `alb_tpm_uat.public.customer_teckpack_style_latest` (Lakebase) is readable
+  from an ORDINARY serverless task — not just the one task v1 had to carve out.
+  This is what lets the BOM read collapse into the v2 transform.
+- Also confirmed under Spark Connect: `createDataFrame` with an explicit schema
+  (all-NULL columns typed without inference), `createOrReplaceTempView` +
+  `spark.sql`, `spark.table` reads, `dbutils.secrets.get`,
+  `dbutils.jobs.taskValues.set`, and `<=>` null-safe equality
+  (`NULL <=> NULL` = True vs `NULL = NULL` = None — the `duty.COSTING_KEY`
+  requirement).
+- **Jobs API does NOT return notebook stdout for serverless runs** —
+  `get_run_output(...).logs` comes back empty; only `notebook_output.result`
+  (the `dbutils.notebook.exit` value) is retrievable. Any notebook whose result
+  must be machine-readable from outside should exit a JSON summary, as
+  `v2_smoke_check` now does. Applies to every serverless task in v2.
+- **`upload_notebooks.py` could not deploy to a fresh workspace root**: the
+  notebook importer does not create parent folders (unlike
+  `workspace.upload()`, which does), so all 24 notebooks failed with "The parent
+  folder ... does not exist". Never surfaced because the v1 root has existed for
+  months. Fixed with an idempotent recursive `workspace.mkdirs()` pass.
+- Snapshot of the UAT validation dataset at this point (whole-table counts, not
+  folder-filtered): `ktb_styles`=8, `dtc_wip_ktb`=60,
+  `dtc_request_registry`=85. Note `ktb_styles`=8 — the `TEST KTB` folder is far
+  smaller than the ~145-style `KTB` folder the v1 performance numbers were
+  measured against, so v2 timings taken now will NOT extrapolate.
+
 **BeProduct Directory (validated 2026-06-23):**
 - `api.directory.directory_list()` returns 3852 records (vendors, factories, mills).
   `api.directory.directory_contact_list(header_id)` returns 0 contacts for ALL records —
