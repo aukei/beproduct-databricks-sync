@@ -8,8 +8,8 @@ Guide for connecting to DTC (Data Collaboration Tool) and reading worksheet data
 > of registry-discovered requests into `lft.beproduct.dtc_wip_<customer>` and syncs
 > via Phase 1 (BeProduct→DTC, incl. request **create** + **share**), Phase 2
 > (DTC→BeProduct), and Phase 3 (image upload). Authoritative docs:
-> `docs/DTC_GUIDE.md`, `docs/ARCHITECTURE.md`, `docs/PHASE1_WORKFLOW.md`,
-> `docs/PHASE2_WORKFLOW.md`, `docs/PHASE3_WORKFLOW.md`, and `AGENTS.md` — not the
+> `docs/DTC_GUIDE.md`, `docs/ARCHITECTURE.md`, `docs/PIPELINE.md`,
+> `docs/SYNC_CONTRACT.md`, and `AGENTS.md` — not the
 > change-tracking snippets in this file.
 >
 > **Current DTC write contracts** (validated, see `AGENTS.md`): upsert
@@ -740,4 +740,4 @@ class DTCConnector:
 - Connector: `dtc/python/connectors/dtc.py`
 - REST Client: `dtc/python/client/rest_client.py`
 - Notebook: `dtc/notebooks/p1_pull_masters_to_delta.py` (+ `00_init_request_registry.py`)
-- Documentation: `docs/DTC_GUIDE.md`, `docs/ARCHITECTURE.md`, `docs/PHASE1_WORKFLOW.md`, `docs/PHASE2_WORKFLOW.md`, `docs/PHASE3_WORKFLOW.md`
+- Documentation: `docs/DTC_GUIDE.md`, `docs/ARCHITECTURE.md`, `docs/PIPELINE.md`, `docs/SYNC_CONTRACT.md`

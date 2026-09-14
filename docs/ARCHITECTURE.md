@@ -4,26 +4,25 @@ Bi-directional synchronization between **BeProduct** (style PLM) and **DTC**
 ("Data Collab" sheets), staged through **Databricks / Delta** under Unity Catalog
 schema `lft.beproduct`.
 
-This document is the single reference for **components**, **data flow**, and the
-**data model on Azure Databricks (ADB)**. It merges what used to live in
-`BEPRODUCT_TO_DTC_GUIDE.md`, `dtc/README.md`, and `dtc/DATA_MODEL.md`.
+This document is the single reference for **systems**, **repository layout**, and
+the **data model on Azure Databricks (ADB)**.
 
-- Phase 0 (DTC XTS Master → BeProduct Directory): `PHASE0_WORKFLOW.md`
-- Forward field sync (BeProduct → DTC): `PHASE1_WORKFLOW.md`
-- Reverse field sync (DTC → BeProduct): `PHASE2_WORKFLOW.md`
-- Image sync (BeProduct → DTC): `PHASE3_WORKFLOW.md`
-- Component API/SDK + per-side tables: `DTC_GUIDE.md`, `BEPRODUCT_GUIDE.md`
-- Style field-mapping SSOT: `beproduct_style_interested_fields.txt`
-- Material field-mapping SSOT: `beproduct_material_interested_fields.txt`
-- Costing chart field-mapping SSOT: `costing_interested_fields.txt`
-- Directory/XTS field-mapping SSOT: `beproduct_directory_xts_interested_fields.txt`
-- Phase 5 (Master Data): `PHASE5_WORKFLOW.md`
-- Phase 7 (Sample history): `PHASE7_WORKFLOW.md`
-- Phase 9 (LinePlan + Costing Chart + NT Orbit Duty): `PHASE9_WORKFLOW.md`
-- Phase 10 (BOM enrichment): `PHASE10_WORKFLOW.md`
-- Every gating condition across all phases: `PIPELINE_GATES.md`
-- Pipeline diagram (Mermaid source, render locally): `DIAGRAM.md`
-- Verified API behaviour & invariants: `../AGENTS.md`
+**Branch `v2`.** Stage ordering, the task graph and gating conditions are NOT
+here — they live in [PIPELINE.md](PIPELINE.md).
+
+| Looking for | Read |
+|---|---|
+| What runs, in what order, and what gates a row | [PIPELINE.md](PIPELINE.md) |
+| Which field goes which way, keys, PATCH allow-list | [SYNC_CONTRACT.md](SYNC_CONTRACT.md) |
+| Why v2 exists, what changed, rollout and rollback | [MIGRATION_V1_V2.md](MIGRATION_V1_V2.md) |
+| Per-side API/SDK surface and tables | [DTC_GUIDE.md](DTC_GUIDE.md), [BEPRODUCT_GUIDE.md](BEPRODUCT_GUIDE.md) |
+| Verified API behaviour, invariants, decisions log | [../AGENTS.md](../AGENTS.md) |
+| The v1 phase-numbered documents | [v1/](v1/) — archived, still the historical record |
+
+Field-mapping SSOTs: `beproduct_style_interested_fields.txt` (style),
+`costing_interested_fields.txt` (costing/duty),
+`beproduct_directory_xts_interested_fields.txt` (Directory/XTS),
+`beproduct_material_interested_fields.txt` (material).
 
 ---
 
@@ -42,47 +41,64 @@ the user-profile timezone (treated as **+08:00 HKT** here).
 
 ## 2. Repository layout
 
+`v2` marks notebooks/modules introduced by the v2 revamp; everything else is
+carried over unchanged. See [MIGRATION_V1_V2.md](MIGRATION_V1_V2.md) for which
+v1 artifacts are retired vs. still deployed.
+
 ```
-beproduct/                         # BeProduct-side notebooks (also host the cross-platform push)
-├── 00_init_style_app_registry.py  # Cache folder application IDs → beproduct_style_app_registry
-├── p1p7_beproduct_style_sync.py        # BeProduct API → lft.beproduct.ktb_styles (+ sample-app status)
+beproduct/                            # BeProduct-side notebooks (also host the cross-platform push)
+├── 00_init_style_app_registry.py     # Cache folder application IDs → beproduct_style_app_registry
+├── p1p7_beproduct_style_sync.py      # BeProduct API → ktb_styles (+ sample-app status)
 ├── p5utl_beproduct_master_data_sync.py  # Admin: pull/push-back MasterData (dropdowns) + Directory
-├── p1p7_beproduct_to_dtc_transform.py  # ktb_styles → beproduct_to_dtc_staging (denormalize)
-├── p1_dtc_request_manager.py         # Resolve / CREATE / SHARE DTC requests → dtc_request_mapping
-├── p1p7_beproduct_to_dtc_push.py       # Phase 1: BeProduct → DTC upsert + orphan marks
-├── p3_beproduct_to_dtc_images.py     # Phase 3: front image → DTC "Style Image"
-├── p1utl_dtc_share_requests.py          # Idempotent request-sharing backfill
-└── orchestrate_sync.py            # ⚠️ RETIRED — single-notebook fallback only
+├── v2_build_wip_staging.py           # v2 Stage 20: ktb_styles × BOM → staging (style×color×material)
+├── p1_dtc_request_manager.py         # v2 Stage 25: resolve / CREATE / SHARE requests → dtc_request_mapping
+├── p3_beproduct_to_dtc_images.py     # images job: front image → DTC "Style Image"
+├── p1utl_dtc_share_requests.py       # Idempotent request-sharing backfill
+├── p1p7_beproduct_to_dtc_transform.py  # v1 transform — superseded by v2_build_wip_staging
+├── p1p7_beproduct_to_dtc_push.py     # v1 Phase 1 push — superseded by v2_wip_push
+├── wait_cluster.py                   # v1 cold-start sentinel — unused on serverless
+└── orchestrate_sync.py               # RETIRED — single-notebook fallback only
 
 dtc/
 ├── notebooks/
-│   ├── 00_init_request_registry.py  # Standalone WIP registry build/refresh
-│   ├── 00_init_season_mapping.py    # Seed dtc_seasoncode_mapping
-│   ├── p1_pull_masters_to_delta.py     # Pull KTB WIP sheets → dtc_wip_ktb + registry (Steps 3 + 7)
-│   ├── p8a_pull_fabric_to_delta.py      # ⚠️ RETIRED 2026-09-01 (superseded by MaterialLib) — manual fallback only
-│   ├── p9a_pull_lineplan_to_delta.py    # Phase 9a: pull KTB LinePlan → dtc_lineplan_ktb
-│   ├── p9a_build_costing_chart.py       # Phase 9a: WIP × LinePlan → costing_chart (transpose 4 slots)
-│   ├── p9b1_compute_duty_rates.py       # Phase 9b part 1/2: NT Orbit -> costing_chart only (duty_compute job)
-│   ├── p9b2_push_duty_to_wip.py         # Phase 9b part 2/2: costing_chart -> DTC WIP push, diff-checked (MAIN job)
-│   ├── p9b_fill_duty_rates.py           # SUPERSEDED 2026-09-03 -- kept as manual-fallback artifact only
-│   ├── p10_pull_bom_and_enrich.py       # Phase 10: BOM enrichment from techpack extraction (serverless task; runs BEFORE build_costing_chart)
-│   └── p2_push_dtc_to_beproduct.py  # Phase 2: DTC → BeProduct pushback
-├── python/                          # Importable modules (deployed as Workspace files)
-│   ├── client/rest_client.py        # Generic REST client (retry, multipart)
-│   ├── connectors/dtc.py            # DTC API connector
+│   ├── 00_init_request_registry.py   # Standalone WIP registry build/refresh
+│   ├── 00_init_season_mapping.py     # Seed dtc_seasoncode_mapping
+│   ├── p0_pull_xts_master_to_delta.py   # v2 Stage 00: DTC XTS Master → Delta
+│   ├── p1_pull_masters_to_delta.py   # v2 Stage 10: KTB WIP sheets → dtc_wip_ktb + registry
+│   ├── p9a_pull_lineplan_to_delta.py # v2 Stage 10: KTB LinePlan → dtc_lineplan_ktb
+│   ├── v2_build_costing_chart.py     # v2 Stage 30: staging × WIP × LinePlan → costing_chart
+│   ├── v2_wip_push.py                # v2 Stage 40: THE single DTC write window
+│   ├── p2_push_dtc_to_beproduct.py   # v2 Stage 50: DTC → BeProduct pushback
+│   ├── p9b1_compute_duty_rates.py    # duty_compute job: NT Orbit → costing_chart only
+│   ├── p9a_build_costing_chart.py    # v1 — superseded by v2_build_costing_chart
+│   ├── p10_pull_bom_and_enrich.py    # v1 Phase 10 — folded into v2_build_wip_staging + v2_wip_push
+│   ├── p9b2_push_duty_to_wip.py      # v1 Phase 9b push — folded into v2_wip_push
+│   ├── p9b_fill_duty_rates.py        # SUPERSEDED 2026-09-03 — manual-fallback artifact only
+│   └── p8a_pull_fabric_to_delta.py   # RETIRED 2026-09-01 (MaterialLib) — manual fallback only
+├── python/                           # Importable modules (deployed as Workspace files)
+│   ├── client/rest_client.py         # Generic REST client (retry, multipart)
+│   ├── client/entra_auth.py          # Entra ID delegated OAuth2 (NT Orbit)
+│   ├── connectors/dtc.py             # DTC API connector
+│   ├── connectors/nt_orbit.py        # NT Orbit Duty Tools connector
 │   └── sync/
-│       ├── phase1.py                # BeProduct → DTC upsert core (pure; DEFAULT_FILL_COLS)
-│       ├── phase2.py                # DTC → BeProduct pushback core (pure)
-│       ├── phase3.py                # Image upload planning + type classification (pure)
-│       ├── samples.py               # Phase 7: sample-app submit formatter (pure)
-│       └── registry.py              # Shared registry refresh (discover→enrich→merge)
-└── tests/                           # Unit + live tests for the pure cores
+│       ├── wip_plan.py               # v2: composes phase1 + bom + duty into ONE request plan
+│       ├── phase1.py                 # BeProduct → DTC upsert core (pure; DEFAULT_FILL_COLS)
+│       ├── phase2.py                 # DTC → BeProduct pushback core (pure)
+│       ├── phase3.py                 # Image upload planning + type classification (pure)
+│       ├── bom.py                    # BOM parsing + enrichment decision tree (pure)
+│       ├── duty.py                   # COSTING_KEY, cache staleness, WIP duty columns (pure)
+│       ├── lifecycle.py              # Terminal-status staging eligibility (pure)
+│       ├── samples.py                # Sample-app submit formatter (pure)
+│       ├── xts_master.py             # Stage 00 Directory extraction (pure)
+│       └── registry.py               # Shared registry refresh (discover→enrich→merge)
+└── tests/                            # Unit + live tests for the pure cores
 
-standalone/beproduct_style_push.py   # Standalone Delta → BeProduct push-back (not in daily pipeline)
+standalone/beproduct_style_push.py    # Standalone Delta → BeProduct push-back (not in the pipeline)
 scripts/
-├── upload_notebooks.py              # Deploy notebooks + modules to the workspace
-└── deploy_job.py                    # Create / reset the multi-task job (BeProduct_DTC_sync_dag)
-docs/                                # This documentation set
+├── upload_notebooks.py               # Deploy notebooks + modules (--root selects v1 / v2 workspace root)
+├── deploy_job.py                     # Create / reset jobs (--job main|duty_compute|images|v2)
+└── nt_orbit_oauth_setup.py           # One-time Entra delegated-OAuth seeding
+docs/                                 # This documentation set (docs/v1/ = archived v1 phase docs)
 ```
 
 **Notebook vs module split (invariant):** notebooks can't run locally (Spark /
@@ -94,139 +110,85 @@ unit-tested); notebooks are thin Spark/IO wrappers around it. All HTTP lives in
 
 ## 3. Components & data flow
 
-The pipeline runs as **3 independent Databricks jobs** (split 2026-09-03 to
-minimize DTC concurrent-edit contention — see AGENTS.md decisions log), all
-defined in `scripts/deploy_job.py`:
+The pipeline runs as **independent Databricks jobs**, all defined in
+`scripts/deploy_job.py`:
 
-- `BeProduct_DTC_sync_dag` (MAIN, job 294837488757511) — everything below
-  except the two items pulled out.
-- `BeProduct_DTC_sync_duty_compute` (job 1026599988408090) — Phase 9b's NT
-  Orbit lookups, writing to `costing_chart` only (zero DTC dependency).
-- `BeProduct_DTC_sync_images` (job 847087837807970) — Phase 3 image upload.
+| Job | Contents | Compute |
+|---|---|---|
+| `BeProduct_DTC_sync_v2` | The main DAG — Stages 00–50 | serverless |
+| `BeProduct_DTC_sync_duty_compute` (1026599988408090) | NT Orbit lookups → `costing_chart` only; zero DTC contact | classic |
+| `BeProduct_DTC_sync_images` (847087837807970) | Style Image upload | classic |
+| `BeProduct_DTC_sync_dag` (294837488757511) | **v1 main job** — kept running until v2 cutover, then paused | classic + pool |
 
-All 3 share a Databricks Instance Pool (`Standard_D4as_v5`) for fast cluster
-warm-up while remaining fully independent (separate schedules, separate
-clusters per run). Within the MAIN job, Steps 1–2 and Step 3 run in
-**parallel** (they are independent); the rest follow in dependency order.
-Each step is a first-class task with its own logs and per-task timing in
-the Jobs UI.
+> **The task graph, every stage and every gate live in [PIPELINE.md](PIPELINE.md).**
+> This section covers only the architectural shape; that document is
+> authoritative on ordering and conditions, and is not duplicated here.
+
+The shape worth knowing at this level:
+
+- **One DTC write window per request per run.** Every WIP write in the main job
+  happens in the `wip_push` stage and nowhere else, in ≤2 back-to-back PATCH
+  calls. This is forced by DTC's request-level optimistic locking — any write
+  moves the request's server-side `last_read` and silently invalidates every
+  browser session that loaded earlier. See [MIGRATION_V1_V2.md](MIGRATION_V1_V2.md).
+- **Planning is separate from writing.** Stages 20–30 compute the complete
+  intended state into Delta (`beproduct_to_dtc_staging`, `costing_chart`)
+  touching no DTC at all; Stage 40 diffs that intent against one live read per
+  request and writes once.
+- **Reads are cheap, writes are not.** Only writes move `last_read`, so the
+  pipeline reads DTC freely (`pull_master_dtc`, `pull_lineplan_dtc`, plus
+  `wip_push`'s own live read) and writes as rarely as possible.
+- **Two remaining write streams.** `wip_push` (JSON `sheetData` PATCH by `rowId`
+  / `rowIndex`) and the images job (binary multipart `/images` by `rowIndex`).
+  They cannot be merged — DTC rejects any `sheetData` write to `Style Image` —
+  but they touch disjoint columns and the images job re-reads the live sheet
+  immediately before writing, so they are safe concurrently.
 
 ```
-MAIN JOB (BeProduct_DTC_sync_dag, 294837488757511)
-Task               notebook                      inputs → outputs              parallel group
-─────────────────  ────────────────────────────  ────────────────────────────  ──────────────
-wait_cluster       wait_cluster                  (root / cold-start sentinel)  root
-bp_style_sync      p1p7_beproduct_style_sync          BP API → ktb_styles           after wait ┐
-transform          p1p7_beproduct_to_dtc_transform    ktb_styles → staging          after 1    │ WIP chain
-pull_master_dtc    p1_pull_masters_to_delta         DTC API → dtc_wip + registry  after wait ┘ parallel
-request_manager    p1_dtc_request_manager           staging+registry → mapping    after 2+3
-phase1_push        p1p7_beproduct_to_dtc_push         staging → DTC upsert+orphans  after request_manager;
-                                                                                  run_phase1 checked INSIDE
-                                                                                  notebook, NOT a DAG gate
-gate_phase2        (condition: run_phase2)        after transform+pull_master
-phase2_push        p2_push_dtc_to_beproduct      dtc_wip → BP pushback         after gate2
-repull_dtc         p1_pull_masters_to_delta         targeted re-pull (inserts)    after phase1_push ALL_DONE;
-                                                                                  prereq for fill_bom_data
+   BeProduct (PLM)                Databricks (lft.beproduct)               DTC (sheets)
+   ┌────────────┐  style sync   ┌──────────────┐              ┌────────────────────────┐
+   │ STYLE +    │ ─────────────▶│ ktb_styles   │              │ DTC WIP_ITS_USE rows   │
+   │ Colorways  │               │ (1 / style)  │              │ (KTB WIP document)     │
+   │ + 6 apps   │               └──────┬───────┘              └───────────┬────────────┘
+   └────────────┘                      │                                  │ pull
+        ▲                              │ transform  ◀── BOM ──┐           ▼
+        │ Stage 50                     ▼            (Lakebase) │   ┌──────────────┐
+        │ (Vendor, Factory,     ┌────────────────────────┐     │   │ dtc_wip_ktb  │
+        │  Customer ID, COO,    │ beproduct_to_dtc_      │     │   │ + registry   │
+        │  Lot#)                │ staging                │     │   └──────┬───────┘
+   ┌────┴───────┐               │ (1 / style×color×      │     │          │
+   │ attributes │◀──────────────│  material)             │     │          │
+   │ _update    │               └───────────┬────────────┘     │          │
+   └────────────┘                           │                  │          │
+                                            │   ┌──────────────┴──────────┘
+   DTC LinePlan ──▶ dtc_lineplan_ktb ───────┼──▶│ build_costing (staging × WIP × LinePlan)
+                                            │   └──────────────┬──────────┘
+                                            │                  ▼
+                                            │            costing_chart
+                                            │        (style × color × material
+                                            │         × vendor/factory slot)
+                                            │                  │
+                                            │                  │  ◀── nt_orbit_duty_cache
+                                            │                  │      (read-only fill)
+                                            ▼                  ▼
+                                    ┌───────────────────────────────────┐
+                                    │  wip_push — ONE write window      │
+                                    │  style + material + duty fields   │
+                                    │  ≤2 PATCH calls per request       │
+                                    └───────────────┬───────────────────┘
+                                                    ▼
+                                          DTC WIP (live sheet)
 
-fill_bom_data      p10_pull_bom_and_enrich          BOM(Lakebase)+wip → DTC push ┐ SERVERLESS compute;
-                                                                                  │ after repull_dtc ALL_DONE;
-                                                                                  │ run_phase10 checked
-                                                                                  │ INSIDE notebook, NOT
-                                                                                  │ a DAG gate (see below)
-repull_dtc_bom     p1_pull_masters_to_delta         full re-pull (reflect BOM)   ┘ after fill_bom_data ALL_DONE
-
-gate_phase9a       (condition: run_phase9a)       after wait_cluster            ┐ parallel,
-pull_lineplan_dtc  p9a_pull_lineplan_to_delta         DTC LinePlan → lineplan_ktb  │ independent
-build_costing_chart p9a_build_costing_chart           wip+lineplan → costing_chart ┘ after pull_lineplan+repull_dtc_bom
-gate_phase9b       (condition: run_phase9b)       after build_costing_chart
-push_duty_rates    p9b2_push_duty_to_wip            costing_chart → DTC WIP (diffed) after gate9b
-
-DUTY_COMPUTE JOB (BeProduct_DTC_sync_duty_compute, 1026599988408090) -- independent
-compute_duty_rates p9b1_compute_duty_rates          NT Orbit → costing_chart ONLY   root (no DTC dependency)
-
-IMAGES JOB (BeProduct_DTC_sync_images, 847087837807970) -- independent
-phase3_images      p3_beproduct_to_dtc_images       staging+live DTC → DTC image    root
+   Separate job:  costing_chart ──▶ NT Orbit Duty Tools API ──▶ costing_chart
+                                    (+ nt_orbit_duty_cache, persistent, never wiped)
+   Separate job:  staging + live DTC ──▶ DTC "Style Image" (multipart /images)
 ```
-
-Condition tasks (`gate_phase*`) evaluate `run_phase*` job parameters; their `true`
-edge gates the respective push/pull tasks. `dry_run` computes + logs without
-writing. Phase 9a/10 both run in parallel with the WIP chain within the MAIN
-job. `build_costing_chart` depends on `repull_dtc_bom`, NOT `pull_master_dtc`
-directly — Phase 10 (BOM enrichment) is placed BEFORE costing chart
-construction so up-to-date material names reach the duty_compute job's NT
-Orbit calls; since Phase 10 only pushes to the live DTC sheet (never mutates
-Delta), a dedicated re-pull (`repull_dtc_bom`) makes the enrichment visible
-first. `fill_bom_data` runs on SERVERLESS compute (not the shared classic
-cluster) because its BOM source (`alb_tpm_<env>`) is a Lakebase database —
-see `docs/PHASE10_WORKFLOW.md`. `push_duty_rates` reads whatever
-`costing_chart` state the duty_compute job's most recent (independently
-scheduled) run left behind and diffs against the current DTC WIP row before
-PATCHing, so it's correct regardless of run ordering between the 2 jobs.
-
-**Neither `phase1_push` nor `fill_bom_data` is gated by a `gate_phase*`
-condition task** (hardened 2026-09-02), unlike every other phase —
-`run_phase1`/`run_phase10` are each checked INSIDE their own notebook instead
-(same pattern as `dry_run`). Live-discovered 2026-09-02: a `gate_phase10`
-condition task made `fill_bom_data` become `EXCLUDED` (not merely skipped)
-whenever `run_phase10=false`, and Databricks propagates `EXCLUDED` to every
-downstream dependent unconditionally — silently excluding the entire
-`repull_dtc_bom` → `build_costing_chart` → `gate_phase9b` → `push_duty_rates`
-chain on every scheduled run. Since `repull_dtc` (and, via `repull_dtc`, the
-entire Phase 9/10 chain behind `fill_bom_data`) transitively depends on
-`phase1_push` too, `gate_phase1` was removed the same way to close off the
-identical risk if `run_phase1` were ever set `false`. See `AGENTS.md`'s
-decisions log.
-
-**`repull_dtc` is `fill_bom_data`'s prerequisite** (unconditional, not gated
-by `gate_phase3` — that dependency was removed once `phase3_images` moved to
-its own job entirely 2026-09-03): it makes `phase1_push`'s newly-created
-style×color rows visible in `dtc_wip_<customer>`/`dtc_request_registry`,
-which Phase 10 needs to enrich the COMPLETE post-Phase-1 state —
-`pull_master_dtc`'s snapshot (taken before `phase1_push` runs) can be missing
-rows Phase 1 just created this same run. `phase3_images` (now in its own
-job) and `push_duty_rates` are the two WIP-mutating leaf points across the
-3 jobs; they're safe to run concurrently since they write through disjoint
-DTC surfaces (binary `/images` endpoint keyed by `rowindex` vs. JSON
-`sheetData` PATCH keyed by `rowId`, touching disjoint columns) and
-`phase3_images` re-reads the live sheet itself immediately before writing.
 
 Phase 8a/8b (DTC FABRIC → Delta → BeProduct Material Master) are RETIRED
 (2026-09-01), confirmed by the project team to be replaced by a separate
-"MaterialLib" application, and have been removed from the DAG entirely.
-`p8a_pull_fabric_to_delta.py` remains in the repo as a historical/manual-
-fallback artifact only; its output tables `dtc_fabric_<customer>` /
-`dtc_fabric_registry` were DROPPED from Delta (2026-09-01, owner-confirmed).
-
-```
-   BeProduct (PLM)               Databricks (lft.beproduct)              DTC (sheets)
-   ┌────────────┐  style sync  ┌──────────────┐ transform ┌────────────────────────┐
-   │ STYLE +    │ ────────────▶│ ktb_styles   │ ─────────▶│ beproduct_to_dtc_      │
-   │ Colorways  │  (excl.      │ (1/style)    │           │ staging (1/style×color)│
-   │ + 6 apps   │  Finalized)  └──────────────┘           └──────────┬─────────────┘
-   └────────────┘                                                      │ Phase 1 + 7
-        ▲                                                              │ Phase 3 image
-        │ Phase 2                                                       ▼
-        │ (Vendor, Factory, Lot#)   ┌──────────────┐ resolve ┌────────────────────────┐
-   ┌────┴───────┐  pull (WIP)        │ dtc_wip_ktb  │◀────────│ DTC WIP_ITS_USE rows   │
-   │ attributes │◀───────────────── │ + registry   │ mapping │ (KTB WIP document)    │
-   │ _update    │                   └──────────────┘         └────────────────────────┘
-
-   DTC LinePlan ─────────────────▶  dtc_lineplan_ktb  (Phase 9a)
-                                    dtc_wip_ktb       (Phase 9a join)
-                                          │ join + transpose
-                                          ▼
-                                    costing_chart      (Style × Color × Vendor/Factory)
-                                          │
-                                          ▼
-                              NT Orbit Duty Tools API  (Phase 9b, persistent cache)
-                                          │
-                                          ▼
-                          hts_code / duty_rate_* / tariff_rate filled in-place
-```
-
-   (DTC FABRIC → dtc_fabric_ktb, Phase 8a, is RETIRED 2026-09-01 — superseded by
-   a separate "MaterialLib" application; no longer part of this data flow.
-   dtc_fabric_ktb / dtc_fabric_registry were DROPPED from Delta 2026-09-01.)
+"MaterialLib" application. `p8a_pull_fabric_to_delta.py` remains as a
+historical/manual-fallback artifact only; its tables `dtc_fabric_<customer>` /
+`dtc_fabric_registry` were DROPPED from Delta.
 
 ### Field-ownership partition (one field, one direction)
 

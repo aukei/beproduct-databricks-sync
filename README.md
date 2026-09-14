@@ -4,132 +4,102 @@ Bi-directional synchronization between **BeProduct** (style PLM) and **DTC**
 ("Data Collab" sheets), staged through **Databricks / Delta** under Unity Catalog
 schema `lft.beproduct`. Each field syncs **one way only** (no loops).
 
-| Phase | Direction | Description |
-|-------|-----------|-------------|
-| **0** | DTC → Delta → BeProduct | Pull DTC "XTS Master" (Supplier/Factory) → upsert `beproduct_directory` → push to BeProduct. Runs FIRST, before every other phase. |
-| **1** | BeProduct → DTC | Push style fields into the matching WIP request (upsert); create + share missing in-scope requests |
-| **2** | DTC → BeProduct | Push DTC-owned fields back into the BeProduct style |
-| **3** | BeProduct → DTC | Upload front image into the DTC "Style Image" cell (binary, separate endpoint) |
-| **7** | BeProduct → DTC | Push sample-app submit history (all 6 apps: Proto/PreLine/SMS/Fit/PP/TOP) into DTC status columns |
-| **8a/8b** | *(RETIRED 2026-09-01)* | DTC FABRIC → Delta → BeProduct Material Master — superseded by a separate "MaterialLib" application; removed from the deployed DAG |
-| **9a** | DTC → Delta → Delta | Pull KTB LinePlan; join with WIP; build `costing_chart` (Style × Color × Vendor/Factory) |
-| **9b** | API → Delta → DTC | NT Orbit Duty Tools API fill for HTS/Duty/Tariff fields (persistent cross-run cache); push changes back to WIP |
-| **10** | Lakebase → Delta → DTC | Enrich WIP `Fabric Group`/`Placement`/`Mill Fabric Article #` from externally-processed techpack BOM data; runs BEFORE Phase 9a so Phase 9b's NT Orbit calls see current material names. Requires **serverless compute** (source is a Lakebase database). |
+> **Branch `v2`.** The pipeline is being consolidated: the three separate DTC
+> write passes merge into one, eliminating two full re-pulls and reducing DTC
+> lock contention from 3 write windows per request per run to 1. The v1 job keeps
+> running untouched until cutover. Start with
+> [docs/MIGRATION_V1_V2.md](docs/MIGRATION_V1_V2.md).
 
-The pipeline runs as **3 independent Databricks jobs** (split 2026-09-03 to
-minimize DTC concurrent-edit contention — see AGENTS.md decisions log),
-all defined in `scripts/deploy_job.py`:
+## What it does
+
+| Stage | Direction | Description |
+|---|---|---|
+| **00** | DTC → Delta → BeProduct | Pull DTC "XTS Master" (Supplier/Factory) → upsert `beproduct_directory` → push to BeProduct |
+| **10** | pulls | BeProduct styles + sample apps → `ktb_styles`; DTC WIP → `dtc_wip_ktb`; DTC LinePlan → `dtc_lineplan_ktb` |
+| **20** | Lakebase + Delta → Delta | Denormalize to **style × color × material**, joining externally-processed techpack BOM data |
+| **25** | Delta → DTC | Resolve / create / share the DTC requests the staging rows need |
+| **30** | Delta → Delta | staging × WIP × LinePlan → `costing_chart`, with duty fields filled from the persistent NT Orbit cache |
+| **40** | Delta → DTC | **The single DTC write window** — style fields, sample history, BOM material fields and duty rates in ≤2 PATCH calls per request |
+| **50** | DTC → BeProduct | Push DTC-owned fields back into the BeProduct style |
+
+Companion jobs, deliberately outside the main DAG:
 
 | Job | ID | Contents |
-|-----|----|----|
-| `BeProduct_DTC_sync_dag` (MAIN) | 294837488757511 | 00→10→20→30→40→55 (Phase 0/1/2/10/9a + Phase 9b's DTC WIP push) |
-| `BeProduct_DTC_sync_duty_compute` ("50") | 1026599988408090 | NT Orbit lookups → `costing_chart` only, zero DTC dependency |
-| `BeProduct_DTC_sync_images` ("60") | 847087837807970 | Phase 3 image upload only |
+|---|---|---|
+| `BeProduct_DTC_sync_v2` | *(create with `--job v2`)* | The main DAG above. Serverless |
+| `BeProduct_DTC_sync_duty_compute` | 1026599988408090 | NT Orbit duty lookups → `costing_chart` only; zero DTC contact |
+| `BeProduct_DTC_sync_images` | 847087837807970 | Front image → DTC "Style Image" (multipart endpoint; cannot ride the PATCH) |
+| `BeProduct_DTC_sync_dag` | 294837488757511 | **v1 main job** — still live until v2 cutover |
 
-All 3 share a Databricks Instance Pool for fast cluster warm-up while
-remaining fully independent (separate schedules, separate clusters).
+Each field syncs **one way only** (no loops). Retired: Phase 8a/8b (DTC FABRIC →
+BeProduct Material Master), superseded by a separate "MaterialLib" application.
 
 ---
 
 ## Documentation
 
+**Start here**
+
+| Document | Description |
+|----------|-------------|
+| [docs/MIGRATION_V1_V2.md](docs/MIGRATION_V1_V2.md) | Why v2 exists, what changed, rollout and rollback |
+| [docs/PIPELINE.md](docs/PIPELINE.md) | What runs, in what order, and every gate a row must pass |
+| [docs/SYNC_CONTRACT.md](docs/SYNC_CONTRACT.md) | Which field goes which way, match keys, the WIP PATCH allow-list |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Systems, repository layout, ADB data model |
+
+**Reference**
+
 | Document | Description |
 |----------|-------------|
 | [QUICK_START.md](QUICK_START.md) | Setup, how to use, which notebook to run |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Components, full pipeline DAG, and ADB data model |
-| [docs/PHASE0_WORKFLOW.md](docs/PHASE0_WORKFLOW.md) | DTC "XTS Master" → BeProduct Directory (runs FIRST) |
-| [docs/PHASE1_WORKFLOW.md](docs/PHASE1_WORKFLOW.md) | BeProduct → DTC style field upsert (Phases 1 + 7 ride same push) |
-| [docs/PHASE2_WORKFLOW.md](docs/PHASE2_WORKFLOW.md) | DTC → BeProduct pushback |
-| [docs/PHASE3_WORKFLOW.md](docs/PHASE3_WORKFLOW.md) | BeProduct image → DTC "Style Image" |
-| [docs/PHASE5_WORKFLOW.md](docs/PHASE5_WORKFLOW.md) | BeProduct Master Data & Directory sync (admin utility, not in DAG) |
-| [docs/PHASE7_WORKFLOW.md](docs/PHASE7_WORKFLOW.md) | Sample-app submit history → DTC status columns |
-| [docs/PHASE9_WORKFLOW.md](docs/PHASE9_WORKFLOW.md) | LinePlan + Costing Chart (9a) → NT Orbit Duty Tools (9b) |
-| [docs/PHASE10_WORKFLOW.md](docs/PHASE10_WORKFLOW.md) | BOM enrichment from externally-processed techpack data (serverless compute) |
-| [docs/PIPELINE_GATES.md](docs/PIPELINE_GATES.md) | Every gating condition across all phases (why isn't my row showing up?) |
 | [docs/BEPRODUCT_GUIDE.md](docs/BEPRODUCT_GUIDE.md) | BeProduct SDK/API + BeProduct tables on ADB |
 | [docs/DTC_GUIDE.md](docs/DTC_GUIDE.md) | DTC API + DTC tables on ADB |
-| [docs/DIAGRAM.md](docs/DIAGRAM.md) | Pipeline data-flow Mermaid diagram (render locally — PNG/SVG not committed) |
-| [docs/beproduct_style_interested_fields.txt](docs/beproduct_style_interested_fields.txt) | **Style field-mapping SSOT** (DTC column ⇄ BeProduct fieldId ⇄ direction) |
-| [docs/beproduct_material_interested_fields.txt](docs/beproduct_material_interested_fields.txt) | **SUPERSEDED (Phase 8a/8b retired 2026-09-01)** — Material field-mapping (DTC FABRIC ⇄ BeProduct Material Master); replaced by the "MaterialLib" application |
-| [docs/costing_interested_fields.txt](docs/costing_interested_fields.txt) | **Costing chart field-mapping SSOT** (WIP × LinePlan → costing_chart) |
-| [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | Pipeline performance history and optimisations |
-| [AGENTS.md](AGENTS.md) | Durable log of verified API behaviour, field directions & project invariants |
+| [docs/PERFORMANCE.md](docs/PERFORMANCE.md) | Performance history and optimisations (v1-era measurements) |
+| [AGENTS.md](AGENTS.md) | Durable log of verified API behaviour, field directions, decisions |
+| [docs/v1/](docs/v1/) | Archived v1 phase-numbered documents — still the historical record |
+
+**Field-mapping SSOTs**
+
+| Document | Description |
+|----------|-------------|
+| [docs/beproduct_style_interested_fields.txt](docs/beproduct_style_interested_fields.txt) | **Style** — DTC column ⇄ BeProduct fieldId ⇄ direction |
+| [docs/costing_interested_fields.txt](docs/costing_interested_fields.txt) | **Costing chart** — WIP × LinePlan → `costing_chart` |
+| [docs/beproduct_directory_xts_interested_fields.txt](docs/beproduct_directory_xts_interested_fields.txt) | **Directory/XTS** — Stage 00 |
+| [docs/beproduct_material_interested_fields.txt](docs/beproduct_material_interested_fields.txt) | SUPERSEDED (Phase 8a/8b retired) — replaced by "MaterialLib" |
 
 ---
 
 ## Repository structure
 
-```
-beproduct/                              # BeProduct-side notebooks + cross-platform push
-├── 00_init_style_app_registry.py       # Cache folder app IDs → beproduct_style_app_registry (on-demand)
-├── p1p7_beproduct_style_sync.py             # BeProduct API → ktb_styles (+ 6 sample-app arrays; Finalized filtered)
-├── p5utl_beproduct_master_data_sync.py       # Admin: pull/push MasterData (dropdowns) + Directory
-├── p1p7_beproduct_to_dtc_transform.py       # ktb_styles → beproduct_to_dtc_staging (denormalize; sample status UDFs)
-├── p1_dtc_request_manager.py              # Resolve / CREATE / SHARE DTC requests → dtc_request_mapping
-├── p1p7_beproduct_to_dtc_push.py            # Phase 1: BeProduct → DTC upsert + orphan marks
-├── p3_beproduct_to_dtc_images.py          # Phase 3: front image → DTC "Style Image"
-├── p1utl_dtc_share_requests.py               # Idempotent request-sharing backfill
-└── orchestrate_sync.py                 # ⚠️ RETIRED — single-notebook fallback only
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) § 2 — the annotated tree lives
+there so it only has to be kept accurate in one place.
 
-dtc/
-├── notebooks/
-│   ├── 00_init_request_registry.py     # Standalone WIP registry build/refresh
-│   ├── 00_init_season_mapping.py       # Seed dtc_seasoncode_mapping
-│   ├── p1_pull_masters_to_delta.py        # Pull KTB WIP sheets → dtc_wip_ktb + registry (Step 3 / Step 7)
-│   ├── p8a_pull_fabric_to_delta.py         # RETIRED 2026-09-01 (superseded by MaterialLib) — kept as manual fallback only
-│   ├── p9a_pull_lineplan_to_delta.py       # Phase 9a: pull KTB LinePlan → dtc_lineplan_ktb
-│   ├── p9a_build_costing_chart.py          # Phase 9a: WIP × LinePlan join → costing_chart
-│   ├── p9b1_compute_duty_rates.py          # Phase 9b part 1/2: NT Orbit Duty Tools lookups → costing_chart (own job, zero DTC dependency)
-│   ├── p9b2_push_duty_to_wip.py            # Phase 9b part 2/2: costing_chart → DTC WIP push, diff-checked (main job)
-│   ├── p9b_fill_duty_rates.py              # SUPERSEDED 2026-09-03 — kept as manual-fallback artifact only
-│   ├── p10_pull_bom_and_enrich.py          # Phase 10: BOM enrichment from techpack extraction (serverless task; source = customer_teckpack_style_log.custom_fields, 2026-09-09)
-│   └── p2_push_dtc_to_beproduct.py     # Phase 2: DTC → BeProduct pushback
-├── python/                             # Importable modules (deployed as Workspace files)
-│   ├── client/rest_client.py           # Generic REST client (retry, multipart)
-│   ├── connectors/dtc.py               # DTC API connector
-│   └── sync/
-│       ├── phase1.py                   # BeProduct → DTC upsert core (pure-Python, unit-tested)
-│       ├── phase2.py                   # DTC → BeProduct pushback core (pure-Python)
-│       ├── phase3.py                   # Image upload planning + type classification (pure-Python)
-│       ├── samples.py                  # Phase 7: sample-app submit formatter (pure-Python)
-│       └── registry.py                 # Shared registry refresh (discover→enrich→merge)
-└── tests/
-    ├── test_phase1.py                  # Phase 1 core unit tests
-    ├── test_phase2.py                  # Phase 2 core unit tests
-    ├── test_phase3.py                  # Phase 3 image-upload unit tests
-    └── test_samples.py                 # Phase 7 sample formatter unit tests
-
-scripts/
-├── upload_notebooks.py                 # Deploy notebooks + modules to the Databricks workspace
-├── deploy_job.py                       # Create / reset any of the 3 split jobs (--job main|duty_compute|images)
-└── check_dtc_view.py                   # DTC WIP_ITS_USE column readiness check (Phase 6 pending cols)
-
-docs/                                   # This documentation set
-standalone/beproduct_style_push.py      # Standalone Delta → BeProduct push-back (not in daily pipeline)
-```
-
-**Notebook vs module split (invariant):** notebooks can't run locally (Spark / `dbutils`).
-Deterministic logic lives in `dtc/python/sync/*.py` (pure Python, unit-tested); notebooks are thin Spark/IO wrappers.
+**Notebook vs module split (invariant):** notebooks can't run locally (Spark /
+`dbutils`). Deterministic logic lives in `dtc/python/sync/*.py` (pure Python,
+unit-tested); notebooks are thin Spark/IO wrappers around it.
 
 ---
 
 ## Quick commands
 
 ```bash
-# Unit tests
+# Unit tests (pure Python, no Spark or network)
 python3 dtc/tests/test_phase1.py
 python3 dtc/tests/test_phase2.py
 python3 dtc/tests/test_phase3.py
 python3 dtc/tests/test_samples.py
+python3 dtc/tests/test_bom.py
+python3 dtc/tests/test_duty.py
 
 # DTC view readiness check
 python scripts/check_dtc_view.py
 
-# Deploy
-python scripts/upload_notebooks.py --dry-run
-python scripts/upload_notebooks.py
-python scripts/deploy_job.py --job all                              # preview all 3 (dry-run only)
-python scripts/deploy_job.py --job main --reset-existing 294837488757511
-python scripts/deploy_job.py --job duty_compute --reset-existing 1026599988408090
-python scripts/deploy_job.py --job images --reset-existing 847087837807970
+# Deploy notebooks + modules
+python scripts/upload_notebooks.py                                       # v1 workspace root
+python scripts/upload_notebooks.py --root /Workspace/Repos/beproduct-sync-v2   # v2
+
+# Preview / deploy jobs
+python scripts/deploy_job.py --job v2 --dry-run                          # preview the v2 DAG
+python scripts/deploy_job.py --job v2 --no-schedule                      # create BeProduct_DTC_sync_v2
+python scripts/deploy_job.py --job main --reset-existing 294837488757511  # update the live v1 job
 ```

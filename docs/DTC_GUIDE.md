@@ -3,10 +3,11 @@
 Everything the jobs need about the **DTC** ("Data Collab") side: the API surface
 used, the connector, and the DTC-related tables on Databricks (`lft.beproduct`).
 
-> Cross-platform flow & full data model: `ARCHITECTURE.md`. Phase workflows:
-> `PHASE1_WORKFLOW.md` (BeProduct → DTC), `PHASE2_WORKFLOW.md` (DTC → BeProduct),
-> `PHASE3_WORKFLOW.md` (images). Field-mapping SSOT:
-> `beproduct_style_interested_fields.txt`. Verified API behaviour: `../AGENTS.md`.
+> Systems & data model: [ARCHITECTURE.md](ARCHITECTURE.md). What runs and in
+> what order, with every gate: [PIPELINE.md](PIPELINE.md). Field directions,
+> match keys and the WIP PATCH allow-list: [SYNC_CONTRACT.md](SYNC_CONTRACT.md).
+> Field-mapping SSOT: `beproduct_style_interested_fields.txt`. Verified API
+> behaviour: [../AGENTS.md](../AGENTS.md).
 
 ---
 

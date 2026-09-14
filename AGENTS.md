@@ -3,6 +3,31 @@
 Read this first. It is the durable memory for this repo so each new change can build
 on prior **verified** discoveries instead of re-deriving them.
 
+> ## ⚠️ Branch `v2` — read the v2 docs before the phase descriptions below
+>
+> The pipeline is being consolidated. The three separate DTC write passes
+> (Phase 1 push, Phase 10 push, Phase 9b push) merge into **one write window per
+> request per run**; the two full DTC re-pulls disappear; the job goes fully
+> serverless with no condition tasks. **The v1 job keeps running untouched until
+> cutover**, so everything below remains accurate for v1 — but for what v2 does,
+> read these first:
+>
+> | | |
+> |---|---|
+> | Why v2, what changed, rollout and rollback | `docs/MIGRATION_V1_V2.md` |
+> | What runs, in what order, every gate | `docs/PIPELINE.md` |
+> | Field directions, keys, PATCH allow-list | `docs/SYNC_CONTRACT.md` |
+> | v1 → v2 task map | end of `docs/PIPELINE.md` |
+>
+> The **phase numbering is retired in v2** (Phases 1/7/10/9b-push are one stage
+> now), but it is used throughout this file's verified-discoveries and decisions
+> logs, which are append-only history and were deliberately NOT rewritten. Use
+> the task map when reading them. The archived v1 phase docs are in `docs/v1/`.
+>
+> Ground rules, the SSOT table and every verified discovery below apply
+> UNCHANGED to v2 — v2 restructures *when and how often we write*, not *what we
+> write*.
+
 ## What this repo does
 
 Bi-directional sync between **BeProduct** (style PLM) and **DTC** ("Data Collab"
@@ -23,12 +48,12 @@ sheets), staged through **Databricks/Delta**.
   rows where `id IS NULL OR extracted_at IS NULL OR modified_at > extracted_at`).
   Every Style/Material/Costing task then waits on `phase0_push`
   (`run_if=ALL_DONE`, so disabling `run_phase0` doesn't deadlock them).
-- **Phase 1 — BeProduct → DTC** (`docs/PHASE1_WORKFLOW.md`): push BeProduct-owned
+- **Phase 1 — BeProduct → DTC** (`docs/v1/PHASE1_WORKFLOW.md`; v2: `docs/PIPELINE.md`): push BeProduct-owned
   style fields into the matching DTC request (upsert); create + share missing
   in-scope requests.
-- **Phase 2 — DTC → BeProduct** (`docs/PHASE2_WORKFLOW.md`): push DTC-owned fields
+- **Phase 2 — DTC → BeProduct** (`docs/v1/PHASE2_WORKFLOW.md`; v2: `docs/PIPELINE.md`): push DTC-owned fields
   back into the BeProduct style.
-- **Phase 3 — BeProduct → DTC image** (`docs/PHASE3_WORKFLOW.md`): upload the front
+- **Phase 3 — BeProduct → DTC image** (`docs/v1/PHASE3_WORKFLOW.md`; v2: `docs/PIPELINE.md`): upload the front
   image into the DTC "Style Image" cell (binary, separate step).
 - **Phase 7 — BeProduct → DTC sample history**: push BeProduct sample-app submit
   history (all 6 apps: Proto/PreLine/SMS/Fit/PP/TOP) into the matching DTC status
@@ -163,7 +188,8 @@ sheets), staged through **Databricks/Delta**.
   chain transitively depends on `phase1_push` via `repull_dtc`. Notebook:
   `dtc/notebooks/p10_pull_bom_and_enrich.py`; pure logic + tests:
   `dtc/python/sync/bom.py` / `dtc/tests/test_bom.py`. Full current spec:
-  `docs/PHASE10_WORKFLOW.md`; every gating condition: `docs/PIPELINE_GATES.md`.
+  `docs/v1/PHASE10_WORKFLOW.md`; every gating condition: `docs/PIPELINE.md`
+  (v1 original archived at `docs/v1/PIPELINE_GATES.md`).
 
 Each field syncs **one way only** (no loops). Direction table below.
 Components, data flow, and the full ADB data model: `docs/ARCHITECTURE.md`.
@@ -659,6 +685,86 @@ kept below for historical reference only (see decisions log):**
 
 ## Decisions on record
 
+- **Pipeline consolidated into one DTC write window per request — branch
+  `v2`, 2026-09-14 (owner decision).** Full design record:
+  `docs/MIGRATION_V1_V2.md`; spec: `docs/PIPELINE.md` + `docs/SYNC_CONTRACT.md`.
+  Deployed as a SEPARATE job `BeProduct_DTC_sync_v2` (`deploy_job.py --job v2`)
+  alongside the live v1 job, which keeps running untouched until cutover;
+  rollback is "pause v2, unpause v1" with no data migration (both write the
+  same tables with the same keys, every write idempotent and diff-gated).
+  - **Driver.** DTC's locking behaviour was pinned down precisely with the DTC
+    developer: **only writes** move the request's server-side `last_read`
+    (reads are free), and the scope is **the whole request**, not the view or
+    the row — a write through `WIP_ITS_USE` blocks a user editing a different
+    row through a different view. Mental model: a single table lock that does
+    not release until the user refreshes. This supersedes the vaguer
+    "concurrent-edit limitation" framing in the 2026-09-03 job-split entry.
+  - **The forcing requirement** is CADENCE, not call count: the owner wants a
+    run every ~2 hours during active style development. v1 writes each request
+    at up to 5 moments scattered across the whole DAG, so at 12 runs/day that
+    is 36 write moments and ~6-8 h/day of user-visible exposure — the request
+    would be unusable during working hours. Consolidating the write path is the
+    PRECONDITION for the cadence, not an optimisation. v2: 1 window, <=2 PATCH
+    calls (2 is the floor — `patch_rows` rejects a body mixing rowId and
+    rowIndex).
+  - **What makes it possible.** (a) The transform now emits style x color x
+    material directly by joining the techpack BOM, so `repull_dtc` is
+    unnecessary. (b) `costing_chart` is built from staging (the material
+    dimension we own) x the start-of-run WIP pull (the DTC-owned
+    `lineplan_ref`/vendor slots/production country, which we NEVER write, so a
+    start-of-run pull is current by definition) x LinePlan — so
+    `repull_dtc_bom` is unnecessary. (b) only works because the one blocking
+    dependency is already gone: `Content` used to come from a DTC-internal
+    trigger polling `Mill Fabric Article #` (confirmed unreliable in UAT) and
+    since 2026-09-09 Phase 10 writes it directly.
+  - **Serverless everywhere.** Feasibility was not assumed — it is already
+    proven in v1: `fill_bom_data` has run serverless since 2026-09-02 with the
+    same Workspace-Files `sys.path` pattern; NO task declares `libraries`; the
+    notebooks import only `requests`/`pandas`; and an audit found no
+    `sparkContext`, no `.rdd`, no `spark.conf.set`, no Python UDFs, with
+    `createDataFrame` always called with an explicit schema. Removes
+    `wait_cluster`, the job cluster and the instance pool — and removes the
+    Lakebase constraint that forced the BOM read into its own task, so it
+    collapses into the transform. COST is the open question, not feasibility:
+    measure one real run before retiring the pool.
+  - **No condition tasks at all** (blanket rule, not case-by-case). v1 learned
+    the `EXCLUDED`-cascade lesson twice (`gate_phase1`, `gate_phase10`); v2's
+    chain is linear enough that any gate would excise the whole DTC push. Every
+    `run_*` flag is a plain widget read inside its own notebook, exiting as a
+    SUCCESS no-op. This also sidesteps a latent contradiction in the v1 docs,
+    which claim both that `EXCLUDED` overrides `run_if` unconditionally AND
+    that `gate_phase0` + `run_if=ALL_DONE` is safe — those cannot both be true.
+  - **New invariant, and the one most likely to be broken by a later change:**
+    a run that changes nothing must write NOTHING. Not an emergent property of
+    per-field diffing — asserted and unit-tested in `sync/wip_plan.py`. At 12
+    runs/day this is the difference between safe and intolerable.
+  - **Accepted losses**, recorded so they are not rediscovered as bugs: failure
+    isolation (a BOM/duty bug can now break the whole push — the composition
+    layer MUST degrade a failing contribution to *omitting its keys*, never to
+    failing the row); per-phase gating/retry; three task run_ids collapsing to
+    one. Mid-run user edits are NOT a loss — v2 reads each request live at push
+    time, later in the DAG than v1's `pull_master_dtc`.
+  - **Workspace isolation.** v2 notebooks deploy to
+    `/Workspace/Repos/beproduct-sync-v2` (`upload_notebooks.py --root`) so
+    checking out the branch can never change what the live v1 job executes.
+    OPEN: every notebook hardcodes
+    `sys.path.append("/Workspace/Repos/beproduct-sync/DTC/python")` and must be
+    converted to read the new `module_path` job parameter before the first v2
+    run, or a v2 notebook will import v1's modules.
+  - **Dependency on DTC's roadmap.** The DTC team is building websocket change
+    propagation with client-side merge (limited real concurrent editing). Not
+    shipped, no date. If it ships, the locking rationale largely evaporates —
+    so the justification is deliberately ranked runtime > correctness (v1's
+    Phase 10/9b plan against a stale Delta snapshot while Phase 1 plans against
+    live; v2 puts all three on one live read) > fewer moving parts > locking.
+    Get an ETA before committing to the last stage (the duty merge), which is
+    the most invasive and least valuable of the three.
+  - **Cadence-limiting item that this refactor does NOT fix:** sample-app
+    enrichment is one `app_get` per (style x app) (~876 calls, ~120 s) and is
+    pinned to FULL because app changes do not bump `style.modifiedAt`. At 12
+    runs/day that is ~10,500 BeProduct calls/day and becomes the largest single
+    runtime item once the DTC passes are merged. Recommended: split it onto its
+    own 2-3x/day schedule.
 - **"WIP = style x color x material" — Phase 1's matching engine rebuilt
   around dummy sentinels for blank colorway/BOM state, 2026-09-11 (owner
   spec).** Two real, live gaps prompted this: (1) a style with ZERO

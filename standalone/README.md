@@ -15,7 +15,7 @@ scans `beproduct/` and `dtc/notebooks/`). Deploy them manually when needed
 A standalone, **bi-directional** helper that pushes locally edited rows from a
 Delta styles table back into BeProduct. It is independent of the DTC flow — the
 DTC-driven pushback of DTC-owned fields is **Phase 2**
-(`dtc/notebooks/p2_push_dtc_to_beproduct.py`, see `docs/PHASE2_WORKFLOW.md`).
+(`dtc/notebooks/p2_push_dtc_to_beproduct.py`, see `docs/PIPELINE.md` Stage 50).
 
 **What it does**
 - Detects locally edited rows by comparing timestamps on the styles table:

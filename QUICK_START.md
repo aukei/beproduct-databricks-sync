@@ -3,7 +3,12 @@
 Setup, how to use, and which notebook to run for the BeProduct ⇄ DTC sync.
 
 > Concepts & data model: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
-> Per-phase detail: `docs/PHASE1_WORKFLOW.md`, `PHASE2_WORKFLOW.md`, `PHASE3_WORKFLOW.md`.
+> What runs and in what order: [docs/PIPELINE.md](docs/PIPELINE.md).
+> Field directions and keys: [docs/SYNC_CONTRACT.md](docs/SYNC_CONTRACT.md).
+>
+> **Branch `v2`.** Some notebooks named below are v1 artifacts being
+> superseded — see [docs/MIGRATION_V1_V2.md](docs/MIGRATION_V1_V2.md) for the
+> old → new map and the rollout order.
 
 ---
 

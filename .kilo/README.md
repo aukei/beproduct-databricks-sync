@@ -173,7 +173,7 @@ Additional documentation in the repository:
 - `README.md` - Project overview and structure
 - `QUICK_START.md` - Setup, how to use, which notebook to run
 - `docs/ARCHITECTURE.md` - Components, data flow, and the full ADB data model
-- `docs/PHASE1_WORKFLOW.md` / `docs/PHASE2_WORKFLOW.md` / `docs/PHASE3_WORKFLOW.md` - Per-phase flows
+- `docs/PIPELINE.md` - Stages, ordering and gates (v1 phase docs archived in `docs/v1/`)
 - `docs/BEPRODUCT_GUIDE.md` / `docs/DTC_GUIDE.md` - Per-component API/SDK + ADB tables
 - `docs/beproduct_style_interested_fields.txt` - Field-mapping SSOT
 - `AGENTS.md` - Verified API behaviour & invariants

@@ -65,10 +65,18 @@ BOLD = lambda t: _c("1", t)  # bold
 # CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Workspace root everything is uploaded beneath. Override with --root so the v2
+# branch can deploy to /Workspace/Repos/beproduct-sync-v2 WITHOUT touching what
+# the live v1 job executes -- v1 and v2 notebooks must never share a path, or
+# checking out `v2` would silently change production. See
+# docs/MIGRATION_V1_V2.md ("Workspace isolation").
+DEFAULT_ROOT = "/Workspace/Repos/beproduct-sync"
+
 # Notebook directories: imported as Databricks NOTEBOOKS (extension stripped).
+# (local path, path relative to the workspace root)
 NOTEBOOK_DIRS = [
-    ("beproduct", "/Workspace/Repos/beproduct-sync/beproduct"),
-    ("dtc/notebooks", "/Workspace/Repos/beproduct-sync/DTC/notebooks"),
+    ("beproduct", "beproduct"),
+    ("dtc/notebooks", "DTC/notebooks"),
 ]
 
 # Python module packages: uploaded as importable workspace FILES (extension KEPT).
@@ -78,8 +86,13 @@ NOTEBOOK_DIRS = [
 # through workspace.upload(), not the notebook importer. The target location is a
 # plain workspace folder (NOT a git Repo), so this script is the deployment path.
 MODULE_DIRS = [
-    ("dtc/python", "/Workspace/Repos/beproduct-sync/DTC/python"),
+    ("dtc/python", "DTC/python"),
 ]
+
+
+def _resolve(dirs: list[tuple[str, str]], root: str) -> list[tuple[str, str]]:
+    """Join each (local, relative) pair onto the chosen workspace root."""
+    return [(local, f"{root.rstrip('/')}/{rel}") for local, rel in dirs]
 
 
 def _load_config() -> dict[str, str]:
@@ -310,7 +323,16 @@ def main() -> None:
         "--modules-only", action="store_true",
         help="Upload only python module files (skip notebooks)",
     )
+    parser.add_argument(
+        "--root", default=DEFAULT_ROOT,
+        help=f"Workspace root to upload beneath (default: {DEFAULT_ROOT}). "
+             f"Use /Workspace/Repos/beproduct-sync-v2 for the v2 branch so the "
+             f"live v1 job is never touched.",
+    )
     args = parser.parse_args()
+
+    notebook_dirs = _resolve(NOTEBOOK_DIRS, args.root)
+    module_all_dirs = _resolve(MODULE_DIRS, args.root)
 
     # ── 1. Config ────────────────────────────────────────────────────────────
     cfg = _load_config()
@@ -320,21 +342,22 @@ def main() -> None:
     print(BOLD("  📤 Upload Notebooks to Databricks Workspace"))
     print(BOLD("═" * 60))
     print(INFO(f"  Workspace: {cfg['DATABRICKS_HOST']}"))
+    print(INFO(f"  Root     : {args.root}"))
 
     if args.dry_run:
         print(WARN("  🔍 DRY RUN MODE - No uploads will be executed"))
 
     # ── 2. Filter directories if --dir specified ─────────────────────────────
-    dirs_to_upload = NOTEBOOK_DIRS
+    dirs_to_upload = notebook_dirs
     if args.dir:
         dirs_to_upload = [
             (local, remote)
-            for local, remote in NOTEBOOK_DIRS
+            for local, remote in notebook_dirs
             if local.startswith(args.dir)
         ]
         if not dirs_to_upload:
             print(ERR(f"\n✗ No configured directory matches: {args.dir}"))
-            print(f"  Available directories: {', '.join(d[0] for d in NOTEBOOK_DIRS)}")
+            print(f"  Available directories: {', '.join(d[0] for d in notebook_dirs)}")
             sys.exit(1)
 
     # ── 3. Upload all directories ────────────────────────────────────────────
@@ -359,9 +382,9 @@ def main() -> None:
 
     # Python module files (FILES, not notebooks).
     if not args.notebooks_only:
-        module_dirs = MODULE_DIRS
+        module_dirs = module_all_dirs
         if args.dir:
-            module_dirs = [(l, r) for l, r in MODULE_DIRS if l.startswith(args.dir)]
+            module_dirs = [(l, r) for l, r in module_all_dirs if l.startswith(args.dir)]
         for local_dir, workspace_path in module_dirs:
             print()
             print(BOLD(f"── {local_dir}/  (modules → FILES) ──"))

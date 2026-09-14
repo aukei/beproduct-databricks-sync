@@ -36,8 +36,14 @@ contention surface. Splitting also removes Phase 9b's NT Orbit compute
     whichever main-job run most recently populated them) and does its own
     live `DTCConnector.get_sheet()` read immediately before writing.
 
-Select which to build/deploy with `--job {main,duty_compute,images,all}`
-(see `JOB_SPECS`); all 3 share the same `JOB_PARAMS` definitions (each job's
+  * **`v2`** → `BeProduct_DTC_sync_v2` (branch `v2`) — the consolidated,
+    fully-serverless rewrite of `main`: one DTC write window per request per
+    run instead of three, no re-pulls, no condition tasks. Deployed ALONGSIDE
+    the live `main` job, which keeps running untouched until cutover. See
+    `build_v2_tasks()`, `docs/PIPELINE.md` and `docs/MIGRATION_V1_V2.md`.
+
+Select which to build/deploy with `--job {main,duty_compute,images,v2,all}`
+(see `JOB_SPECS`); all share the same `JOB_PARAMS` definitions (each job's
 tasks only reference the subset they need via `P(...)`) and the same
 Instance Pool (see below), but are otherwise fully independent — separate
 schedules, separate clusters per run, separate job IDs.
@@ -69,7 +75,7 @@ snapshot). It is NOT gated by anything (no longer shared with `phase3_images`
 either, since that task moved to its own `images` job entirely on 2026-09-03).
 
 Phase 10 (BOM enrichment from externally-processed techpack extraction, see
-`docs/PHASE10_WORKFLOW.md`) is placed BEFORE `build_costing_chart` (owner
+`docs/v1/PHASE10_WORKFLOW.md`) is placed BEFORE `build_costing_chart` (owner
 decision 2026-09-02): Fabric Group/Placement/Mill Fabric Article #/Content
 values it fills in must reach `costing_chart`'s `fabric_content` BEFORE the
 `duty_compute` job calls NT Orbit, or the duty classification would be
@@ -142,6 +148,12 @@ Usage
     python scripts/deploy_job.py --job main --reset-existing 294837488757511
                                                   # overwrite an existing job in place
                                                   # (--job duty_compute / --job images for the other 2)
+    python scripts/deploy_job.py --job v2 --dry-run                     # preview the v2 DAG
+    python scripts/deploy_job.py --job v2 --no-schedule                 # CREATE BeProduct_DTC_sync_v2
+                                                  # unscheduled -- the correct first step; its NEW
+                                                  # notebooks must be uploaded to NB_ROOT_V2 first:
+                                                  #   python scripts/upload_notebooks.py \
+                                                  #       --root /Workspace/Repos/beproduct-sync-v2
 
 Requires DATABRICKS_HOST + DATABRICKS_PAT (.env).
 """
@@ -159,6 +171,16 @@ JOB_NAME = "BeProduct_DTC_sync_dag"
 
 NB_BP = "/Workspace/Repos/beproduct-sync/beproduct"
 NB_DTC = "/Workspace/Repos/beproduct-sync/DTC/notebooks"
+
+# ── v2 workspace root (branch `v2`) ─────────────────────────────────────────
+# v2 notebooks deploy to their OWN Workspace root so that checking out the v2
+# branch can never silently change what the live v1 job executes. Upload with
+#     python scripts/upload_notebooks.py --root /Workspace/Repos/beproduct-sync-v2
+# See docs/MIGRATION_V1_V2.md ("Workspace isolation").
+NB_ROOT_V2 = "/Workspace/Repos/beproduct-sync-v2"
+NB_BP_V2 = f"{NB_ROOT_V2}/beproduct"
+NB_DTC_V2 = f"{NB_ROOT_V2}/DTC/notebooks"
+NB_PY_V2 = f"{NB_ROOT_V2}/DTC/python"
 
 SHARED_CLUSTER_KEY = "shared"
 
@@ -253,6 +275,25 @@ JOB_PARAMS = {
     "push_blanks": "false",
     "img_http_timeout": "30",
     "img_max_uploads": "0",
+    # ── v2 only (branch `v2`, job BeProduct_DTC_sync_v2) ────────────────────
+    # Every notebook currently hardcodes
+    #   sys.path.append("/Workspace/Repos/beproduct-sync/DTC/python")
+    # which would make a v2 notebook import v1's modules. The v2 notebooks read
+    # this parameter instead; the default keeps v1 behaviour for any notebook
+    # that hasn't been converted yet. See docs/MIGRATION_V1_V2.md.
+    "module_path": "/Workspace/Repos/beproduct-sync/DTC/python",
+    # v2 run flags. ALL of these are read as plain widgets INSIDE their own
+    # notebook, which exits as a SUCCESS no-op when disabled -- never as a
+    # condition task. Databricks propagates a condition task's EXCLUDED outcome
+    # to every downstream dependent unconditionally, ignoring run_if, and v2's
+    # chain is linear enough that one gate would excise the whole DTC push.
+    # See docs/PIPELINE.md design rule 4.
+    "run_bom": "true",            # Stage 20: join techpack BOM into staging (was run_phase10)
+    "run_costing": "true",        # Stage 30: build costing_chart        (was run_phase9a)
+    "run_wip_push": "true",       # Stage 40: the single DTC write       (was run_phase1)
+    "run_duty_push": "true",      # Stage 40: duty contribution only     (was run_phase9b)
+    "bom_table": "customer_teckpack_style_latest",  # resolves latest_techpack_style_log_id
+    "bom_log_table": "customer_teckpack_style_log",  # custom_fields -- the actual BOM source
 }
 
 
@@ -607,6 +648,156 @@ def build_images_tasks():
     })]
 
 
+def build_v2_tasks():
+    """v2 main job (`BeProduct_DTC_sync_v2`) -- branch `v2`.
+
+    Full specification: docs/PIPELINE.md. Rationale: docs/MIGRATION_V1_V2.md.
+
+    The one thing this DAG is built around: DTC uses permissive optimistic
+    locking at REQUEST granularity. Any successful write moves the request's
+    server-side `last_read`, and every browser session that loaded earlier is
+    then refused on save and silently loses in-progress edits. Confirmed with
+    the DTC developer 2026-09-14: only WRITES move it (reads are free), and the
+    scope is the whole request -- a write through WIP_ITS_USE blocks a user
+    editing a different row through a different view.
+
+    v1 writes each request at up to 5 moments scattered across the whole DAG
+    (phase1_push updates/inserts/orphans, fill_bom_data updates/inserts,
+    push_duty_rates updates). At the target cadence -- a run every ~2 hours
+    during active style development -- that is 36 write moments a day and
+    ~6-8 h/day of user-visible exposure. v2 writes each request at exactly ONE
+    point, in <=2 back-to-back calls (2 is the floor: patch_rows rejects a body
+    mixing rowId and rowIndex). Consolidating the write path is the
+    PRECONDITION for the cadence, not an optimisation.
+
+        p0_pull -> p0_upsert -> p0_push -+-> bp_style_sync ----> transform -+-> request_manager -+
+                                         |                                 |                    |
+                                         +-> pull_master_dtc --------------+--------------------+
+                                         |          |                      |                    |
+                                         |          +-> phase2_push        |                    |
+                                         |                                 |                    |
+                                         +-> pull_lineplan_dtc ------------+-> build_costing ---+
+                                                                                                |
+                                                                                                v
+                                                                                            wip_push
+                                                                          (the only DTC write in this job)
+
+    Differences from build_main_tasks() beyond the merge:
+
+      * SERVERLESS everywhere (no job_cluster_key, no instance pool, no
+        wait_cluster). Proven in v1: fill_bom_data has run serverless since
+        2026-09-02 with the same Workspace-Files sys.path pattern, no task
+        declares `libraries`, and nothing uses sparkContext/.rdd/UDFs/
+        spark.conf.set. Also removes the Lakebase constraint that forced the
+        BOM read into its own task, so it collapses into `transform`.
+      * NO CONDITION TASKS. See the run_* parameters in JOB_PARAMS.
+      * No repull_dtc / repull_dtc_bom -- `transform` emits style x color x
+        material directly, and `build_costing` reads staging + the start-of-run
+        pull instead of a round-trip through DTC.
+      * Every edge is run_if=ALL_DONE: a failed stage should degrade the run,
+        not abort it. Notably wip_push still pushes style/BOM/sample data when
+        build_costing failed; it just contributes no duty fields that round.
+
+    Notebooks marked NEW below do not exist yet -- this job definition is the
+    spec they are built against. Deploy it with --no-schedule until they land.
+    """
+    def v2_task(task_key, notebook_path, params, depends=None):
+        # serverless=True => no job_cluster_key; ALL_DONE => degrade, don't abort.
+        return nb_task(task_key, notebook_path, {"module_path": P("module_path"), **params},
+                       depends=depends, run_if=jobs.RunIf.ALL_DONE, serverless=True)
+
+    tasks = []
+
+    # ── Stage 00: DTC XTS Master -> BeProduct Directory (unchanged) ──────────
+    tasks.append(v2_task("phase0_pull", f"{NB_DTC_V2}/p0_pull_xts_master_to_delta", {
+        "catalog": CAT, "schema": SCH, "customer": CUST, "dtc_workspace": WS,
+        "dtc_document": XTS_DOC, "dtc_environment": ENV, "dry_run": DRY,
+        "run_phase0": P("run_phase0"),
+    }))
+    tasks.append(v2_task("phase0_upsert", f"{NB_BP_V2}/p0_xts_master_to_directory_upsert", {
+        "catalog": CAT, "schema": SCH, "customer": CUST, "dry_run": DRY,
+    }, depends=[dep("phase0_pull")]))
+    tasks.append(v2_task("phase0_push", f"{NB_BP_V2}/p5utl_beproduct_master_data_sync", {
+        "catalog": CAT, "schema": SCH, "mode": "PUSH_DIRECTORY", "dry_run": DRY,
+    }, depends=[dep("phase0_upsert")]))
+
+    # ── Stage 10: three independent source pulls, in parallel ───────────────
+    tasks.append(v2_task("bp_style_sync", f"{NB_BP_V2}/p1p7_beproduct_style_sync", {
+        "catalog": CAT, "schema": SCH, "folder_name": P("folder_name"),
+        "refresh_mode": P("refresh_mode"),
+    }, depends=[dep("phase0_push")]))
+    tasks.append(v2_task("pull_master_dtc", f"{NB_DTC_V2}/p1_pull_masters_to_delta", {
+        "catalog": CAT, "schema": SCH, "customer": CUST, "dtc_workspace": WS,
+        "dtc_document": DOC, "dtc_environment": ENV,
+    }, depends=[dep("phase0_push")]))
+    tasks.append(v2_task("pull_lineplan_dtc", f"{NB_DTC_V2}/p9a_pull_lineplan_to_delta", {
+        "catalog": CAT, "schema": SCH, "customer": CUST, "dtc_workspace": WS,
+        "dtc_document": LINEPLAN_DOC, "dtc_environment": ENV,
+    }, depends=[dep("phase0_push")]))
+
+    # ── Stage 20: transform -> style x color x material staging (NEW) ───────
+    # The structural heart of v2. v1's transform emitted style x color and
+    # Phase 10 later fanned it out to style x color x material by pushing to
+    # DTC, re-pulling, and planning a second time. This joins the techpack BOM
+    # (alb_tpm_<env>, Lakebase -- serverless-only, which is free now) directly,
+    # so repull_dtc disappears. run_bom=false disables only the BOM join,
+    # leaving style x color staging intact.
+    tasks.append(v2_task("transform", f"{NB_BP_V2}/v2_build_wip_staging", {   # NEW
+        "catalog": CAT, "schema": SCH, "customer": CUST, "folder_name": P("folder_name"),
+        "run_bom": P("run_bom"),
+        "bom_catalog": P("bom_catalog"), "bom_table": P("bom_table"),
+        "bom_log_table": P("bom_log_table"), "bom_customer_name": P("bom_customer_name"),
+    }, depends=[dep("bp_style_sync")]))
+
+    # ── Stage 25: resolve / create / share requests (unchanged) ─────────────
+    tasks.append(v2_task("request_manager", f"{NB_BP_V2}/p1_dtc_request_manager", {
+        "catalog": CAT, "schema": SCH, "customer": CUST, "dtc_workspace": WS,
+        "dtc_document": DOC, "dtc_environment": ENV, "dry_run": DRY,
+    }, depends=[dep("transform"), dep("pull_master_dtc")]))
+
+    # ── Stage 30: costing_chart from staging, not from a re-pull (NEW) ──────
+    # staging (material dimension, which we own) x pull_master_dtc (DTC-owned
+    # lineplan_ref / vendor slots / production country, which we never write,
+    # so the start-of-run pull is current by definition) x LinePlan.
+    # Also fills every duty field directly from nt_orbit_duty_cache (read-only,
+    # zero API calls) so a brand-new row is filled the instant its exact
+    # product+origin+market combination has ever been looked up.
+    tasks.append(v2_task("build_costing", f"{NB_DTC_V2}/v2_build_costing_chart", {  # NEW
+        "catalog": CAT, "schema": SCH, "customer": CUST,
+        "costing_chart_table": COSTING_TABLE,
+        "duty_cache_table": P("duty_cache_table"),
+        "cache_ttl_days": P("duty_cache_ttl_days"),
+        "run_costing": P("run_costing"),
+    }, depends=[dep("transform"), dep("pull_master_dtc"), dep("pull_lineplan_dtc")]))
+
+    # ── Stage 40: THE single DTC write window (NEW) ─────────────────────────
+    # Replaces v1's phase1_push (Phases 1/4/7) + fill_bom_data (Phase 10) +
+    # push_duty_rates (Phase 9b push half). Per request: ONE live get_sheet, one
+    # combined plan (sync/wip_plan.py composing phase1/bom/duty -- it composes,
+    # it does not re-implement), then one PATCH of updates keyed by rowId and
+    # one PATCH of inserts keyed by rowIndex, back to back.
+    #
+    # INVARIANT: if the combined plan is empty, send NOTHING -- no GET-to-PATCH
+    # path, zero calls, zero user disruption. At 12 runs/day this is the
+    # difference between safe and intolerable. It is asserted and unit-tested,
+    # not left to emerge from per-field diffing.
+    tasks.append(v2_task("wip_push", f"{NB_DTC_V2}/v2_wip_push", {            # NEW
+        "catalog": CAT, "schema": SCH, "customer": CUST, "dtc_workspace": WS,
+        "dtc_document": DOC, "dtc_environment": ENV, "dry_run": DRY,
+        "delta_only": P("delta_only"), "batch_size": "100",
+        "costing_chart_table": COSTING_TABLE,
+        "run_wip_push": P("run_wip_push"), "run_duty_push": P("run_duty_push"),
+    }, depends=[dep("request_manager"), dep("build_costing")]))
+
+    # ── Stage 50: DTC -> BeProduct (unchanged; writes BeProduct, never DTC) ──
+    tasks.append(v2_task("phase2_push", f"{NB_DTC_V2}/p2_push_dtc_to_beproduct", {
+        "catalog": CAT, "schema": SCH, "customer": CUST, "dtc_environment": ENV,
+        "dry_run": DRY, "push_blanks": P("push_blanks"), "run_phase2": P("run_phase2"),
+    }, depends=[dep("transform"), dep("pull_master_dtc")]))
+
+    return tasks
+
+
 def _build_cluster() -> compute.ClusterSpec:
     """Build the shared job cluster spec.
 
@@ -664,17 +855,37 @@ JOB_SPECS = {
         "display_name": "BeProduct_DTC_sync_images",
         "build_tasks": build_images_tasks,
     },
+    # ── v2 (branch `v2`) ────────────────────────────────────────────────────
+    # A SEPARATE job deployed alongside the live v1 job, not a replacement for
+    # it: v1 keeps running untouched on `master` throughout the migration, so
+    # rollback is "pause v2, unpause v1" with no data migration (both write the
+    # same tables with the same keys, and every write is idempotent and
+    # diff-gated). serverless=True => no job_clusters block at all.
+    # Deploy with --no-schedule until the NEW notebooks land; see
+    # docs/MIGRATION_V1_V2.md ("Rollout").
+    "v2": {
+        "display_name": "BeProduct_DTC_sync_v2",
+        "build_tasks": build_v2_tasks,
+        "serverless": True,
+        # v2 imports its modules from its OWN workspace root, never v1's.
+        "param_overrides": {"module_path": NB_PY_V2},
+    },
 }
 
 
 def build_settings(job_key: str, schedule: "jobs.CronSchedule | None" = JOB_SCHEDULE) -> jobs.JobSettings:
     spec = JOB_SPECS[job_key]
+    # A fully-serverless job declares no job clusters; every task simply omits
+    # job_cluster_key (see nb_task(serverless=True)).
+    job_clusters = None if spec.get("serverless") else [
+        jobs.JobCluster(job_cluster_key=SHARED_CLUSTER_KEY, new_cluster=_build_cluster())
+    ]
+    params = {**JOB_PARAMS, **spec.get("param_overrides", {})}
     return jobs.JobSettings(
         name=spec["display_name"],
         tasks=spec["build_tasks"](),
-        job_clusters=[jobs.JobCluster(job_cluster_key=SHARED_CLUSTER_KEY,
-                                      new_cluster=_build_cluster())],
-        parameters=[jobs.JobParameterDefinition(name=k, default=v) for k, v in JOB_PARAMS.items()],
+        job_clusters=job_clusters,
+        parameters=[jobs.JobParameterDefinition(name=k, default=v) for k, v in params.items()],
         max_concurrent_runs=1,
         schedule=schedule,
         tags=JOB_TAGS,
@@ -689,7 +900,10 @@ def _preview(settings: jobs.JobSettings):
                  if sched else "none (deploy manually)")
     print(f"Job name : {settings.name}")
     print(f"Schedule : {sched_str}")
-    print(f"Cluster  : {NODE_TYPE} single_node=True engine=STANDARD  pool={INSTANCE_POOL_ID}")
+    if settings.job_clusters:
+        print(f"Cluster  : {NODE_TYPE} single_node=True engine=STANDARD  pool={INSTANCE_POOL_ID}")
+    else:
+        print("Cluster  : SERVERLESS (no job cluster, no instance pool)")
     print(f"Log dest : {CLUSTER_LOG_DEST or 'none'}")
     print(f"Tags     : {settings.tags}")
     print("\nTask graph:")
@@ -706,10 +920,10 @@ def _preview(settings: jobs.JobSettings):
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Deploy the BeProduct<->DTC jobs (main / duty_compute / images -- split 2026-09-03).")
+        description="Deploy the BeProduct<->DTC jobs (main / duty_compute / images / v2).")
     ap.add_argument("--job", choices=list(JOB_SPECS) + ["all"], default="main",
                     help="which job spec to act on (default: main, for backward compatibility). "
-                         "'all' previews all 3 (dry-run only).")
+                         "'all' previews every spec (dry-run only).")
     ap.add_argument("--dry-run", action="store_true", help="print the graph/settings; do not apply")
     ap.add_argument("--reset-existing", metavar="JOB_ID", type=int,
                     help="overwrite an existing job (reset) instead of creating a new one; "
