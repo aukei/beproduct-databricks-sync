@@ -666,7 +666,10 @@ def build_duty_compute_tasks():
     Phase 0/1/2/10/9a or the DTC WIP push in the main job. See
     dtc/notebooks/p9b1_compute_duty_rates.py and AGENTS.md decisions log.
     """
-    return [nb_task("compute_duty_rates", f"{NB_DTC}/p9b1_compute_duty_rates", {
+    # Deployed from the v2 workspace root (the v1 root is frozen at the v1
+    # branch) and therefore needs module_path pointed there too.
+    return [nb_task("compute_duty_rates", f"{NB_DTC_V2}/p9b1_compute_duty_rates", {
+        "module_path":           NB_PY_V2,
         "catalog":               CAT,
         "schema":                SCH,
         "costing_chart_table":   COSTING_TABLE,
@@ -970,6 +973,14 @@ JOB_SPECS = {
         "display_name": "BeProduct_DTC_sync_duty_compute",
         "build_tasks": build_duty_compute_tasks,
         "schedule": JOB_SCHEDULE_DUTY,
+        # Serverless as of 2026-09-15: once the main DAG moved off the classic
+        # cluster, this was the only remaining job using the Instance Pool, so
+        # keeping it on classic meant paying for warm VMs to serve two runs a
+        # day. Audited clean for Spark Connect -- no sparkContext/.rdd/UDFs/
+        # unbound DataFrame methods; it is driver-side HTTP plus
+        # createDataFrame/tempView/MERGE, all of which the 2026-09-14 smoke
+        # check confirmed on serverless. Retiring the pool is now unblocked.
+        "serverless": True,
     },
     "images": {
         "display_name": "BeProduct_DTC_sync_images",
@@ -1008,15 +1019,27 @@ def build_settings(job_key: str, schedule=_SCHEDULE_SENTINEL) -> jobs.JobSetting
     # An explicit `schedule=` argument still wins, so --no-schedule works.
     if schedule is _SCHEDULE_SENTINEL:
         schedule = spec.get("schedule", JOB_SCHEDULE)
-    # A fully-serverless job declares no job clusters; every task simply omits
-    # job_cluster_key (see nb_task(serverless=True)).
-    job_clusters = None if spec.get("serverless") else [
-        jobs.JobCluster(job_cluster_key=SHARED_CLUSTER_KEY, new_cluster=_build_cluster())
-    ]
+    # A fully-serverless job declares no job clusters. The SPEC FLAG IS
+    # AUTHORITATIVE: any job_cluster_key a build_tasks() helper set is stripped
+    # here, rather than trusting every task to pass serverless=True itself.
+    #
+    # Learned the hard way 2026-09-15: marking `duty_compute` serverless in the
+    # spec while its build_tasks() still called plain nb_task() produced
+    # "Job cluster 'shared' is not defined in field 'job_clusters'" -- a task
+    # referencing a cluster the settings no longer declare. Deriving one from
+    # the other removes the whole class of mismatch.
+    tasks = spec["build_tasks"]()
+    if spec.get("serverless"):
+        for _t in tasks:
+            _t.job_cluster_key = None
+        job_clusters = None
+    else:
+        job_clusters = [jobs.JobCluster(job_cluster_key=SHARED_CLUSTER_KEY,
+                                        new_cluster=_build_cluster())]
     params = {**JOB_PARAMS, **spec.get("param_overrides", {})}
     return jobs.JobSettings(
         name=spec["display_name"],
-        tasks=spec["build_tasks"](),
+        tasks=tasks,
         job_clusters=job_clusters,
         parameters=[jobs.JobParameterDefinition(name=k, default=v) for k, v in params.items()],
         max_concurrent_runs=1,

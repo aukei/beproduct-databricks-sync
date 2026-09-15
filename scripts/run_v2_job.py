@@ -62,7 +62,13 @@ def main() -> int:
     print("=" * 78)
     print(f"  parameter overrides: {overrides or '(none -- job defaults)'}")
     if overrides.get("dry_run", "").lower() == "false":
-        print("  ⚠  dry_run=false -- this run WILL write to live DTC")
+        # Which external systems a real run touches depends on the job: the
+        # main DAG writes DTC and BeProduct; duty_compute has ZERO DTC contact
+        # and only calls NT Orbit + writes Delta.
+        touches = ("NT Orbit + Delta (no DTC contact)"
+                   if "duty" in (job.settings.name or "").lower()
+                   else "live DTC and BeProduct")
+        print(f"  ⚠  dry_run=false -- this run WILL write to {touches}")
 
     run_id = w.jobs.run_now(job_id=args.job_id,
                             job_parameters=overrides or None).run_id

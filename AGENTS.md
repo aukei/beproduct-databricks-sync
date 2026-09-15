@@ -365,6 +365,41 @@ this stays true by construction; verify it stays true after any change).
 
 ## Verified discoveries log (append-dated; do not delete)
 
+**`duty_compute` moved to SERVERLESS (2026-09-15):**
+- Audited clean first (no `sparkContext` / `.rdd` / UDFs / unbound
+  `DataFrame.<method>` / `%pip` in the notebook or in `connectors/nt_orbit.py`
+  / `client/entra_auth.py`). It is driver-side HTTP plus
+  `createDataFrame` + tempView + `MERGE`, all confirmed on serverless by the
+  2026-09-14 smoke check.
+- **Result: setup 112 s -> 5 s, wall 201 s -> 53 s.** Entra delegated OAuth,
+  the rotated-refresh-token persist, the NT Orbit calls and the cache MERGE all
+  work unchanged.
+- Deployed from the **v2 workspace root** with `module_path` pointed there, like
+  every other v2 task -- the v1 root is frozen.
+- **`build_settings()` now makes the spec's `serverless` flag AUTHORITATIVE**,
+  stripping any `job_cluster_key` a `build_tasks()` helper set. Learned the hard
+  way: marking the spec serverless while `build_duty_compute_tasks()` still
+  called plain `nb_task()` produced `InvalidParameterValue: Job cluster 'shared'
+  is not defined in field 'job_clusters'` -- a task referencing a cluster the
+  settings no longer declare. Worse, the failed deploy left the job on its OLD
+  classic settings, and the next run silently used them (visible only as a
+  112 s setup). Deriving one from the other removes the class of mismatch.
+
+**CORRECTION -- the predicted NT Orbit cache-miss burst did NOT happen, and
+should not have been predicted (2026-09-15):**
+- I warned that `sub_class` filling would change `product_description`, hence
+  `duty.cache_key()`, hence force fresh NT Orbit lookups for those rows. The
+  live run made **ZERO** new lookups: `nt_orbit_duty_cache` stayed at 71
+  entries with its newest `looked_up_at` still 04:33, from before the change.
+- **Why the reasoning was wrong:** `markets_needing_lookup()` only triggers on
+  a row whose duty field is BLANK. A changed cache key is irrelevant to a row
+  that never asks for a lookup. All 7 `costing_chart` rows already carried
+  `hts_code` / `duty_rate_us` -- Step 4 reads them from the live WIP row as a
+  fallback -- so nothing was blank and nothing was re-queried.
+- The cache key only matters for rows that ARE blank. Changing
+  `PRODUCT_DESCRIPTION_COLS` therefore costs new lookups only for genuinely
+  unfilled rows, not for every row whose description text moved.
+
 **Final v2 topology -- TWO jobs (owner decision 2026-09-15):**
 - **`BeProduct_DTC_sync_v2`** (367710575109755) -- 13 tasks, serverless,
   **every 2 h at :05 on ODD hours (01,03,…,23) HKT**, 12 runs/day. Now includes

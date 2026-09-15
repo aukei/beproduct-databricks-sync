@@ -103,7 +103,8 @@ standalone images job is paused and superseded. Only one companion job remains:
 
 ```
 BeProduct_DTC_sync_duty_compute   compute_duty_rates   NT Orbit → nt_orbit_duty_cache + costing_chart.
-                                                       Zero DTC contact. 10:00 and 15:00 HKT.
+                                                       Zero DTC contact. Serverless.
+                                                       10:00 and 15:00 HKT.
 ```
 
 ---
