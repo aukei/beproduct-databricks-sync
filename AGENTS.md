@@ -365,6 +365,34 @@ this stays true by construction; verify it stays true after any change).
 
 ## Verified discoveries log (append-dated; do not delete)
 
+**v2 LIVE + SCHEDULED (2026-09-15) -- the invariant proven against real DTC:**
+- **Real run** (job 367710575109755, `dry_run=false`): SUCCESS, 12/12 tasks,
+  263 s wall. `wip_push` pushed **40 updates in 1 PATCH call, 1 write window**,
+  0 exceptions / violations / degraded contributions.
+- **Second consecutive real run: 60 NOOPs, 0 updates, 0 PATCH calls, ZERO write
+  windows opened.** This is the zero-diff-zero-write invariant confirmed
+  end-to-end against live DTC rather than in unit tests -- the single property
+  the 2-hourly cadence depends on. Wall 217 s.
+- **Drift repaired and verified in DTC**: `Sub Class` went from 15 filled / 45
+  blank to **57 filled / 3 blank**. The 3 remaining blanks are rows with no
+  matching staging row, i.e. nothing in BeProduct to source them from -- correct,
+  not a miss. `KTB-00024`/`Black`'s six physical rows now all carry the same
+  value; that was the case where v1's style-level pre-filters had left one row
+  populated and five blank, unreachable forever.
+- **`Content` untouched by both runs**, confirming the write-once rule: DTC's
+  own notation (`97% Cotton / 3% Spandex`) survives, and the BOM's
+  (`Cotton 97%, Spandex 3%`) is only used to fill a blank cell. Without this
+  the 2-hourly schedule would have opened a write window on EVERY run forever.
+- **SCHEDULED: every 2 hours at :05 on ODD hours (01,03,…,23) HKT**, 12 runs/day
+  -- `JOB_SCHEDULE_V2`, quartz `0 5 1,3,5,7,9,11,13,15,17,19,21,23 * * ?`,
+  UNPAUSED. `deploy_job.py` now supports a PER-SPEC schedule (`JOB_SPECS[...]
+  ["schedule"]`); the v1 jobs keep their own 3x/day cron, and `--no-schedule`
+  still overrides. A fixed predictable minute is deliberate: users can learn
+  that the pipeline writes at five past the odd hour.
+- The v1 jobs (`main`, `duty_compute`, `images`) were all PAUSED throughout.
+  **`duty_compute` and `images` are still paused and must be re-enabled
+  separately** -- v2 replaces only the main DAG.
+
 **v2 END-TO-END RUN -- job `BeProduct_DTC_sync_v2` = 367710575109755
 (2026-09-15, run 51302327795660, dry_run=true):**
 - **SUCCESS. All 12 tasks, 278 s wall.** First time the stages ran in sequence

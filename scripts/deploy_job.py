@@ -231,6 +231,24 @@ JOB_SCHEDULE = jobs.CronSchedule(
 )
 
 # ── Job-level tags and queue (retrieved 2026-06-20) ─────────────────────────
+# ── v2 schedule (owner spec 2026-09-15) ─────────────────────────────────────
+# Every 2 hours at :05, on ODD hours (01,03,…,23) HKT.
+#
+# The cadence is the whole reason v2 exists: at 12 runs/day v1's ~3 write
+# windows per request per run would have meant ~36 disruptive moments a day.
+# v2 opens ONE window per request, and only when something actually changed --
+# live-confirmed on 2026-09-15 that a second consecutive run issues zero PATCH
+# calls and opens zero windows.
+#
+# A fixed, predictable minute matters operationally: users can learn that the
+# pipeline writes at five past the odd hour, rather than being interrupted at
+# arbitrary times.
+JOB_SCHEDULE_V2 = jobs.CronSchedule(
+    quartz_cron_expression="0 5 1,3,5,7,9,11,13,15,17,19,21,23 * * ?",
+    timezone_id="Asia/Hong_Kong",
+    pause_status=jobs.PauseStatus.UNPAUSED,
+)
+
 JOB_TAGS = {"userpurpose": "lft-job-bpsync"}
 JOB_QUEUE = jobs.QueueSettings(enabled=True)
 
@@ -933,12 +951,20 @@ JOB_SPECS = {
         # invariant makes a full scan cost ZERO extra API calls. See
         # build_v2_tasks() and docs/MIGRATION_V1_V2.md.
         "param_overrides": {"module_path": NB_PY_V2, "delta_only": "false"},
+        "schedule": JOB_SCHEDULE_V2,
     },
 }
 
 
-def build_settings(job_key: str, schedule: "jobs.CronSchedule | None" = JOB_SCHEDULE) -> jobs.JobSettings:
+_SCHEDULE_SENTINEL = object()
+
+
+def build_settings(job_key: str, schedule=_SCHEDULE_SENTINEL) -> jobs.JobSettings:
     spec = JOB_SPECS[job_key]
+    # A spec may carry its OWN cron (v2 runs 2-hourly, the v1 jobs 3x/day).
+    # An explicit `schedule=` argument still wins, so --no-schedule works.
+    if schedule is _SCHEDULE_SENTINEL:
+        schedule = spec.get("schedule", JOB_SCHEDULE)
     # A fully-serverless job declares no job clusters; every task simply omits
     # job_cluster_key (see nb_task(serverless=True)).
     job_clusters = None if spec.get("serverless") else [
@@ -996,7 +1022,9 @@ def main():
                     help="omit the cron schedule from the deployed settings (useful for test jobs)")
     args = ap.parse_args()
 
-    schedule = None if args.no_schedule else JOB_SCHEDULE
+    # Only override when --no-schedule is given; otherwise let each spec supply
+    # its own cron (v2 is 2-hourly, the v1 jobs 3x/day).
+    schedule = None if args.no_schedule else _SCHEDULE_SENTINEL
 
     if args.job == "all":
         if args.reset_existing:

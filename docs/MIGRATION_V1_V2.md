@@ -357,6 +357,28 @@ on the ~145-style `KTB` folder, this on `TEST KTB` with 8 styles.
 `wip_push` matched its isolated behaviour exactly: 40 updates, `Sub Class` only,
 **1 PATCH call, 1 write window**, zero violations or degraded contributions.
 
+### Live cutover (2026-09-15)
+
+`BeProduct_DTC_sync_v2` = job **367710575109755**, **scheduled every 2 hours at
+:05 on odd hours (01,03,…,23) HKT** — 12 runs/day, serverless, unpaused.
+
+| | result |
+|---|---|
+| First real run (`dry_run=false`) | 40 updates, **1 PATCH call, 1 write window**, 263 s |
+| Second consecutive real run | 60 noops, **0 PATCH calls, 0 write windows**, 217 s |
+
+The second run is the point: **the zero-diff-zero-write invariant confirmed
+against live DTC**, not just in unit tests. That is the single property the
+2-hourly cadence depends on.
+
+Drift repaired and verified: `Sub Class` went from 15 filled / 45 blank to 57
+filled / 3 blank (the 3 have no staging row to source from). `Content` was
+untouched by both runs, confirming the write-once rule holds — without it, every
+run would have opened a window forever.
+
+**The v1 jobs remain paused.** `duty_compute` and `images` are paused too and
+must be re-enabled separately; v2 replaces only the main DAG.
+
 ### Validation before cutover
 
 1. Deploy `BeProduct_DTC_sync_v2` **unscheduled** (`--no-schedule`) and with
