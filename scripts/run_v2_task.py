@@ -56,6 +56,7 @@ NOTEBOOK_DIRS = {
     "v2_wip_push": "DTC/notebooks",
     "v2_build_costing_chart": "DTC/notebooks",
     "v2_smoke_check": "DTC/notebooks",
+    "v2_probe_write": "DTC/notebooks",
     "p1p7_beproduct_to_dtc_transform": "beproduct",
     "p1_dtc_request_manager": "beproduct",
     "p1_pull_masters_to_delta": "DTC/notebooks",

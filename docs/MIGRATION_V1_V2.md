@@ -385,6 +385,37 @@ Scale-checked at production size: **linear**, 36 ms for 250 styles / 1500 rows
 (0.024 ms/row, flat from 8 to 500 styles), and `is_empty()` holds throughout on
 a settled dataset.
 
+**Coverage: both pre-filters are OFF in v2 (decided 2026-09-15)**
+
+v1 gates coverage with two **style-level** filters that run *before any field is
+compared*: `sync_status = 'pending'` on the staging row, and
+`beproduct_modified_at > last_pushed` (`delta_only`). Note the granularity —
+`beproduct_modified_at` is the **style header's** timestamp (all colours share
+it) and `last_pushed` is stamped on the **request**. So the question asked is
+*"was this style touched since anything in this request was last pushed?"*
+Field-level diffing happens only afterwards, on whatever survives.
+
+The consequence is that a cell out of sync for any reason other than "this style
+just changed" is invisible **permanently**. Live evidence in UAT:
+`KTB-00024`/`Black` has six physical rows of the same style and colour and only
+one carries `Sub Class`; across the request, 40 of 60 rows are missing it while
+all 40 have a staging row holding a real value.
+
+In v1 these filters bought cheap pushes. **In v2 they buy nothing** — the
+zero-diff-zero-write invariant means considering every row costs zero extra API
+calls when nothing differs (planning measured at 36 ms for 250 styles / 1500
+rows). They now only cost correctness, so both default to `false`.
+
+> **Expect a one-off catch-up on the first real v2 run.** In UAT that is 60 rows
+> — but still **one write window and one PATCH call**, which is precisely the
+> cost model v2 exists to create. Review a `dry_run=true` run's `sample_changes`
+> before cutover: it shows concrete current-vs-new values, which is what
+> distinguishes a genuine correction from a diffing bug. (It already earned its
+> keep: a `Content` write planned on all 60 rows looked like a bug until the
+> values showed live DTC holding `"100% test from ML"` against the techpack
+> BOM's `"test from ML 100%"` — real drift, and BOM has owned `Content` since
+> 2026-09-09.)
+
 **Cadence-limiting, independent of this refactor**
 
 - **Sample-app enrichment.** One `app_get` per (style × app) — ~876 calls, ~120 s
@@ -400,6 +431,15 @@ a settled dataset.
   that changes maybe twice a day. The v2 plan builder should carry a delta filter
   across all three contributions.
 - **Serverless cost.** Measure one real run before retiring the instance pool.
+- **The sacrificial request is gone.** `KTB FW26 Wrangler`
+  (`6a26581854e92e7acd8fa71b`) is no longer active or in scope — every FW26
+  request is now `(BACKUP)`-named, and only 1 of 85 registry rows is active and
+  in scope. AGENTS.md ground rule #1 needs a new reversible-write-test target
+  before the next live experiment.
+- **Duplicate request references.** `dtc_request_registry` can hold several rows
+  with the same `request_reference` (one active, one inactive sibling).
+  Resolving by name alone silently picks the wrong sheet — always filter
+  `request_is_active='Y' AND in_scope` and refuse on ambiguity.
 
 **Deferred**
 

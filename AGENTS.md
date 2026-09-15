@@ -364,56 +364,74 @@ this stays true by construction; verify it stays true after any change).
 
 ## Verified discoveries log (append-dated; do not delete)
 
-**v2 stage-3 live dry-run validation (2026-09-15, runs 825470679933630 /
-364534660603185, UAT `TEST KTB`):**
+**v2 stage-3 live validation + the "Sub Class" investigation (2026-09-15, UAT
+`TEST KTB`, runs 825470679933630 / 364534660603185 / probe):**
 - `v2_pull_bom_segments` on serverless: 8/8 in-scope styles matched the two-hop
-  Lakebase join, 8/8 have a Main Fabric segment, 14 "Fabric" segments total,
-  0 unparseable payloads. setup 6 s / exec 77 s.
-- `v2_wip_push` in dry_run with `delta_only=true` (the deployed default):
-  **60 live rows read, 60 NOOP, 0 PATCH calls, 0 write windows opened.** This is
-  the key cross-check for the whole revamp -- given the state v1 produced, v2's
-  planner independently concludes there is nothing to do, i.e. v2 AGREES with
-  v1's output rather than wanting to rewrite it.
-- Row accounting is exact and confirms the style x color x material broadcast:
-  5 staging rows -> 14 physical row updates (one `(BP Style#, Color / Wash)`
-  key matches several physical rows, and `compute_upsert` broadcasts
-  material-independent field updates to all of them), and 46 + 14 = 60 live
-  rows. No row is unaccounted for.
-- The duty contribution matched 7 `costing_chart` rows and wrote NOTHING,
-  because all 7 offered only `tariff_rate`, which has no live WIP column
-  (`WIP_TARIFF_COLS_LIVE = False`). Correct behaviour, and visible in the
-  summary as `diagnostics.duty_values_not_writable = 7` rather than silence.
-- **LIVE DATA-QUALITY FINDING (v1, NOT introduced by v2): 14 DTC rows have a
-  BLANK `Sub Class` while BeProduct holds a real value, and `delta_only=true`
-  means neither v1 nor v2 will ever retry them.** Evidence:
-    * `beproduct_to_dtc_sync_log` shows v1 pushing 13 x `{"Sub Class": "..."}`
-      UPDATEs at 2026-09-15T04:26:11, every one logged `status=ok` (DTC
-      returned 204).
-    * Live DTC (read directly by `v2_wip_push`) still has those cells blank,
-      as does the post-push `dtc_wip_ktb` snapshot.
-    * `beproduct_modified_at` = 04:26:22 is now OLDER than `last_pushed` =
-      06:24:19, so the delta filter excludes these rows from every future run.
-      The blanks are stuck until BeProduct touches the style again.
-  **Ruled out**: the column IS present in the live view -- v2's new
-  `columns_not_seen_in_view` detector came back EMPTY for this request, so this
-  is not the "FALLBACK_COLS forces a non-existent column into the payload" case.
-  **Not yet explained**: why a 204-acknowledged write did not persist. Needs a
-  controlled live write against the sacrificial request `KTB FW26 Wrangler`
-  (UAT `6a26581854e92e7acd8fa71b`) to confirm the mechanism. Until then, treat
-  a 204 from DTC as "accepted", NOT as "stored".
-- **`v2_wip_push` now detects the related failure mode** it cannot otherwise
-  see: any column it plans to write that the live view never reports is
-  surfaced as `columns_not_seen_in_view`, logged as `COLUMN_NOT_IN_VIEW`, and
-  flips the exit status to `COMPLETED_WITH_WARNINGS`. It is a warning, not an
-  error, because `get_view_definition` 403s for this API key so
-  `get_view_column_names` degrades to a DATA SCAN, which cannot distinguish an
-  absent column from one that is blank in every current row.
-- **Jobs API reminder, re-confirmed**: serverless runs return NO notebook
-  stdout, so every diagnostic that matters must travel in the
-  `dbutils.notebook.exit` JSON. `v2_wip_push` therefore echoes its INPUT counts
-  (`staging_rows_pending`, `styles_with_bom`, `costing_chart_rows`, ...) as
-  well as its outputs -- "0 writes" is the SUCCESS case here, so input counts
-  are the only way to tell a correct no-op from an empty or mis-wired input.
+  Lakebase join, 8/8 have a Main Fabric segment, 14 "Fabric" segments, 0
+  unparseable. setup 6 s / exec 77 s.
+- `v2_wip_push` dry-run with v1's filters ON (`delta_only=true`,
+  `sync_status='pending'`): **60 live rows read, 60 NOOP, 0 PATCH calls.**
+  Given the state v1 produced, v2 independently concludes there is nothing to
+  do -- v2 AGREES with v1 rather than wanting to rewrite it.
+- Row accounting exact, confirming the style x color x material broadcast:
+  5 staging rows -> 14 physical row updates, 46 + 14 = 60 live rows.
+
+- **CORRECTION -- an earlier entry in this log claimed DTC "acknowledged a
+  write with 204 and did not store it", and advised treating 204 as
+  'accepted, not stored'. That was WRONG and is retracted.** A controlled
+  probe (`dtc/notebooks/v2_probe_write.py`) wrote a real `Sub Class` value to a
+  live row, re-read it, and confirmed `persisted: true` against a `204`. **DTC
+  sheetData writes DO persist. A 204 means stored.**
+
+- **The actual cause of stale/blank cells: coverage is gated by TWO
+  STYLE-LEVEL pre-filters that run BEFORE any field is ever compared**, so a
+  cell that is out of sync for any reason other than "this style just changed"
+  is invisible -- permanently:
+    1. `sync_status = 'pending'` on the staging row.
+    2. `beproduct_modified_at > last_pushed` (`delta_only`). Note the
+       granularity: `beproduct_modified_at` is the STYLE HEADER's timestamp
+       (all colours share it) and `last_pushed` is stamped on the REQUEST. So
+       the question asked is "was this style touched since anything in this
+       request was last pushed?" -- coarse on both axes. Field-level diffing
+       (`diff_updatable_fields`) only happens AFTER, on whatever survives.
+- **Live evidence of the resulting drift** (`KTB-00024`/`Black`): SIX physical
+  rows of the same style and colour, only ONE carrying `Sub Class`. v1 cannot
+  repair the other five -- the style's `beproduct_modified_at` is now older
+  than the request's `last_pushed`. Across the 60-row request: 15 rows have
+  `Sub Class`, 40 do not, and all 40 have a matching staging row holding a real
+  value.
+- **`Content` drift is real too, not a diffing artefact.** With both filters
+  off, v2 plans a `Content` write on all 60 rows; the concrete values show why
+  -- live DTC holds `"100% test from ML"` while the techpack BOM holds
+  `"test from ML 100%"`. Different strings, and BOM has owned `Content` since
+  2026-09-09, so the write is correct by the ownership rule. v1 never performs
+  it because the pre-filters exclude the rows.
+- **Consequence for v2 (`delta_only` / `staging_pending_only` now default
+  FALSE):** in v1 these filters bought cheap pushes; in v2 they buy nothing,
+  because the zero-diff-zero-write invariant means considering every row costs
+  ZERO extra API calls when nothing differs (planning measured at 36 ms for 250
+  styles / 1500 rows). They now only cost correctness. **Expect the first real
+  v2 run to be a one-off catch-up** -- here, 60 rows -- but note that it is
+  still ONE write window and ONE PATCH call, which is exactly the cost model
+  v2 exists to create. Review a `dry_run=true` `sample_changes` before cutover.
+- **Registry hazard hit while building the probe:** `dtc_request_registry` can
+  hold SEVERAL rows with the same `request_reference` (here
+  `KTB SS28 Collaborations`: an active in-scope 60-row request
+  `6aa21c8c50d01f6864e28546` and an inactive 19-row sibling
+  `6a9fcec150d01f6864e275ff`). Resolving by name alone silently picked the
+  WRONG sheet. Always filter `request_is_active='Y' AND in_scope` and refuse on
+  ambiguity -- `dtc_request_mapping` and `p1p7_beproduct_to_dtc_push` already
+  do; ad-hoc tooling must too.
+- **The documented sacrificial request `KTB FW26 Wrangler`
+  (`6a26581854e92e7acd8fa71b`) NO LONGER EXISTS as an active in-scope request**
+  -- every FW26 request is now `(BACKUP)`-named and inactive. Only 1 of 85
+  registry rows is active + in scope. Ground rule #1's reversible-write-test
+  target needs re-establishing.
+- **Jobs API reminder:** serverless runs return NO notebook stdout, so every
+  diagnostic must travel in the `dbutils.notebook.exit` JSON. `v2_wip_push`
+  therefore echoes INPUT counts, a changed-column histogram AND
+  `sample_changes` (concrete current-vs-new values) -- counts alone could not
+  distinguish the real `Content` drift above from a diffing bug.
 
 **v2 serverless smoke check (validated live 2026-09-14, run 66807905429726):**
 - A one-off `jobs.submit` with NO cluster spec runs on SERVERLESS. 12/12 checks

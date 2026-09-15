@@ -91,7 +91,21 @@ dbutils.widgets.text("dtc_workspace", "KTB", "DTC workspace")
 dbutils.widgets.text("dtc_document", "KTB WIP", "DTC document")
 dbutils.widgets.text("dtc_environment", "uat", "DTC environment")
 dbutils.widgets.text("dry_run", "true", "Compute + log, never PATCH")
-dbutils.widgets.text("delta_only", "true", "Only staging rows newer than last_pushed")
+# BOTH coverage pre-filters default OFF in v2. They are style-level gates that
+# run BEFORE any field is compared, so anything out of sync for a reason other
+# than "this style just changed" is invisible to them -- permanently.
+#
+# Live-confirmed 2026-09-15 on KTB-00024/Black: 6 physical rows of the SAME
+# style and colour, only 1 carrying "Sub Class". v1 cannot repair the other 5,
+# because the style's beproduct_modified_at is now older than the request's
+# last_pushed and its staging rows are marked 'pushed'.
+#
+# In v1 these filters bought cheap pushes. In v2 they buy nothing: the
+# zero-diff-zero-write invariant means considering every row costs ZERO extra
+# API calls when nothing differs (measured: 36 ms of planning for 250 styles /
+# 1500 rows). They only cost correctness now. See docs/MIGRATION_V1_V2.md.
+dbutils.widgets.text("delta_only", "false", "Only styles modified since last_pushed (v1 default: true)")
+dbutils.widgets.text("staging_pending_only", "false", "Only staging rows with sync_status='pending'")
 dbutils.widgets.text("batch_size", "100", "Rows per PATCH call")
 dbutils.widgets.text("costing_chart_table", "lft.beproduct.costing_chart", "Duty source")
 dbutils.widgets.text("bom_segments_table", "tpm_bom_segments", "BOM source (Stage 20b)")
@@ -105,7 +119,8 @@ customer = dbutils.widgets.get("customer")
 workspace = dbutils.widgets.get("dtc_workspace")
 environment = dbutils.widgets.get("dtc_environment")
 dry_run = (dbutils.widgets.get("dry_run") or "true").strip().lower() == "true"
-delta_only = (dbutils.widgets.get("delta_only") or "true").strip().lower() == "true"
+delta_only = (dbutils.widgets.get("delta_only") or "false").strip().lower() == "true"
+pending_only = (dbutils.widgets.get("staging_pending_only") or "false").strip().lower() == "true"
 batch_size = int(dbutils.widgets.get("batch_size") or 100)
 costing_table = dbutils.widgets.get("costing_chart_table")
 bom_table = f"{catalog}.{schema}.{dbutils.widgets.get('bom_segments_table')}"
@@ -123,8 +138,10 @@ run_id = now.strftime("%Y%m%d%H%M%S")
 print("=" * 78)
 print("v2 Stage 40 -- THE single DTC write window")
 print("=" * 78)
-print(f"  env={environment}  dry_run={dry_run}  delta_only={delta_only}  "
-      f"batch_size={batch_size}")
+print(f"  env={environment}  dry_run={dry_run}  batch_size={batch_size}")
+print(f"  coverage: delta_only={delta_only}  staging_pending_only={pending_only}"
+      + ("   (FULL SCAN -- every row diffed against live)"
+         if not (delta_only or pending_only) else "   ⚠ PRE-FILTERED"))
 print(f"  duty contribution: {'ON' if enable_duty else 'OFF'}")
 print(f"  BOM source       : {bom_table}")
 print(f"  duty source      : {costing_table}")
@@ -154,11 +171,15 @@ inputs["requests_resolved"] = len(mapping)
 print(f"  resolved requests : {len(mapping)}")
 
 df_staging_all = spark.table(staging_full)
-df_staging = df_staging_all.where(F.col("sync_status") == "pending")
+df_staging = (df_staging_all.where(F.col("sync_status") == "pending")
+              if pending_only else df_staging_all)
 inputs["staging_rows_total"] = df_staging_all.count()
-inputs["staging_rows_pending"] = df_staging.count()
-print(f"  staging rows : {inputs['staging_rows_pending']} pending "
-      f"of {inputs['staging_rows_total']} total")
+inputs["staging_rows_considered"] = df_staging.count()
+inputs["staging_pending_only"] = pending_only
+inputs["delta_only"] = delta_only
+print(f"  staging rows : {inputs['staging_rows_considered']} considered "
+      f"of {inputs['staging_rows_total']} total "
+      f"(pending_only={pending_only}, delta_only={delta_only})")
 
 # BOM for EVERY style, not just the ones in a delta-filtered staging slice.
 # A style whose BeProduct data is unchanged can still have NEW BOM data, and
@@ -319,6 +340,7 @@ for name, m in mapping.items():
     s = plan.summary()
     s["live_rows_read"] = len(dtc_rows)
     s["staging_rows_considered"] = len(bp_rows)
+    s["sample_changes"] = plan.sample_changes(limit=12)
 
     # ── Silent-write-failure detector (added 2026-09-15) ────────────────────
     # Live-confirmed on this very request: v1 pushed {"Sub Class": ...} for 13

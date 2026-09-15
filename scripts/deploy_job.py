@@ -899,7 +899,12 @@ JOB_SPECS = {
         "build_tasks": build_v2_tasks,
         "serverless": True,
         # v2 imports its modules from its OWN workspace root, never v1's.
-        "param_overrides": {"module_path": NB_PY_V2},
+        # delta_only OFF in v2: it is a STYLE-level gate that runs before any
+        # field comparison, so drift from any cause other than "this style just
+        # changed" is invisible to it permanently. v2's zero-diff-zero-write
+        # invariant makes a full scan cost ZERO extra API calls. See
+        # build_v2_tasks() and docs/MIGRATION_V1_V2.md.
+        "param_overrides": {"module_path": NB_PY_V2, "delta_only": "false"},
     },
 }
 

@@ -261,6 +261,30 @@ class RequestPlan:
                 hist[col] = hist.get(col, 0) + 1
         return dict(sorted(hist.items(), key=lambda kv: (-kv[1], kv[0])))
 
+    def sample_changes(self, limit: int = 12) -> List[Dict[str, Any]]:
+        """
+        A few concrete before/after values, for the exit payload.
+
+        Counts alone cannot tell a real correction from a diffing bug -- a
+        column reported as "changing on every row" needs its old and new values
+        side by side to judge. Serverless runs return no stdout, so explain()
+        is invisible outside the UI and this has to travel in the JSON.
+        """
+        out: List[Dict[str, Any]] = []
+        for r in self.updates + self.inserts:
+            for col, new in r.fields.items():
+                if len(out) >= limit:
+                    return out
+                out.append({
+                    "kind": r.kind,
+                    "key": list(r.match_key),
+                    "column": col,
+                    "current": r.current.get(col),
+                    "new": new,
+                    "source": r.sources.get(col),
+                })
+        return out
+
     def summary(self) -> Dict[str, Any]:
         """Compact, JSON-safe summary.
 
