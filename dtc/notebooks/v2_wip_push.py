@@ -111,7 +111,16 @@ dbutils.widgets.text("costing_chart_table", "lft.beproduct.costing_chart", "Duty
 dbutils.widgets.text("bom_segments_table", "tpm_bom_segments", "BOM source (Stage 20b)")
 dbutils.widgets.text("run_wip_push", "true", "Run this stage (false = no-op)")
 dbutils.widgets.text("run_duty_push", "true", "Include the duty contribution")
+# Material columns to plan but NOT write. Default excludes "Content": DTC's own
+# Content trigger and the techpack BOM express the SAME fibre content in
+# different notation ("97% Cotton / 3% Spandex" vs "Cotton 97%, Spandex 3%"),
+# so each would overwrite the other on every run -- a permanent write window at
+# a 2-hourly cadence. Live-confirmed 2026-09-15: 60 of 60 rows differ this way
+# and NONE is a semantic change. Set to "" once one notation is declared
+# canonical. See docs/MIGRATION_V1_V2.md.
+dbutils.widgets.text("material_exclude_columns", "Content", "Material columns to plan but not write")
 dbutils.widgets.text("explain_limit", "40", "Rows per request in the stdout trace")
+dbutils.widgets.text("sample_limit", "12", "current-vs-new samples per request in the exit JSON")
 
 catalog = dbutils.widgets.get("catalog")
 schema = dbutils.widgets.get("schema")
@@ -126,6 +135,10 @@ costing_table = dbutils.widgets.get("costing_chart_table")
 bom_table = f"{catalog}.{schema}.{dbutils.widgets.get('bom_segments_table')}"
 enable_duty = (dbutils.widgets.get("run_duty_push") or "true").strip().lower() == "true"
 explain_limit = int(dbutils.widgets.get("explain_limit") or 40)
+sample_limit = int(dbutils.widgets.get("sample_limit") or 12)
+material_exclude = frozenset(
+    c.strip() for c in (dbutils.widgets.get("material_exclude_columns") or "").split(",")
+    if c.strip())
 
 staging_full = f"{catalog}.{schema}.beproduct_to_dtc_staging"
 mapping_full = f"{catalog}.{schema}.dtc_request_mapping"
@@ -143,6 +156,8 @@ print(f"  coverage: delta_only={delta_only}  staging_pending_only={pending_only}
       + ("   (FULL SCAN -- every row diffed against live)"
          if not (delta_only or pending_only) else "   ⚠ PRE-FILTERED"))
 print(f"  duty contribution: {'ON' if enable_duty else 'OFF'}")
+if material_exclude:
+    print(f"  material columns EXCLUDED from writes: {sorted(material_exclude)}")
 print(f"  BOM source       : {bom_table}")
 print(f"  duty source      : {costing_table}")
 
@@ -333,6 +348,7 @@ for name, m in mapping.items():
         allowed_cols=allowed,
         non_writable_cols=non_writable,
         enable_duty=enable_duty,
+        material_exclude_cols=material_exclude,
         request_name=name,
     )
 
@@ -340,7 +356,7 @@ for name, m in mapping.items():
     s = plan.summary()
     s["live_rows_read"] = len(dtc_rows)
     s["staging_rows_considered"] = len(bp_rows)
-    s["sample_changes"] = plan.sample_changes(limit=12)
+    s["sample_changes"] = plan.sample_changes(limit=sample_limit)
 
     # ── Silent-write-failure detector (added 2026-09-15) ────────────────────
     # Live-confirmed on this very request: v1 pushed {"Sub Class": ...} for 13
@@ -487,6 +503,7 @@ summary = {
     # SUCCESS case, so the only way to tell a correct no-op from an empty or
     # mis-wired input is to see what actually went in.
     "inputs": inputs,
+    "material_exclude_columns": sorted(material_exclude),
     "totals": totals,
     "fields_by_source": by_source_totals,
     "diagnostics": diagnostics_totals,

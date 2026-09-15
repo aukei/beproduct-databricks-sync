@@ -57,6 +57,7 @@ NOTEBOOK_DIRS = {
     "v2_build_costing_chart": "DTC/notebooks",
     "v2_smoke_check": "DTC/notebooks",
     "v2_probe_write": "DTC/notebooks",
+    "v2_inspect_requests": "DTC/notebooks",
     "p1p7_beproduct_to_dtc_transform": "beproduct",
     "p1_dtc_request_manager": "beproduct",
     "p1_pull_masters_to_delta": "DTC/notebooks",
@@ -71,6 +72,8 @@ def main() -> int:
     ap.add_argument("--root", default=DEFAULT_WS_ROOT)
     ap.add_argument("--timeout", type=int, default=1800)
     ap.add_argument("--dry-run", action="store_true", help="print the submission and exit")
+    ap.add_argument("--out", help="write the full exit JSON here (default: /tmp/v2_<nb>_<run>.json)")
+    ap.add_argument("--print-chars", type=int, default=12000, help="console truncation limit")
     args = ap.parse_args()
 
     if args.notebook not in NOTEBOOK_DIRS:
@@ -146,11 +149,22 @@ def main() -> int:
               f"exec={(t.execution_duration or 0)/1000:.1f}s")
         if out.notebook_output and out.notebook_output.result:
             raw = out.notebook_output.result
+            # Always persist the FULL exit value: it is the only machine-
+            # readable output a serverless run produces, and the console print
+            # is truncated. Reviewing a full plan (60+ changes) needs the file.
+            out_path = Path(args.out) if args.out else (
+                Path("/tmp") / f"v2_{args.notebook}_{run_id}.json")
             try:
+                parsed = json.loads(raw)
+                out_path.write_text(json.dumps(parsed, indent=2))
                 print("\n── exit value ──────────────────────────────────────────────")
-                print(json.dumps(json.loads(raw), indent=2)[:12000])
+                print(json.dumps(parsed, indent=2)[:args.print_chars])
+                if len(json.dumps(parsed, indent=2)) > args.print_chars:
+                    print(f"   … truncated for display")
             except Exception:  # noqa: BLE001
-                print(raw[:4000])
+                out_path.write_text(raw)
+                print(raw[:args.print_chars])
+            print(f"\n  full exit value saved to: {out_path}")
         if out.error:
             print(f"\n  ERROR: {out.error}")
         if out.error_trace:

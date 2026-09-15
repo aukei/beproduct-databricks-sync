@@ -416,6 +416,29 @@ rows). They now only cost correctness, so both default to `false`.
 > BOM's `"test from ML 100%"` — real drift, and BOM has owned `Content` since
 > 2026-09-09.)
 
+**`Content` is held back pending a canonical-notation decision**
+
+The first full-scan dry run planned a `Content` write on **60 of 60 rows** — and
+not one was a semantic change. DTC writes `97% Cotton / 3% Spandex`; the
+techpack BOM writes `Cotton 97%, Spandex 3%`. Same fibres, same percentages,
+different notation.
+
+Both DTC's own Content trigger and Phase 10 write this column, so each would
+rewrite the other's notation on every run. The cell never settles — which at a
+2-hourly cadence means a **permanent write window**, defeating the point of v2.
+
+Holding position: the job parameter `material_exclude_columns` defaults to
+`"Content"`. The column is still *planned*, so the diff stays visible in
+`columns_changed` / `sample_changes`, but it is not written, and the suppression
+is recorded in `PlannedRow.dropped`. With it set, the same request plans 40
+updates (`Sub Class` only) rather than 60.
+
+**This needs an owner + DTC-developer decision, not a code fix**: declare one
+canonical notation, then either set the parameter back to `""` (BOM owns
+`Content`, per 2026-09-09) or disable DTC's trigger for the column. A normalizer
+treating both forms as equal would be the wrong answer — it hides a real
+disagreement between two systems that both claim the field.
+
 **Cadence-limiting, independent of this refactor**
 
 - **Sample-app enrichment.** One `app_get` per (style × app) — ~876 calls, ~120 s

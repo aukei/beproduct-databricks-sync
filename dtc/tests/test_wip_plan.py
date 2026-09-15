@@ -505,6 +505,48 @@ check("[7i-6] orphan pass is skipped when key sets are not supplied",
 
 
 # ---------------------------------------------------------------------------
+print("\n[7j] material_exclude_cols -- holding a contested column back")
+# ---------------------------------------------------------------------------
+
+# DTC's own Content trigger and the techpack BOM express the SAME fibre content
+# in different notation ("97% Cotton / 3% Spandex" vs "Cotton 97%, Spandex 3%").
+# Both are "correct", so each overwrites the other on every run -- a permanent
+# write window at a 2-hourly cadence. Excluding the column must suppress the
+# write WITHOUT disturbing anything else the material contribution does.
+contested = dtc_row("r1", 1, **{FG: "Main Fabric", MA: "WV-0003",
+                                PL: "BODICE", CT: "97% Cotton / 3% Spandex"})
+boms_ct = {"KTB-1": bom_json([("Main Fabric", "WV-0003", "HEM", "Cotton 97%, Spandex 3%")])}
+
+p_incl = wip_plan.compute_request_plan(
+    SCOPE, [contested], [bp_row()], bom_by_style=boms_ct, allowed_cols=ALLOWED)
+check("[7j-1] without the exclusion, Content is written",
+      p_incl.summary()["columns_changed"].get(CT) == 1,
+      p_incl.summary()["columns_changed"])
+
+p_excl = wip_plan.compute_request_plan(
+    SCOPE, [contested], [bp_row()], bom_by_style=boms_ct,
+    material_exclude_cols=frozenset({CT}), allowed_cols=ALLOWED)
+check("[7j-2] with the exclusion, Content is NOT written",
+      CT not in p_excl.summary()["columns_changed"],
+      p_excl.summary()["columns_changed"])
+check("[7j-3] the excluded column is recorded as dropped, not silently lost",
+      any(CT in r.dropped for r in p_excl.updates + p_excl.noops),
+      [r.dropped for r in p_excl.updates + p_excl.noops])
+check("[7j-4] Placement (also material) is still written",
+      p_excl.summary()["columns_changed"].get(PL) == 1,
+      p_excl.summary()["columns_changed"])
+
+# With Content the ONLY difference, excluding it must yield a true no-op.
+settled_ct = dtc_row("r1", 1, **{FG: "Main Fabric", MA: "WV-0003",
+                                 PL: "HEM", CT: "97% Cotton / 3% Spandex"})
+p_noop = wip_plan.compute_request_plan(
+    SCOPE, [settled_ct], [bp_row()], bom_by_style=boms_ct,
+    material_exclude_cols=frozenset({CT}), allowed_cols=ALLOWED)
+check("[7j-5] excluding the only contested column restores zero-write",
+      p_noop.is_empty(), p_noop.explain())
+
+
+# ---------------------------------------------------------------------------
 print("\n[8] Idempotence: planning twice over the applied result is a no-op")
 # ---------------------------------------------------------------------------
 

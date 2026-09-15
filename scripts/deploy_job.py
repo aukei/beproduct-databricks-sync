@@ -296,6 +296,11 @@ JOB_PARAMS = {
     "bom_log_table": "customer_teckpack_style_log",  # custom_fields -- the actual BOM source
     "bom_segments_table": "tpm_bom_segments",  # Stage 20b output; read by wip_push + build_costing
     "explain_limit": "40",            # rows per request in wip_push's stdout provenance trace
+    "sample_limit": "12",             # current-vs-new samples per request in wip_push's exit JSON
+    # "Content" held back pending a canonical-notation decision: DTC's trigger
+    # and the techpack BOM format the same fibre content differently, so each
+    # would overwrite the other every run. Set to "" to let BOM own it again.
+    "material_exclude_columns": "Content",
 }
 
 
@@ -817,6 +822,8 @@ def build_v2_tasks():
         "costing_chart_table": COSTING_TABLE,
         "bom_segments_table": P("bom_segments_table"),
         "explain_limit": P("explain_limit"),
+        "sample_limit": P("sample_limit"),
+        "material_exclude_columns": P("material_exclude_columns"),
         "run_wip_push": P("run_wip_push"), "run_duty_push": P("run_duty_push"),
     }, depends=[dep("request_manager"), dep("build_costing")]))
 

@@ -449,6 +449,7 @@ def compute_request_plan(
     enforce_scope: bool = True,
     enable_material: bool = True,
     enable_duty: bool = True,
+    material_exclude_cols: Optional[frozenset] = None,
     request_name: Optional[str] = None,
 ) -> RequestPlan:
     """
@@ -482,6 +483,15 @@ def compute_request_plan(
                         the SAME single window and pass the same allow-list and
                         lean-PATCH checks.
         enable_material / enable_duty: `run_bom` / `run_duty_push`.
+        material_exclude_cols: material columns to plan but NOT write. Exists
+                        for a specific hazard: DTC's own Content trigger and the
+                        techpack BOM express the same fibre content in DIFFERENT
+                        NOTATION ("97% Cotton / 3% Spandex" vs "Cotton 97%,
+                        Spandex 3%"). Both are "correct", so each would keep
+                        overwriting the other -- a write on EVERY run, forever,
+                        which at a 2-hourly cadence means a permanent write
+                        window. Excluding the column is the safe holding
+                        position until one notation is declared canonical.
 
     Returns:
         RequestPlan. Check `is_empty()` BEFORE issuing any call.
@@ -518,7 +528,8 @@ def compute_request_plan(
 
     # ── 2. Material contribution ────────────────────────────────────────────
     if enable_material and bom_by_style:
-        _apply_material(plan, updates, inserts, bom_by_style, exclude_cols, dtc_rows)
+        _apply_material(plan, updates, inserts, bom_by_style, exclude_cols, dtc_rows,
+                        material_exclude_cols or frozenset())
 
     # ── 3. Duty contribution ────────────────────────────────────────────────
     if enable_duty and duty_rows:
@@ -582,6 +593,7 @@ def _apply_material(
     bom_by_style: Dict[Optional[str], Any],
     exclude_cols: frozenset,
     dtc_rows: List[Dict[str, Any]],
+    material_exclude_cols: frozenset = frozenset(),
 ) -> None:
     """
     Run `bom.plan_style_enrichment()` per style against the PROJECTED rows
@@ -631,6 +643,9 @@ def _apply_material(
                         f"handle {act.row_id!r}")
                     continue
                 for col, val in act.wip_fields.items():
+                    if col in material_exclude_cols:
+                        target.dropped[col] = "material column excluded by parameter"
+                        continue
                     target.set_field(col, val, SOURCE_MATERIAL)
 
             elif act.kind == "insert":
@@ -650,6 +665,12 @@ def _apply_material(
                 # are attributed to `style`; only the 4 BOM columns the fan-out
                 # actually sets are attributed to `material`.
                 for col, val in payload.items():
+                    if col in material_exclude_cols and col in act.wip_fields:
+                        # A fan-out INSERT still copies the base row's value
+                        # forward; only the material contribution's OWN write to
+                        # this column is suppressed.
+                        pr.dropped[col] = "material column excluded by parameter"
+                        continue
                     pr.set_field(col, val,
                                  SOURCE_MATERIAL if col in act.wip_fields else SOURCE_STYLE)
                 inserts.append(pr)
