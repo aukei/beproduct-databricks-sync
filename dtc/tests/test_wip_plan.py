@@ -407,8 +407,20 @@ check("[7a] every planned field has a recorded source",
       all(set(r.fields) <= set(r.sources) for r in p_full.updates + p_full.inserts))
 check("[7b] summary is JSON-safe and complete",
       set(p_full.summary()) >= {"request", "updates", "inserts", "noops",
-                                "patch_calls", "fields_by_source", "degraded",
-                                "violations", "empty"}, p_full.summary())
+                                "patch_calls", "fields_by_source", "diagnostics",
+                                "degraded", "violations", "empty"}, p_full.summary())
+check("[7b-2] fields_by_source holds ONLY contribution labels",
+      set(p_full.summary()["fields_by_source"]) <= set(wip_plan.ALL_SOURCES),
+      p_full.summary()["fields_by_source"])
+check("[7b-3] non-field counters are separated into diagnostics",
+      "duty_rows_matched" in p_full.summary()["diagnostics"],
+      p_full.summary()["diagnostics"])
+check("[7b-4] columns_changed names the actual columns and row counts",
+      p_full.summary()["columns_changed"].get("Main Factory HTS Code") == 1
+      and p_full.summary()["columns_changed"].get("Style Description") == 1,
+      p_full.summary()["columns_changed"])
+check("[7b-5] an empty plan reports no changed columns",
+      p.summary()["columns_changed"] == {}, p.summary()["columns_changed"])
 check("[7c] explain() renders without error", isinstance(p_full.explain(), str))
 check("[7d] fields_by_source counts both contributions",
       p_full.counts.get("style", 0) >= 1 and p_full.counts.get("duty", 0) >= 1,
@@ -440,6 +452,56 @@ check("[7g] style exceptions are surfaced on the plan",
       any(e.reason == "missing_bp_style" for e in p_exc.exceptions),
       [e.reason for e in p_exc.exceptions])
 check("[7h] a request with only exceptions still writes nothing", p_exc.is_empty())
+
+
+# ---------------------------------------------------------------------------
+print("\n[7i] Orphan marks ride the SAME write window")
+# ---------------------------------------------------------------------------
+
+# A row whose style has moved to a DIFFERENT request (a BeProduct key field
+# changed) is marked "(removed)", never deleted. In v1 this was a THIRD PATCH
+# call against the old request; merging it here is most of the point of v2 --
+# a key change must cost ONE write window, not two.
+stale = dtc_row("rZ", 5, style="KTB-MOVED", color="Blue")
+p_orph = wip_plan.compute_request_plan(
+    SCOPE, [stale], [], bom_by_style={},
+    bp_keys_this_request=set(),
+    moved_elsewhere_keys={("KTB-MOVED", "Blue")},
+    allowed_cols=ALLOWED)
+check("[7i-1] stale row is marked (removed)",
+      any(r.fields.get("Product Status") == phase1.REMOVED_STATUS
+          for r in p_orph.updates), p_orph.explain())
+check("[7i-2] the mark is attributed to the orphan contribution",
+      any(r.sources.get("Product Status") == wip_plan.SOURCE_ORPHAN
+          for r in p_orph.updates), p_orph.explain())
+check("[7i-3] orphan marks still cost at most 1 PATCH call",
+      p_orph.summary()["patch_calls"] == 1, p_orph.summary())
+
+# Already-flagged rows must contribute nothing -- otherwise every subsequent
+# run would re-mark them and invalidate sessions forever.
+already = dtc_row("rZ", 5, style="KTB-MOVED", color="Blue",
+                  **{"Product Status": phase1.REMOVED_STATUS})
+p_orph2 = wip_plan.compute_request_plan(
+    SCOPE, [already], [], bom_by_style={},
+    bp_keys_this_request=set(),
+    moved_elsewhere_keys={("KTB-MOVED", "Blue")},
+    allowed_cols=ALLOWED)
+check("[7i-4] an already-marked row is idempotent (writes nothing)",
+      p_orph2.is_empty(), p_orph2.explain())
+
+# A row nobody claims anywhere in BeProduct is user data -- never touch it.
+p_orph3 = wip_plan.compute_request_plan(
+    SCOPE, [dtc_row("rU", 6, style="USER-ENTERED", color="X")], [],
+    bom_by_style={}, bp_keys_this_request=set(), moved_elsewhere_keys=set(),
+    allowed_cols=ALLOWED)
+check("[7i-5] unrelated user-entered row is left alone", p_orph3.is_empty(),
+      p_orph3.explain())
+
+# Orphan marking is opt-in: omitting the key sets must not mark anything.
+p_orph4 = wip_plan.compute_request_plan(
+    SCOPE, [stale], [], bom_by_style={}, allowed_cols=ALLOWED)
+check("[7i-6] orphan pass is skipped when key sets are not supplied",
+      p_orph4.is_empty(), p_orph4.explain())
 
 
 # ---------------------------------------------------------------------------

@@ -90,8 +90,11 @@ from . import bom, duty, phase1
 SOURCE_STYLE = "style"
 SOURCE_MATERIAL = "material"
 SOURCE_DUTY = "duty"
+# A stale row left behind when a BeProduct key field moved the style to a
+# DIFFERENT request. Marked, never deleted -- see phase1.compute_orphan_marks.
+SOURCE_ORPHAN = "orphan"
 
-ALL_SOURCES = (SOURCE_STYLE, SOURCE_MATERIAL, SOURCE_DUTY)
+ALL_SOURCES = (SOURCE_STYLE, SOURCE_MATERIAL, SOURCE_DUTY, SOURCE_ORPHAN)
 
 # Columns the MATERIAL contribution owns outright. When the style contribution
 # also produced one of these (its INSERT-time default-fill), material wins.
@@ -250,6 +253,14 @@ class RequestPlan:
         """INSERT bodies, keyed by rowIndex. Never mixed with updates in one call."""
         return [{**r.fields, "rowIndex": r.row_index} for r in self.inserts]
 
+    def columns_changed(self) -> Dict[str, int]:
+        """{column: number of rows writing it}, updates and inserts together."""
+        hist: Dict[str, int] = {}
+        for r in self.updates + self.inserts:
+            for col in r.fields:
+                hist[col] = hist.get(col, 0) + 1
+        return dict(sorted(hist.items(), key=lambda kv: (-kv[1], kv[0])))
+
     def summary(self) -> Dict[str, Any]:
         """Compact, JSON-safe summary.
 
@@ -258,6 +269,11 @@ class RequestPlan:
         run 66807905429726). So anything that must be readable outside the
         Databricks UI has to travel in a structure like this one.
         """
+        # `fields_by_source` is kept strictly to the contribution labels: it
+        # answers "which contribution changed cells here?" and nothing else.
+        # Counters that are not field counts (duty rows matched, tariff values
+        # with no live column, orphan marks) live under `diagnostics`, so the
+        # two are never read as the same kind of number.
         return {
             "request": self.request_name,
             "updates": len(self.updates),
@@ -265,7 +281,13 @@ class RequestPlan:
             "noops": len(self.noops),
             "exceptions": len(self.exceptions),
             "patch_calls": (1 if self.updates else 0) + (1 if self.inserts else 0),
-            "fields_by_source": dict(self.counts),
+            "fields_by_source": {k: v for k, v in self.counts.items() if k in ALL_SOURCES},
+            "diagnostics": {k: v for k, v in self.counts.items() if k not in ALL_SOURCES},
+            # WHICH columns this run intends to write, and how many rows each.
+            # Without this, a summary saying "14 updates" is unactionable --
+            # and since serverless runs return no stdout, the explain() trace
+            # is only visible by opening the run in the UI.
+            "columns_changed": self.columns_changed(),
             "degraded": self.degraded,
             "violations": self.violations,
             "empty": self.is_empty(),
@@ -285,6 +307,10 @@ class RequestPlan:
                    f"inserts={s['inserts']} noops={s['noops']} "
                    f"exceptions={s['exceptions']}  -> {s['patch_calls']} PATCH call(s)")
         out.append(f"  fields by source: {s['fields_by_source']}")
+        if s["diagnostics"]:
+            out.append(f"  diagnostics     : {s['diagnostics']}")
+        if s["columns_changed"]:
+            out.append(f"  columns changed : {s['columns_changed']}")
         if self.degraded:
             out.append(f"  ⚠ DEGRADED (keys omitted, rest still pushed): {self.degraded}")
         if self.violations:
@@ -392,6 +418,8 @@ def compute_request_plan(
     bp_rows: List[Dict[str, Any]],
     bom_by_style: Optional[Dict[Optional[str], Any]] = None,
     duty_rows: Optional[List[Dict[str, Any]]] = None,
+    bp_keys_this_request: Optional[set] = None,
+    moved_elsewhere_keys: Optional[set] = None,
     allowed_cols: Optional[set] = None,
     non_writable_cols: Optional[frozenset] = None,
     enforce_scope: bool = True,
@@ -420,6 +448,15 @@ def compute_request_plan(
                         still be absent from this view.
         non_writable_cols: from `bom.compute_non_writable_cols(dynamicFields)`;
                         columns DTC rejects writes to (image / formula types).
+        bp_keys_this_request / moved_elsewhere_keys: (BP Style#, Color) keys
+                        for the orphan-mark pass. Both must be supplied for it
+                        to run. A row whose key is absent here but present
+                        under a DIFFERENT request is flagged
+                        `Product Status = "(removed)"` -- never deleted.
+                        Handled HERE rather than in the notebook so that ALL
+                        writes to this request, orphan marks included, land in
+                        the SAME single window and pass the same allow-list and
+                        lean-PATCH checks.
         enable_material / enable_duty: `run_bom` / `run_duty_push`.
 
     Returns:
@@ -463,9 +500,55 @@ def compute_request_plan(
     if enable_duty and duty_rows:
         _apply_duty(plan, updates, inserts, duty_rows)
 
-    # ── 4. Finalize ─────────────────────────────────────────────────────────
+    # ── 4. Orphan marks (stale rows whose style moved to another request) ───
+    if bp_keys_this_request is not None and moved_elsewhere_keys is not None:
+        _apply_orphan_marks(plan, updates, dtc_rows,
+                            bp_keys_this_request, moved_elsewhere_keys)
+
+    # ── 5. Finalize ─────────────────────────────────────────────────────────
     _finalize(plan, updates, inserts, allowed_cols, exclude_cols)
     return plan
+
+
+def _apply_orphan_marks(
+    plan: RequestPlan,
+    updates: List[PlannedRow],
+    dtc_rows: List[Dict[str, Any]],
+    bp_keys_this_request: set,
+    moved_elsewhere_keys: set,
+) -> None:
+    """
+    Fold `phase1.compute_orphan_marks()` into the same plan.
+
+    In v1 these were a THIRD PATCH call against the old request, on top of its
+    updates and inserts. Merging them here is most of the point of v2: a stale
+    row is marked in the same window as everything else that request receives,
+    so a key change costs one write window rather than two.
+
+    `compute_orphan_marks` already skips rows that are already flagged, so this
+    is idempotent and contributes nothing on a settled run.
+    """
+    try:
+        ops = phase1.compute_orphan_marks(
+            dtc_rows, bp_keys_this_request, moved_elsewhere_keys)
+    except Exception as e:  # noqa: BLE001
+        plan.degraded.append(f"{SOURCE_ORPHAN}: {type(e).__name__}: {e}")
+        return
+
+    by_row_id = {u.row_id: u for u in updates if u.row_id is not None}
+    for op in ops:
+        target = by_row_id.get(op.row_id)
+        if target is None:
+            current = next((r for r in dtc_rows if r.get("rowId") == op.row_id), {})
+            target = PlannedRow(
+                handle=_handle_existing(op.row_id), kind="update",
+                match_key=op.match_key, row_id=op.row_id, current=dict(current),
+            )
+            updates.append(target)
+            by_row_id[op.row_id] = target
+        for col, val in op.fields.items():
+            target.set_field(col, val, SOURCE_ORPHAN)
+    plan.counts["orphan_marks"] = len(ops)
 
 
 def _apply_material(

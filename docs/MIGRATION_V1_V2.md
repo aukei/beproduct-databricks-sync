@@ -55,12 +55,24 @@ request, one combined plan, one PATCH of updates and one PATCH of inserts, back 
 back. Two calls is the floor — `patch_rows` rejects a body mixing `rowId` and
 `rowIndex`.
 
-### 2. The transform emits the final grain
+### 2. The material dimension is resolved at plan time
 
-v1's transform produced **style × color**; Phase 10 later fanned it out to
-**style × color × material** by pushing to DTC, re-pulling, and planning a second
-time. v2's transform joins the techpack BOM directly and emits
-style × color × material in one pass, so `repull_dtc` disappears.
+v1's Phase 10 could only enrich rows that already **physically existed** in DTC,
+which is the entire reason `repull_dtc` had to run between the style push and the
+BOM push. In v2 the material contribution plans against the **projected** row set
+— existing live rows *plus* the style contribution's planned inserts — so a
+brand-new style × color gets its material fan-out in the same run, and
+`repull_dtc` disappears.
+
+> **Corrected during stage 3.** The original plan had the transform emitting a
+> final style × color × material staging grain. That is not possible: the fan-out
+> depends on which segments a colorway is already represented by in live DTC,
+> which the transform cannot see, and `phase1.compute_upsert()` treats a repeated
+> `(BP Style#, Color)` as a `duplicate_bp_key` exception. Staging stays at
+> style × color; the BOM becomes its own style-keyed Delta table
+> (`tpm_bom_segments`, written by the new `pull_bom` task); the material grain is
+> resolved in `wip_plan`. The re-pull still disappears — planning against intent
+> is what removed it, not the staging grain.
 
 ### 3. `costing_chart` is built from intent, not from a round-trip
 
@@ -304,7 +316,7 @@ exists solely to feed `build_costing`.
 | 0 | Branch, consolidated docs, `BeProduct_DTC_sync_v2` job definition | — | **done** |
 | 1 | Serverless port; `module_path` parameter; in-notebook run flags | — | **done** |
 | 2 | `sync/wip_plan.py` + `test_wip_plan.py` — composition, zero-diff-zero-write | — | **done** |
-| 3 | `v2_build_wip_staging` + `v2_wip_push`; drop `repull_dtc` | 3 → 2 | |
+| 3 | `v2_pull_bom_segments` + `v2_wip_push`; drop `repull_dtc` | 3 → 2 | **done** |
 | 4 | `v2_build_costing_chart` off staging; drop `repull_dtc_bom` | 2 → 2 | |
 | 5 | Fold the duty contribution into `wip_push` | 2 → **1** | |
 
@@ -338,8 +350,8 @@ diff-gated.
 
 **Blocking the first v2 run**
 
-- The three `NEW` notebooks (`v2_build_wip_staging`, `v2_build_costing_chart`,
-  `v2_wip_push`). Stages 3–5. `sync/wip_plan.py` (stage 2) is done.
+- `v2_build_costing_chart` (stage 4). Stages 1–3 are done: `sync/wip_plan.py`,
+  `v2_pull_bom_segments` and `v2_wip_push` all exist.
 
 ### `sync/wip_plan.py` — the composition layer (stage 2, done)
 

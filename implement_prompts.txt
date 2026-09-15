@@ -713,6 +713,11 @@ best when phase10 BOM update merge into phase1 directly:
 By same logic, phase 9b is also best to merge into phase 1:
 - transform fill in whatever relevant Duty / Tariff / HS_Code are available in costing_chart
 
+The rationale is DTC use a permissive locking system, when API submit a PATCH, it practically locked all interactive session user working on the same request from saving their work.
+so reducing number of PATCH call, and make each PATCH call as lean as possible, have practical benefit to operation.
+
+
+# more checking 2
 New Styles will enter costing chart in later job stage, and be filled in future round.
 The repull before forming costing chart maybe redundant since after phase 3 the new WIP image is stable except image field.
 

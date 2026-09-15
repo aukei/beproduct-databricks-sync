@@ -77,16 +77,18 @@ development) viable at all:
 ## The DAG
 
 ```
-p0_pull ─► p0_upsert ─► p0_push ─┬─► bp_style_sync ─────► transform ─┬─► request_manager ─┐
-                                 │                                   │                    │
-                                 ├─► pull_master_dtc ────────────────┼────────────────────┤
-                                 │           │                       │                    │
-                                 │           └─► phase2_push         │                    │
-                                 │                                   │                    │
-                                 └─► pull_lineplan_dtc ──────────────┴─► build_costing ───┤
-                                                                                          ▼
-                                                                                      wip_push
-                                                                      (the only DTC write in this job)
+p0_pull ─► p0_upsert ─► p0_push ─┬─► bp_style_sync ─┬─► transform ─┬─► request_manager ─┐
+                                 │                  │              │                    │
+                                 │                  └─► pull_bom ──┤                    │
+                                 │                                 │                    │
+                                 ├─► pull_master_dtc ──────────────┼────────────────────┤
+                                 │           │                     │                    │
+                                 │           └─► phase2_push       │                    │
+                                 │                                 │                    │
+                                 └─► pull_lineplan_dtc ────────────┴─► build_costing ───┤
+                                                                                        ▼
+                                                                                    wip_push
+                                                                    (the only DTC write in this job)
 ```
 
 Companion jobs, unchanged from v1 and deliberately outside this DAG:
@@ -108,9 +110,10 @@ BeProduct_DTC_sync_images         phase3_images         Style Image multipart up
 | 10 | `bp_style_sync` | `p1p7_beproduct_style_sync` | reused | `phase0_push` |
 | 10 | `pull_master_dtc` | `p1_pull_masters_to_delta` | reused | `phase0_push` |
 | 10 | `pull_lineplan_dtc` | `p9a_pull_lineplan_to_delta` | reused | `phase0_push` |
-| 20 | `transform` | `v2_build_wip_staging` | **NEW** | `bp_style_sync` |
+| 20 | `transform` | `p1p7_beproduct_to_dtc_transform` | reused | `bp_style_sync` |
+| 20b | `pull_bom` | `v2_pull_bom_segments` | **NEW** | `bp_style_sync` |
 | 25 | `request_manager` | `p1_dtc_request_manager` | reused | `transform`, `pull_master_dtc` |
-| 30 | `build_costing` | `v2_build_costing_chart` | **NEW** | `transform`, `pull_master_dtc`, `pull_lineplan_dtc` |
+| 30 | `build_costing` | `v2_build_costing_chart` | **NEW** | `transform`, `pull_bom`, `pull_master_dtc`, `pull_lineplan_dtc` |
 | 40 | `wip_push` | `v2_wip_push` | **NEW** | `request_manager`, `build_costing` |
 | 50 | `phase2_push` | `p2_push_dtc_to_beproduct` | reused | `transform`, `pull_master_dtc` |
 
@@ -185,14 +188,32 @@ a human-enforced invariant; Stage 30 only warns on conflict, never blocks.
 
 ---
 
-### Stage 20 — `transform` → style × color × material staging  **NEW**
+### Stage 20 — `transform` → style × color staging  (reused, unchanged)
 
-The structural heart of v2. v1's transform produced **style × color**; Phase 10
-later fanned that out to **style × color × material** by pushing to DTC, re-pulling,
-and planning a second time. v2's transform produces the final grain in one pass by
-joining the techpack BOM directly.
+The v1 transform already produces `beproduct_to_dtc_staging` correctly and needs
+no change for v2. Writes Delta only; touches no DTC.
 
-Writes `beproduct_to_dtc_staging`. Touches no DTC.
+> **Correction to an earlier draft of this document.** It said the v2 transform
+> would emit the final **style × color × material** grain. It cannot, and should
+> not:
+>
+> 1. The material fan-out depends on which segments a colorway is **already
+>    represented by in live DTC**. The transform has no live DTC state, so it
+>    cannot compute it — only `wip_plan.compute_request_plan()`, which sees the
+>    live rows, can.
+> 2. `phase1.compute_upsert()` treats a repeated `(BP Style#, Color / Wash)` as
+>    a `duplicate_bp_key` exception, so material-grain rows would make every
+>    multi-material style raise.
+>
+> Staging therefore stays at **style × color**, the BOM becomes a separate
+> style-keyed table (Stage 20b), and the material dimension is resolved at
+> **plan time** in Stage 40. `repull_dtc` still disappears — planning against
+> intent is what removed it, not the staging grain.
+
+### Stage 20b — `pull_bom` → `tpm_bom_segments`  **NEW**
+
+Materializes the techpack BOM into ordinary Delta so nothing downstream has to
+touch Lakebase. Runs in **parallel** with `transform`; touches no DTC.
 
 **BOM source** (two-hop, unchanged semantics from v1 Phase 10's "2nd revision"):
 
@@ -242,8 +263,17 @@ concatenated.
    entry) that needs fixing, not something to work around.
 6. **Request name format** — `^[A-Z]+ [A-Z]{2}[0-9]{2} .+$`; also a raise.
 
-Flag: `run_bom` (v1's `run_phase10`) disables only the BOM join, leaving
-style × color staging intact.
+Parses each payload eagerly and reports per-style diagnostics — how many styles
+have a Main Fabric segment, which do not, and which payloads failed to parse — so
+a malformed BOM surfaces in **this** task, attributed to a specific style, rather
+than silently degrading a contribution two stages later.
+
+The raw `custom_fields` is stored verbatim rather than pre-parsed into segments,
+so `sync/bom.py` stays the single source of truth for BOM parsing: Stage 40
+re-parses it with the very same function the unit tests cover.
+
+Flag: `run_bom` (v1's `run_phase10`). Disabling it leaves whatever the table
+already holds; downstream never reverts on missing BOM data.
 
 ---
 
@@ -616,11 +646,11 @@ own live `get_sheet()` immediately before writing.
 | `bp_style_sync` | unchanged |
 | `pull_master_dtc` | unchanged |
 | `pull_lineplan_dtc` | unchanged; no longer behind `gate_phase9a` |
-| `transform` | → `transform` (Stage 20), now joins BOM and emits style × color × material |
+| `transform` | unchanged (Stage 20); staging stays style × color |
 | `request_manager` | unchanged |
 | `phase1_push` | → folded into `wip_push` |
 | `repull_dtc` | removed |
-| `fill_bom_data` | → folded into `transform` (read) + `wip_push` (write) |
+| `fill_bom_data` | → split: the Lakebase read becomes `pull_bom` (Stage 20b); the DTC write folds into `wip_push` |
 | `repull_dtc_bom` | removed |
 | `build_costing_chart` | → `build_costing` (Stage 30), reads staging instead of the re-pull |
 | `push_duty_rates` | → folded into `wip_push` |

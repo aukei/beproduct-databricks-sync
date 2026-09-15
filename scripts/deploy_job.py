@@ -294,6 +294,8 @@ JOB_PARAMS = {
     "run_duty_push": "true",      # Stage 40: duty contribution only     (was run_phase9b)
     "bom_table": "customer_teckpack_style_latest",  # resolves latest_techpack_style_log_id
     "bom_log_table": "customer_teckpack_style_log",  # custom_fields -- the actual BOM source
+    "bom_segments_table": "tpm_bom_segments",  # Stage 20b output; read by wip_push + build_costing
+    "explain_limit": "40",            # rows per request in wip_push's stdout provenance trace
 }
 
 
@@ -740,18 +742,38 @@ def build_v2_tasks():
         "run_costing": P("run_costing"),
     }, depends=[dep("phase0_push")]))
 
-    # ── Stage 20: transform -> style x color x material staging (NEW) ───────
-    # The structural heart of v2. v1's transform emitted style x color and
-    # Phase 10 later fanned it out to style x color x material by pushing to
-    # DTC, re-pulling, and planning a second time. This joins the techpack BOM
-    # (alb_tpm_<env>, Lakebase -- serverless-only, which is free now) directly,
-    # so repull_dtc disappears. run_bom=false disables only the BOM join,
-    # leaving style x color staging intact.
-    tasks.append(v2_task("transform", f"{NB_BP_V2}/v2_build_wip_staging", {   # NEW
-        "catalog": CAT, "schema": SCH, "customer": CUST, "folder_name": P("folder_name"),
-        "run_bom": P("run_bom"),
+    # ── Stage 20: denormalize to style x color staging (REUSED, unchanged) ──
+    # The v1 transform already produces beproduct_to_dtc_staging correctly and
+    # needs no change for v2. Copying it to bolt on a BOM read would duplicate
+    # every field mapping, season-code lookup, lifecycle gate and validation
+    # rule in 839 lines of it -- so the BOM read is its own parallel task
+    # (pull_bom) instead.
+    #
+    # Staging deliberately stays at style x COLOR grain, NOT style x color x
+    # material: (a) the material fan-out depends on which segments a colorway
+    # is ALREADY represented by in live DTC, which the transform cannot know,
+    # and (b) phase1.compute_upsert() treats a repeated (BP Style#, Color) as a
+    # duplicate_bp_key exception. The material dimension is resolved at PLAN
+    # time in wip_plan, against live rows. See docs/PIPELINE.md Stage 20.
+    tasks.append(v2_task("transform", f"{NB_BP_V2}/p1p7_beproduct_to_dtc_transform", {
+        "catalog": CAT, "schema": SCH, "source_table": "ktb_styles",
+        "staging_table": "beproduct_to_dtc_staging",
+        "folder_name": P("folder_name"), "customer_code": CUST,
+    }, depends=[dep("bp_style_sync")]))
+
+    # ── Stage 20b: techpack BOM (Lakebase) -> Delta (NEW) ───────────────────
+    # Runs in PARALLEL with `transform`; touches no DTC. In v1 the Lakebase
+    # read forced Phase 10 onto its own serverless task and sat BETWEEN two DTC
+    # re-pulls; here the whole job is serverless, so it is just another input
+    # gathered up front. Materializing it to Delta means neither wip_push nor
+    # build_costing has to touch Lakebase.
+    tasks.append(v2_task("pull_bom", f"{NB_DTC_V2}/v2_pull_bom_segments", {   # NEW
+        "catalog": CAT, "schema": SCH, "folder_name": P("folder_name"),
         "bom_catalog": P("bom_catalog"), "bom_table": P("bom_table"),
-        "bom_log_table": P("bom_log_table"), "bom_customer_name": P("bom_customer_name"),
+        "bom_log_table": P("bom_log_table"),
+        "bom_customer_name": P("bom_customer_name"),
+        "bom_segments_table": P("bom_segments_table"),
+        "run_bom": P("run_bom"),
     }, depends=[dep("bp_style_sync")]))
 
     # ── Stage 25: resolve / create / share requests (unchanged) ─────────────
@@ -772,8 +794,10 @@ def build_v2_tasks():
         "costing_chart_table": COSTING_TABLE,
         "duty_cache_table": P("duty_cache_table"),
         "cache_ttl_days": P("duty_cache_ttl_days"),
+        "bom_segments_table": P("bom_segments_table"),
         "run_costing": P("run_costing"),
-    }, depends=[dep("transform"), dep("pull_master_dtc"), dep("pull_lineplan_dtc")]))
+    }, depends=[dep("transform"), dep("pull_bom"), dep("pull_master_dtc"),
+                dep("pull_lineplan_dtc")]))
 
     # ── Stage 40: THE single DTC write window (NEW) ─────────────────────────
     # Replaces v1's phase1_push (Phases 1/4/7) + fill_bom_data (Phase 10) +
@@ -791,6 +815,8 @@ def build_v2_tasks():
         "dtc_document": DOC, "dtc_environment": ENV, "dry_run": DRY,
         "delta_only": P("delta_only"), "batch_size": "100",
         "costing_chart_table": COSTING_TABLE,
+        "bom_segments_table": P("bom_segments_table"),
+        "explain_limit": P("explain_limit"),
         "run_wip_push": P("run_wip_push"), "run_duty_push": P("run_duty_push"),
     }, depends=[dep("request_manager"), dep("build_costing")]))
 
