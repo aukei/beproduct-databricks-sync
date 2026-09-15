@@ -171,14 +171,33 @@ for `registry.build_registry_row()`, `registry.refresh()`'s pre-filter and
 request-creation eligibility). The most upstream gate in the pipeline: excluding a
 request here removes its rows from every stage below.
 
-1. **Not `(BACKUP)`-named** — case-insensitive regex on `\(backup`, anywhere in
-   the reference, any variant (`(BACKUP 2)` included). 81 of 86 active KTB WIP
-   requests were backup-named and were being pulled before this fix
-   (2026-09-10) — the root cause of the long-standing "~199/227 rows have a null
-   `bp_style_number`" problem.
-2. **Parses as `<customer> <seasonCode> <brand>`** — ≥3 whitespace-delimited
+1. **No lifecycle marker word** — case-insensitive, matched at a word boundary
+   with any suffix: **cancel / backup / archive / delete**
+   (`phase1.EXCLUDED_NAME_WORDS`; the stems are `cancel`, `backup`, `archiv`,
+   `delet`, so `cancelled`, `archival` and `deletion` match too). Began as a
+   `\(backup`-only rule on 2026-09-10 — 81 of 86 active KTB WIP requests were
+   backup-named and were being pulled, the root cause of the long-standing
+   "~199/227 rows have a null `bp_style_number`" problem — and was widened to
+   the full word list on 2026-09-15 after a live inventory turned up
+   `Cancel`-named requests and five named simply `DELETED`. The widening also
+   catches a **bare** `BACKUP` with no parentheses, which the original rule
+   missed.
+2. **No `-SUPPLIER` marker** — case-insensitive `-supplier\b`. DTC generates
+   supplier-scoped artifact requests named
+   `<customer> <seasonCode> <brand>-SUPPLIER <xxx>`; they are DTC's own
+   artifacts, never sync targets. Without this they parse as perfectly valid
+   in-scope requests, since the parser takes everything after the season code
+   as the brand — four appeared in a single afternoon in UAT.
+3. **Parses as `<customer> <seasonCode> <brand>`** — ≥3 whitespace-delimited
    tokens with the 2nd matching `[A-Za-z]{2}\d{2}`.
-3. **Customer token matches** (case-insensitive) — `KON …` developer requests out.
+4. **Customer token matches** (case-insensitive) — `KON …` developer requests out.
+
+> **Combined live effect (2026-09-15):** of 109 requests in the `KTB WIP`
+> document, **3** are in scope. Before the two 2026-09-15 rules it was 10. The
+> `(BACKUP)`-era duplicate in-scope name
+> (`KTB FW26 Cancel Wrangler Global TALISMAN LTD`, present twice with different
+> `request_id`s) disappears as a side effect — both copies are `Cancel`-named.
+> Read-only inventory: `dtc/notebooks/v2_inspect_requests.py`.
 
 **Exception:** `pull_lineplan_dtc` has its own independent, *unfiltered* discovery
 loop and never calls `is_in_scope()` — the project team has not settled a LinePlan

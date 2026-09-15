@@ -64,16 +64,21 @@ for bad in ["KTB Wrangler", "KTB SPRING Wrangler", ""]:
     except ValueError:
         check(True, f"invalid reference {bad!r} raises")
 
-print("\n[2b] is_in_scope() -- '(BACKUP)' exclusion (added 2026-09-10, WIP-only)")
+print("\n[2b] is_in_scope() -- lifecycle-word exclusion "
+      "(cancel/backup/archive/delete; '(BACKUP)' 2026-09-10, widened 2026-09-15; WIP-only)")
 check(is_in_scope("KTB (BACKUP) Wrangler", "KTB") is False,
       "(BACKUP) right after customer token -> excluded")
 check(is_in_scope("KTB FW26 (BACKUP) Wrangler", "KTB") is False,
       "(BACKUP) in the brand portion (real live shape) -> excluded")
 check(is_in_scope("KTB FW26 Wrangler (BACKUP)", "KTB") is False,
       "(BACKUP) appended at the very end -> excluded")
-check(is_in_scope("KTB FW26 Wrangler Backup", "KTB") is True,
-      "the bare word 'Backup' without parens is NOT the marker -> still in scope "
-      "(only the literal '(backup)' substring is excluded)")
+# SUPERSEDED 2026-09-15 (owner spec): the rule widened from "(backup" to the
+# whole-word list cancel/backup/archive/delete, so a BARE "Backup" is now
+# excluded too. The previous assertion here expected the opposite and is
+# replaced rather than deleted, so the change of rule stays visible.
+check(is_in_scope("KTB FW26 Wrangler Backup", "KTB") is False,
+      "bare word 'Backup' (no parens) -> NOW excluded (rule widened 2026-09-15; "
+      "previously in scope, when only the literal '(backup' marker counted)")
 check(is_in_scope("KON FW26 (BACKUP) Wrangler (Test)", "KTB") is False,
       "real live example name (KON customer + BACKUP) -- excluded (for two "
       "independent reasons: BACKUP marker, and customer mismatch)")
@@ -396,6 +401,34 @@ if _failures:
     for f in _failures:
         print("   -", f)
     sys.exit(1)
+
+# ── [lifecycle] cancel / backup / archive / delete are never sync targets ──
+# Owner spec 2026-09-15, widening the original "(BACKUP)"-only rule after live
+# inventory turned up "Cancel"-named requests and one named simply "DELETED".
+for _ref in (
+    "KTB SS28 Cancel Wrangler-INCAS INTERNAT",
+    "KTB FW26 Cancel Wrangler Global TALISMAN LTD",
+    "KTB SS28 (BACKUP) Wrangler",          # original paren form still caught
+    "KTB SS28 (BACKUP 2) Wrangler Collaborations",
+    "KTB SS28 BACKUP Wrangler",            # bare word -- the old rule MISSED this
+    "KTB SS28 Archive Wrangler",
+    "KTB SS28 Wrangler ARCHIVED",
+    "KTB SS28 Deleted Wrangler",
+    "KTB SS28 Wrangler cancellation",      # inflected forms
+    "KTB SS28 Wrangler archival",
+    "KTB SS28 Wrangler deletion",
+):
+    assert phase1.is_in_scope(_ref, "KTB") is False, f"should be out of scope: {_ref!r}"
+
+# Legitimate names must survive -- the markers are whole words, not substrings.
+for _ref in (
+    "KTB SS28 Collaborations",
+    "KTB SS28 Wrangler Western",
+    "KTB SS28 Wrangler Collaborations",
+):
+    assert phase1.is_in_scope(_ref, "KTB") is True, f"should be in scope: {_ref!r}"
+print("  ✓ [lifecycle] cancel/backup/archive/delete excluded from scope")
+
 
 # ── [-SUPPLIER] DTC supplier-artifact requests are never sync targets ───────
 # Added 2026-09-15 (owner spec). DTC generates

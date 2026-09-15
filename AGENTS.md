@@ -392,6 +392,17 @@ this stays true by construction; verify it stays true after any change).
   gate. A hard exclusion (`material_exclude_columns`, now empty by default) was
   the earlier holding position and is strictly worse -- it would also refuse to
   fill a genuinely blank cell.
+- **Request scope is now gated on LIFECYCLE MARKER WORDS, not just
+  `(BACKUP)`** (owner spec 2026-09-15). `phase1.is_in_scope()` excludes any
+  reference containing **cancel / backup / archive / delete**, matched
+  case-insensitively at a word boundary with any suffix
+  (`phase1.EXCLUDED_NAME_WORDS` = `cancel`, `backup`, `archiv`, `delet`, so
+  `cancelled` / `archival` / `deletion` match too). This SUPERSEDES the
+  narrower `\(backup` rule from 2026-09-10, which required an opening paren and
+  therefore missed a BARE `BACKUP`, every `Cancel`-named request, and five
+  requests named simply `DELETED`. A pre-existing unit test asserting that a
+  bare `"Backup"` stayed IN scope was updated in place rather than deleted, so
+  the change of rule stays visible in the test file.
 - **`-SUPPLIER` requests are DTC artifacts, never sync write targets.**
   `phase1.is_in_scope()` now also excludes any reference matching
   `-supplier\b` (case-insensitive), alongside the existing `\(backup` rule.
@@ -402,13 +413,14 @@ this stays true by construction; verify it stays true after any change).
   season code as the brand -- so each would have become a first-class push
   target on the next registry refresh. Live effect: in-scope requests dropped
   from 10 to 6 of 109.
-- **Still unresolved, flagged not fixed:** `KTB FW26 Cancel Wrangler Global
-  TALISMAN LTD` exists TWICE with different `request_id`s -- a genuine
-  duplicate in-scope name that will trip `DUPLICATE_ACTIVE_NAME` the moment the
-  registry discovers it. And `"Cancel ..."`-prefixed requests
-  (`KTB SS28 Cancel Wrangler-INCAS INTERNAT`) are still in scope, registering
-  brand `"Cancel Wrangler-INCAS INTERNAT"`; no ruling yet on whether cancelled
-  sheets should be sync targets. Read-only inventory:
+- **Combined live effect (2026-09-15):** of 109 requests in the `KTB WIP`
+  document, in-scope went 10 -> 6 (`-SUPPLIER`) -> **3** (lifecycle words).
+  What survives: `KTB SS28 Collaborations` (registered, 60 rows),
+  `KTB SS28 Wrangler Collaborations` and `KTB SS28 Wrangler Western` (neither
+  registered yet). **The duplicate in-scope name resolved itself**: both copies
+  of `KTB FW26 Cancel Wrangler Global TALISMAN LTD` are `Cancel`-named, so
+  `DUPLICATE_ACTIVE_NAME` no longer has anything to fire on -- the registry
+  inventory now reports zero duplicates. Read-only inventory:
   `dtc/notebooks/v2_inspect_requests.py`.
 
 **v2 stage-3 live validation + the "Sub Class" investigation (2026-09-15, UAT

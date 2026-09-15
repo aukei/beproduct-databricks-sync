@@ -285,18 +285,43 @@ def parse_request_reference(reference: str) -> Dict[str, str]:
     return {"customer": customer, "season_code": season_code, "brand": brand}
 
 
+# Lifecycle markers that take a WIP request permanently out of sync scope
+# (owner spec 2026-09-15): a request whose NAME contains any of these words is
+# not a live sheet, whatever else the name parses as.
+#
+# Matched at a word boundary with any suffix, so the inflected forms real data
+# actually uses are covered: cancel/cancelled/canceled/cancellation,
+# backup/backups, archive/archived/archival, delete/deleted/deletion. The stems
+# deliberately omit a trailing "e" ("archiv", "delet") so "archival" and
+# "deletion" match too.
+#
+# This SUPERSEDES the narrower `\(backup` rule added 2026-09-10, which required
+# an opening paren and so would have missed a bare "BACKUP" or "ARCHIVE"
+# marker. "(BACKUP)" and "(BACKUP 2)" still match, since "(" is a non-word
+# character and the boundary falls before "BACKUP".
+EXCLUDED_NAME_WORDS: Tuple[str, ...] = ("cancel", "backup", "archiv", "delet")
+EXCLUDED_NAME_RE = re.compile(
+    r"\b(" + "|".join(EXCLUDED_NAME_WORDS) + r")\w*", re.IGNORECASE)
+
+
 def is_in_scope(reference: str, customer: str) -> bool:
     """
     True if a request reference is in scope for the given customer.
 
-    In scope == reference contains NEITHER the "(BACKUP)" marker NOR a
+    In scope == reference contains NO lifecycle marker word
+    (cancel / backup / archive / delete, see `EXCLUDED_NAME_WORDS`) AND no
     "-SUPPLIER" marker (see below) AND parses cleanly AND its customer token
     matches the target customer
     (case-insensitive). E.g. with customer='KTB', 'KTB FW26 Wrangler' is in
     scope while 'KON FW26 Wrangler' (developer test data) is not.
 
-    "(BACKUP)"-named requests are NEVER in scope (added 2026-09-10, owner
-    spec) -- closes a live-confirmed gap: ~199/227 dtc_wip_ktb rows with a
+    Lifecycle-marked requests are NEVER in scope. This began as a "(BACKUP)"
+    rule (2026-09-10) and was widened to the word list above on 2026-09-15
+    (owner spec) after live inventory turned up `"KTB FW26 Cancel Wrangler
+    Global TALISMAN LTD"` (twice, with different request_ids -- a genuine
+    duplicate in-scope name), `"KTB SS28 Cancel Wrangler-INCAS INTERNAT"` and a
+    request named simply `"DELETED"`. The original "(BACKUP)" case (added
+    2026-09-10, owner spec) -- closes a live-confirmed gap: ~199/227 dtc_wip_ktb rows with a
     null bp_style_number all traced back to legacy "(BACKUP)"-named WIP
     requests that were incidentally parsing as in-scope, since this
     function previously only checked customer/season-code structure, never
@@ -340,7 +365,7 @@ def is_in_scope(reference: str, customer: str) -> bool:
     explicitly wants "(BACKUP)"-named LinePlan requests included (owner
     decision, 2026-09-01) -- see that notebook's module docstring.
     """
-    if re.search(r"\(backup", str(reference), re.IGNORECASE):
+    if EXCLUDED_NAME_RE.search(str(reference)):
         return False
     if re.search(r"-supplier\b", str(reference), re.IGNORECASE):
         return False

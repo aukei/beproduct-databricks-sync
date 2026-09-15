@@ -446,10 +446,17 @@ parsed as valid in-scope requests and would each have become a push target on
 the next registry refresh. `phase1.is_in_scope()` now excludes `-supplier\b`
 alongside `\(backup`. In-scope requests dropped from 10 to 6 of 109 live.
 
-Two related items are **flagged, not fixed**: `KTB FW26 Cancel Wrangler Global
-TALISMAN LTD` exists twice with different `request_id`s (a real duplicate
-in-scope name), and `Cancel …`-prefixed requests remain in scope with brand
-`"Cancel Wrangler-INCAS INTERNAT"`. Both need an owner ruling.
+**Lifecycle marker words are out of scope (2026-09-15)**
+
+`is_in_scope()` now also excludes any reference containing **cancel / backup /
+archive / delete**, matched at a word boundary with any suffix. This supersedes
+the narrower `\(backup` rule, which required an opening paren and so missed a
+bare `BACKUP`, every `Cancel`-named request, and five named simply `DELETED`.
+
+Combined live effect: of 109 requests, in-scope went **10 → 6 → 3**. The
+duplicate in-scope name resolved itself — both copies of
+`KTB FW26 Cancel Wrangler Global TALISMAN LTD` are `Cancel`-named, so the
+inventory now reports zero duplicates.
 
 **Cadence-limiting, independent of this refactor****Cadence-limiting, independent of this refactor**
 
