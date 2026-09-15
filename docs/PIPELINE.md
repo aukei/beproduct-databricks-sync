@@ -62,9 +62,16 @@ development) viable at all:
 2. **A run that changes nothing must write nothing.** Not an emergent property of
    per-field diffing — an asserted, unit-tested invariant of the plan builder. At
    12 runs/day this is the difference between safe and intolerable.
-3. **≤2 PATCH calls per request.** The floor is 2, not 1: `DTCConnector.patch_rows`
-   rejects a body mixing `rowId` (update) and `rowIndex` (insert). One updates
-   call, one inserts call, back to back.
+3. **One write *window* per request — not a fixed call count.** The floor is 2
+   calls, not 1: `DTCConnector.patch_rows` rejects a body mixing `rowId`
+   (update) and `rowIndex` (insert), so it is one updates call plus one inserts
+   call, back to back.
+   > **This becomes more than 2 calls at scale.** `batch_size` (default 100)
+   > chunks each side, so a request with 250 changed rows issues 3 update
+   > calls, not 1. They are still consecutive, so it remains **one write
+   > window** — which is the property that actually matters to users — but do
+   > not quote "≤2 calls" once the real `KTB` folder is in play. See the
+   > go-live checklist in [MIGRATION_V1_V2.md](MIGRATION_V1_V2.md).
 4. **No condition tasks.** Every `run_*` flag is read as a plain widget inside its
    own notebook, which exits as a SUCCESS no-op when disabled. Databricks
    propagates a condition task's `EXCLUDED` outcome to every downstream dependent

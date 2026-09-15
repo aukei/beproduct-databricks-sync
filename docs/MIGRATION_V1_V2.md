@@ -522,6 +522,22 @@ duplicate in-scope name resolved itself — both copies of
 `KTB FW26 Cancel Wrangler Global TALISMAN LTD` are `Cancel`-named, so the
 inventory now reports zero duplicates.
 
+## Go-live checklist — `folder_name` is still `TEST KTB`
+
+Everything validated so far ran against **`TEST KTB`: 8 styles, 60 WIP rows, 1
+in-scope request.** Production is **~250 styles**, roughly **30×**. Flipping
+`folder_name` to `KTB` is the moment that volume arrives, so re-check these
+before doing it:
+
+| Item | Why it changes at 30× |
+|---|---|
+| **Sample-app enrichment** | One `app_get` per (style × app), pinned to `FULL`. 8 styles ≈ 48 calls; 250 styles ≈ **1,500 calls per run**, ~18,000/day at 12 runs. This is the single largest runtime item and it scales linearly. Give it its own slower schedule before go-live. |
+| **`batch_size` (default 100)** | The "≤2 PATCH calls per request" figure only holds up to 100 rows per side. A request with 250 changed rows issues 3 update calls. Still **one write window** (consecutive), but tune or re-measure rather than assuming the number. |
+| **`wip_push` planning** | Measured linear, 36 ms for 250 styles / 1500 rows — not a concern, but re-confirm rather than assume. |
+| **Live `get_sheet` per request** | 1 request today. Production has more in-scope requests, each costing a read. Reads are free w.r.t. locking but not w.r.t. runtime. |
+| **The catch-up write** | The first `KTB` run will carry whatever drift the v1 pre-filters left unreachable — potentially much larger than the 40 cells seen in UAT. **Run `dry_run=true` and read `sample_changes` first.** |
+| **NT Orbit** | More styles ⇒ more genuinely-blank duty rows ⇒ real lookups at ~30–60 s each, serial. `duty_compute` has no call budget and no checkpointing; a large backlog may need `orbit_parallel_calls=true` or several runs to drain. |
+
 **Cadence-limiting, independent of this refactor****Cadence-limiting, independent of this refactor**
 
 - **Sample-app enrichment.** One `app_get` per (style × app) — ~876 calls, ~120 s

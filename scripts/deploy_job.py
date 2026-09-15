@@ -190,10 +190,16 @@ SHARED_CLUSTER_KEY = "shared"
 # one shared running cluster -- each job still gets its own independent
 # ephemeral job cluster (full isolation, ClassicPreview single-node as
 # before), just provisioned from pre-warmed pooled VMs instead of cold Azure
-# VM allocation. min_idle_instances=1 keeps one warm instance ready;
-# max_capacity=6 covers all 3 jobs potentially overlapping plus headroom.
-# Owner explicitly confirmed independence is fine -- this is purely a
-# warm-time optimization, not a coupling mechanism.
+# VM allocation. max_capacity=6 covers the jobs potentially overlapping plus
+# headroom.
+#
+# **min_idle_instances set to 0 on 2026-09-15.** Once the v2 main DAG and
+# duty_compute both moved to serverless, the ONLY jobs still referencing this
+# pool were the PAUSED v1 main and images jobs -- so it was holding warm VMs
+# for nothing. The pool is deliberately KEPT rather than deleted: those paused
+# job definitions reference it in their cluster specs, and deleting it would
+# break the one-flag rollback path. min_idle=0 stops the idle cost while
+# leaving the pool functional; a rollback just starts cold.
 INSTANCE_POOL_ID = "0903-055346-hose1-pool-cia9e7xn"  # "beproduct-dtc-sync-pool-v5" (Standard_D4as_v5)
 
 # ── Cluster spec (mirrors live cluster retrieved 2026-06-20) ────────────────

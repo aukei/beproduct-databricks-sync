@@ -365,6 +365,26 @@ this stays true by construction; verify it stays true after any change).
 
 ## Verified discoveries log (append-dated; do not delete)
 
+**Instance pool idled to zero; `folder_name` still `TEST KTB` (2026-09-15):**
+- `beproduct-dtc-sync-pool-v5` **`min_idle_instances` 1 -> 0**. Once the v2 main
+  DAG and `duty_compute` both moved to serverless, the only jobs still
+  referencing the pool were the PAUSED v1 main and images jobs -- it was
+  holding warm VMs for nothing (observed `idle=2, used=0`). The pool is
+  deliberately **KEPT, not deleted**: those paused definitions reference it in
+  their cluster specs, so deleting it would break the one-flag rollback. Idle
+  VMs auto-terminate after 30 min; a rollback just starts cold.
+- **`folder_name` remains `TEST KTB` until go-live** (owner confirmed). Every
+  v2 validation so far -- exact `costing_chart` match, the zero-write
+  invariant, the 275 s wall -- was measured on **8 styles / 60 WIP rows / 1
+  in-scope request**. Production is ~250 styles, roughly **30x**. None of the
+  timing figures extrapolate; the correctness results do.
+- **A design-rule caveat this surfaced:** "<=2 PATCH calls per request" holds
+  only up to `batch_size` (default 100) rows per side. A request with 250
+  changed rows issues 3 update calls. They are still CONSECUTIVE, so it remains
+  **one write window** -- which is the property users actually experience -- but
+  the call count is not a constant. Corrected in `docs/PIPELINE.md` design rule
+  3; full go-live checklist in `docs/MIGRATION_V1_V2.md`.
+
 **`duty_compute` moved to SERVERLESS (2026-09-15):**
 - Audited clean first (no `sparkContext` / `.rdd` / UDFs / unbound
   `DataFrame.<method>` / `%pip` in the notebook or in `connectors/nt_orbit.py`
