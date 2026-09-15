@@ -365,6 +365,40 @@ this stays true by construction; verify it stays true after any change).
 
 ## Verified discoveries log (append-dated; do not delete)
 
+**Final v2 topology -- TWO jobs (owner decision 2026-09-15):**
+- **`BeProduct_DTC_sync_v2`** (367710575109755) -- 13 tasks, serverless,
+  **every 2 h at :05 on ODD hours (01,03,…,23) HKT**, 12 runs/day. Now includes
+  `phase3_images` as Stage 45, depending on `wip_push`.
+- **`BeProduct_DTC_sync_duty_compute`** (1026599988408090) -- **10:00 and 15:00
+  HKT daily**, unpaused, still on the classic cluster/pool.
+- `BeProduct_DTC_sync_images` (847087837807970) and the v1 `BeProduct_DTC_sync_dag`
+  (294837488757511) are both PAUSED and superseded. Kept, not deleted: run
+  history is worth having and re-enabling either is a one-flag rollback.
+
+**Why images belongs IN the DAG but duty_compute does NOT:**
+- `phase3_images` CANNOT share `wip_push`'s PATCH -- image cells are writable
+  only via the multipart `/images` endpoint and DTC rejects any `sheetData`
+  write to `Style Image` (HTTP 400). It is irreducibly a second write window.
+  What folding it in buys is ADJACENCY: on its own schedule its window landed
+  at arbitrary times relative to the main run, giving users two unpredictable
+  disruptions per cycle. Now it lands seconds after `wip_push`'s, so there is
+  one period per run to avoid. It also sees `wip_push`'s newly-inserted rows in
+  the same run instead of the next one.
+- `compute_duty_rates` stays OUT because NT Orbit is an **external,
+  rate-limited service whose latency we do not control** (~30-60 s per uncached
+  call, serial), and the notebook has **no call budget and no checkpointing** --
+  its cache MERGE happens once at the end, so a timeout discards the whole
+  run's lookups. In front of the write window that would make the window
+  unpredictable; behind it, a burst could overlap the next 2-hourly run.
+  Keeping it separate costs nothing in correctness: its DURABLE output is
+  `nt_orbit_duty_cache`, and `build_costing`'s Step 4c refills `costing_chart`
+  from that cache on every rebuild with ZERO API calls -- so values computed at
+  10:00 are picked up and pushed by the 11:05 main run.
+- **Live-verified 2026-09-15**: the 13-task DAG ran SUCCESS in 275 s, and in
+  steady state opens **ZERO write windows** -- `wip_push` 0 updates / 0 PATCH
+  calls / 60 NOOPs, `phase3_images` 10 rows skipped `no_source_image` / 0
+  uploads. A run that changes nothing now touches DTC not at all, end to end.
+
 **v2 LIVE + SCHEDULED (2026-09-15) -- the invariant proven against real DTC:**
 - **Real run** (job 367710575109755, `dry_run=false`): SUCCESS, 12/12 tasks,
   263 s wall. `wip_push` pushed **40 updates in 1 PATCH call, 1 write window**,

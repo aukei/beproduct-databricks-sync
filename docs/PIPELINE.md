@@ -51,9 +51,14 @@ development) viable at all:
 
 ## Design rules
 
-1. **One write window per request per run.** Every DTC WIP write in the main job
-   happens in `wip_push` (Stage 40) and nowhere else. Adding a second
-   DTC-writing task to this job needs an explicit decision recorded in AGENTS.md.
+1. **One write *period* per request per run.** Every `sheetData` write happens
+   in `wip_push` (Stage 40). `phase3_images` (Stage 45) is the one other DTC
+   writer and is irreducibly separate — image cells are writable only through
+   the multipart `/images` endpoint, and DTC rejects any `sheetData` write to
+   `Style Image`. It runs immediately after `wip_push` so the two windows are
+   **adjacent**, not scattered. In steady state it uploads nothing and opens no
+   window at all. Adding any further DTC-writing task needs an explicit
+   decision recorded in AGENTS.md.
 2. **A run that changes nothing must write nothing.** Not an emergent property of
    per-field diffing — an asserted, unit-tested invariant of the plan builder. At
    12 runs/day this is the difference between safe and intolerable.
@@ -88,14 +93,17 @@ p0_pull ─► p0_upsert ─► p0_push ─┬─► bp_style_sync ─┬─► 
                                  └─► pull_lineplan_dtc ────────────┴─► build_costing ───┤
                                                                                         ▼
                                                                                     wip_push
-                                                                    (the only DTC write in this job)
+                                                                                        │
+                                                                                        ▼
+                                                                                  phase3_images
 ```
 
-Companion jobs, unchanged from v1 and deliberately outside this DAG:
+**Two jobs, not four** (2026-09-15). `phase3_images` moved INTO this DAG; the
+standalone images job is paused and superseded. Only one companion job remains:
 
 ```
-BeProduct_DTC_sync_duty_compute   compute_duty_rates    NT Orbit → costing_chart. Zero DTC contact.
-BeProduct_DTC_sync_images         phase3_images         Style Image multipart upload. Own write window.
+BeProduct_DTC_sync_duty_compute   compute_duty_rates   NT Orbit → nt_orbit_duty_cache + costing_chart.
+                                                       Zero DTC contact. 10:00 and 15:00 HKT.
 ```
 
 ---
@@ -115,6 +123,7 @@ BeProduct_DTC_sync_images         phase3_images         Style Image multipart up
 | 25 | `request_manager` | `p1_dtc_request_manager` | reused | `transform`, `pull_master_dtc` |
 | 30 | `build_costing` | `p9a_build_costing_chart` (`wip_effective_mode=intent`) | reused + Step 1a | `transform`, `pull_bom`, `pull_master_dtc`, `pull_lineplan_dtc` |
 | 40 | `wip_push` | `v2_wip_push` | **NEW** | `request_manager`, `build_costing` |
+| 45 | `phase3_images` | `p3_beproduct_to_dtc_images` | reused, moved in | `wip_push` |
 | 50 | `phase2_push` | `p2_push_dtc_to_beproduct` | reused | `transform`, `pull_master_dtc` |
 
 Every dependency edge carries `run_if=ALL_DONE`. A stage that fails should degrade

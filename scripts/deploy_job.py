@@ -249,6 +249,25 @@ JOB_SCHEDULE_V2 = jobs.CronSchedule(
     pause_status=jobs.PauseStatus.UNPAUSED,
 )
 
+# ── duty_compute schedule (owner spec 2026-09-15) ───────────────────────────
+# 10:00 and 15:00 HKT daily. Deliberately NOT in the main DAG: NT Orbit is an
+# EXTERNAL, rate-limited service whose latency we do not control (~30-60 s per
+# uncached call, serial), and this notebook has no call budget and no
+# checkpointing -- its cache MERGE happens once at the end, so a timeout
+# discards the whole run's lookups. Putting that in front of the 2-hourly write
+# window would make the window unpredictable; putting it behind still risks
+# overlapping the next run.
+#
+# Keeping it separate costs nothing in correctness: its DURABLE output is
+# `nt_orbit_duty_cache`, and build_costing's Step 4c refills `costing_chart`
+# from that cache on every rebuild with zero API calls. Values computed at
+# 10:00 are therefore picked up and pushed by the next main run (11:05).
+JOB_SCHEDULE_DUTY = jobs.CronSchedule(
+    quartz_cron_expression="0 0 10,15 * * ?",
+    timezone_id="Asia/Hong_Kong",
+    pause_status=jobs.PauseStatus.UNPAUSED,
+)
+
 JOB_TAGS = {"userpurpose": "lft-job-bpsync"}
 JOB_QUEUE = jobs.QueueSettings(enabled=True)
 
@@ -866,6 +885,29 @@ def build_v2_tasks():
         "run_wip_push": P("run_wip_push"), "run_duty_push": P("run_duty_push"),
     }, depends=[dep("request_manager"), dep("build_costing")]))
 
+    # ── Stage 45: Style Image upload -- the SECOND write window ─────────────
+    # Folded into this DAG 2026-09-15 (owner decision) rather than left on its
+    # own schedule. It CANNOT share wip_push's PATCH: image cells are writable
+    # only through the multipart /images endpoint, and DTC rejects any
+    # sheetData write to "Style Image" outright (HTTP 400). So it is
+    # irreducibly a second write window.
+    #
+    # What folding it in buys is ADJACENCY. On an independent schedule its
+    # window landed at arbitrary times relative to the main run, giving users
+    # two unpredictable disruptions per cycle; here it lands seconds after
+    # wip_push's, so there is still only one period per run to avoid. It also
+    # now sees wip_push's newly-inserted rows in the same run.
+    #
+    # Cheap in practice: it only uploads where "Style Image" is blank AND a
+    # source exists, so in steady state it writes nothing and opens no window
+    # at all. run_if=ALL_DONE so a failed push never blocks it and vice versa.
+    tasks.append(v2_task("phase3_images", f"{NB_BP_V2}/p3_beproduct_to_dtc_images", {
+        "catalog": CAT, "schema": SCH, "staging_table": "beproduct_to_dtc_staging",
+        "dtc_environment": ENV, "dtc_workspace": WS, "dry_run": DRY,
+        "http_timeout": P("img_http_timeout"), "max_uploads": P("img_max_uploads"),
+        "run_phase3": P("run_phase3"),
+    }, depends=[dep("wip_push")]))
+
     # ── Stage 50: DTC -> BeProduct (unchanged; writes BeProduct, never DTC) ──
     tasks.append(v2_task("phase2_push", f"{NB_DTC_V2}/p2_push_dtc_to_beproduct", {
         "catalog": CAT, "schema": SCH, "customer": CUST, "dtc_environment": ENV,
@@ -927,6 +969,7 @@ JOB_SPECS = {
     "duty_compute": {
         "display_name": "BeProduct_DTC_sync_duty_compute",
         "build_tasks": build_duty_compute_tasks,
+        "schedule": JOB_SCHEDULE_DUTY,
     },
     "images": {
         "display_name": "BeProduct_DTC_sync_images",
