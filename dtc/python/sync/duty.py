@@ -67,6 +67,15 @@ MARKET_COLUMNS: Dict[str, str] = {
     "duty_rate_mx": "MX",
 }
 
+# Every costing_chart column that can hold a duty VALUE to push to DTC WIP.
+# Derived from MARKET_COLUMNS so the market list cannot drift between the
+# lookup logic and the push. Promoted here 2026-09-14 (v2): this was a
+# notebook-local constant in p9b2_push_duty_to_wip.py, and sync/wip_plan.py
+# now needs the same list -- one definition, not two.
+DUTY_VALUE_FIELDS: Tuple[str, ...] = (
+    ("hts_code",) + tuple(MARKET_COLUMNS) + ("tariff_rate",)
+)
+
 # costing_chart columns concatenated (in order) to build product_description.
 # Spec: Style Description (C) + Content (I) + Gender (J) + Class (K) + Sub Class (L).
 # "color_name" added 2026-09-07 (owner spec) -- REVERSES the earlier design

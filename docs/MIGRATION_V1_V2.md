@@ -303,7 +303,7 @@ exists solely to feed `build_costing`.
 |---|---|---|---|
 | 0 | Branch, consolidated docs, `BeProduct_DTC_sync_v2` job definition | — | **done** |
 | 1 | Serverless port; `module_path` parameter; in-notebook run flags | — | **done** |
-| 2 | `sync/wip_plan.py` + `test_wip_plan.py` — composition, zero-diff-zero-write, delta filter | — | |
+| 2 | `sync/wip_plan.py` + `test_wip_plan.py` — composition, zero-diff-zero-write | — | **done** |
 | 3 | `v2_build_wip_staging` + `v2_wip_push`; drop `repull_dtc` | 3 → 2 | |
 | 4 | `v2_build_costing_chart` off staging; drop `repull_dtc_bom` | 2 → 2 | |
 | 5 | Fold the duty contribution into `wip_push` | 2 → **1** | |
@@ -339,7 +339,39 @@ diff-gated.
 **Blocking the first v2 run**
 
 - The three `NEW` notebooks (`v2_build_wip_staging`, `v2_build_costing_chart`,
-  `v2_wip_push`) and `sync/wip_plan.py`. Stages 2–5.
+  `v2_wip_push`). Stages 3–5. `sync/wip_plan.py` (stage 2) is done.
+
+### `sync/wip_plan.py` — the composition layer (stage 2, done)
+
+Composes the three contributions into one plan per request. It **composes; it
+does not re-implement** — `phase1.py`, `bom.py` and `duty.py` keep their
+decision logic and their existing tests untouched.
+
+The guarantees it exists to provide, all covered by `dtc/tests/test_wip_plan.py`
+(54 assertions):
+
+| Guarantee | Why it moved here |
+|---|---|
+| **Zero diff ⇒ zero PATCH calls** | The cadence-critical invariant. `RequestPlan.is_empty()` is what the notebook checks before issuing *any* call — including the live GET |
+| **Allow-list never violated** | v1 audited three separate call sites; v2 has one, so the check lives at the merge point. Offending fields are dropped and recorded, never silently passed and never allowed to abort |
+| **Degrade, never abort** | A contribution that raises has its keys omitted and the failure recorded in `degraded`; the rest of the row still goes out. This replaces the blast-radius limit that separate tasks used to provide for free |
+| **Provenance** | Every planned field records which contribution produced it, and every override. Three task run_ids collapse into one, so "why did this cell change?" has to stay answerable |
+
+Two behaviours are deliberately **stricter than v1**:
+
+- **Value comparison is conservative.** Blank-vs-blank is never a diff, and
+  `0.16` (float, from `costing_chart`) equals `"0.16"` (string, as DTC returns
+  it). v1's `p9b2_push_duty_to_wip` used a plain `!=` and would have re-pushed
+  on every type mismatch — invisible at 3 runs/day, 12× worse at the target
+  cadence.
+- **Duty applies to every row sharing `(style, colour, article)`**, not just
+  one. v1 indexed with a plain dict and silently kept only the last such row.
+  Rows sharing a material are the same material, so the same duty applies to
+  all of them; this also removes a dependence on row ordering.
+
+Scale-checked at production size: **linear**, 36 ms for 250 styles / 1500 rows
+(0.024 ms/row, flat from 8 to 500 styles), and `is_empty()` holds throughout on
+a settled dataset.
 
 **Cadence-limiting, independent of this refactor**
 

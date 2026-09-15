@@ -32,7 +32,9 @@ code constants below, then the tests. Companion SSOTs:
 | Sample submits → DTC | `SAMPLE_SUBMIT_FIELDS` + `format_sample_field` | `dtc/python/sync/samples.py` |
 | BOM → DTC material fields | `to_wip_fields()` | `dtc/python/sync/bom.py` |
 | Costing/duty → DTC | `WIP_HTS_COL` / `WIP_DUTY_COL` / `WIP_TARIFF_COL` | `dtc/python/sync/duty.py` |
-| **Plan composition (v2)** | `compute_request_plan()` | `dtc/python/sync/wip_plan.py` *(NEW)* |
+| **Plan composition (v2)** | `compute_request_plan()` | `dtc/python/sync/wip_plan.py` |
+| **Canonical allow-list (derived)** | `allowed_patch_columns()` | `dtc/python/sync/wip_plan.py` |
+| Duty value columns | `DUTY_VALUE_FIELDS` | `dtc/python/sync/duty.py` |
 | Staging denormalization | `FIELD_MAPPING` + staging `select` | `beproduct/v2_build_wip_staging.py` *(NEW)* |
 
 Then update the tests: `test_phase1.py`, `test_phase2.py`, `test_phase3.py`,
@@ -225,8 +227,18 @@ can only be set through the multipart `/images` endpoint; DTC rejects any
 
 In v1 these were three separately-audited call sites. In v2 they are one, and the
 allow-list is the union above — which makes the audit easier, and makes a leak
-from any one contribution a whole-push problem. `wip_plan.compute_request_plan()`
-should assert its output keys against this set.
+from any one contribution a whole-push problem.
+
+**This table is documentation; the executable definition is
+`wip_plan.allowed_patch_columns()`**, which derives the set from the payload
+builders themselves (`phase1.FIELD_MAPPING`, the material column constants, and
+`duty.WIP_HTS_COL` / `WIP_DUTY_COL` / `WIP_TARIFF_COL`) rather than restating
+it. Add a field to a mapping and it is allowed automatically — the two cannot
+drift. Every plan is checked against it, and a field outside it is dropped and
+recorded in `RequestPlan.violations` rather than reaching a PATCH body.
+
+Tariff columns are included only while `duty.WIP_TARIFF_COLS_LIVE` is True, so
+flipping that flag when DTC adds the columns is still the only change needed.
 
 ---
 
