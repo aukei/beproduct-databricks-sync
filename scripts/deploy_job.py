@@ -295,6 +295,10 @@ JOB_PARAMS = {
     "bom_table": "customer_teckpack_style_latest",  # resolves latest_techpack_style_log_id
     "bom_log_table": "customer_teckpack_style_log",  # custom_fields -- the actual BOM source
     "bom_segments_table": "tpm_bom_segments",  # Stage 20b output; read by wip_push + build_costing
+    # Unqualified output table name for build_costing. Point at
+    # "costing_chart_kei" to run the stage without touching the real table,
+    # which the duty_compute job reads and MERGEs (AGENTS.md standing rule).
+    "costing_chart_table_name": "costing_chart",
     "explain_limit": "40",            # rows per request in wip_push's stdout provenance trace
     "sample_limit": "12",             # current-vs-new samples per request in wip_push's exit JSON
     "material_exclude_columns": "",    # hard exclusion; empty by default
@@ -797,12 +801,23 @@ def build_v2_tasks():
     # Also fills every duty field directly from nt_orbit_duty_cache (read-only,
     # zero API calls) so a brand-new row is filled the instant its exact
     # product+origin+market combination has ever been looked up.
-    tasks.append(v2_task("build_costing", f"{NB_DTC_V2}/v2_build_costing_chart", {  # NEW
+    # Same notebook as v1 -- ONE costing implementation, one set of gates --
+    # switched into "intent" mode. v1 reads the WIP snapshot as-is, which is
+    # only correct because it re-pulls the sheet AFTER Phase 10 enriches it
+    # (repull_dtc_bom). v2 has no re-pull and runs this BEFORE wip_push, so
+    # Step 1a overlays the material and style-identity columns from the SAME
+    # sources wip_push will write from (tpm_bom_segments, staging), while every
+    # DTC-owned column -- Lineplan Ref #, vendor/factory slots, production
+    # country, existing HTS/duty -- still comes from the snapshot, because this
+    # pipeline never writes those and they are current by definition.
+    tasks.append(v2_task("build_costing", f"{NB_DTC_V2}/p9a_build_costing_chart", {
         "catalog": CAT, "schema": SCH, "customer": CUST,
-        "costing_chart_table": COSTING_TABLE,
         "duty_cache_table": P("duty_cache_table"),
         "cache_ttl_days": P("duty_cache_ttl_days"),
         "bom_segments_table": P("bom_segments_table"),
+        "staging_table": "beproduct_to_dtc_staging",
+        "wip_effective_mode": "intent",
+        "output_table": P("costing_chart_table_name"),
         "run_costing": P("run_costing"),
     }, depends=[dep("transform"), dep("pull_bom"), dep("pull_master_dtc"),
                 dep("pull_lineplan_dtc")]))

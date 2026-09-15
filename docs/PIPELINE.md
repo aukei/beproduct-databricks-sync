@@ -113,7 +113,7 @@ BeProduct_DTC_sync_images         phase3_images         Style Image multipart up
 | 20 | `transform` | `p1p7_beproduct_to_dtc_transform` | reused | `bp_style_sync` |
 | 20b | `pull_bom` | `v2_pull_bom_segments` | **NEW** | `bp_style_sync` |
 | 25 | `request_manager` | `p1_dtc_request_manager` | reused | `transform`, `pull_master_dtc` |
-| 30 | `build_costing` | `v2_build_costing_chart` | **NEW** | `transform`, `pull_bom`, `pull_master_dtc`, `pull_lineplan_dtc` |
+| 30 | `build_costing` | `p9a_build_costing_chart` (`wip_effective_mode=intent`) | reused + Step 1a | `transform`, `pull_bom`, `pull_master_dtc`, `pull_lineplan_dtc` |
 | 40 | `wip_push` | `v2_wip_push` | **NEW** | `request_manager`, `build_costing` |
 | 50 | `phase2_push` | `p2_push_dtc_to_beproduct` | reused | `transform`, `pull_master_dtc` |
 
@@ -324,7 +324,7 @@ violate the one-window rule.
 
 ---
 
-### Stage 30 — `build_costing` → `costing_chart`  **NEW**
+### Stage 30 — `build_costing` → `costing_chart`  (shared notebook, "intent" mode)
 
 Same output table and key as v1, different inputs. v1 read the twice-re-pulled
 `dtc_wip_<customer>`; v2 reads **staging** (for the material dimension we own) ⋈

@@ -217,6 +217,35 @@ dbutils.widgets.text("duty_cache_table", "lft.beproduct.nt_orbit_duty_cache",
                      "Persistent cross-run NT Orbit result cache (fully-qualified)")
 dbutils.widgets.text("cache_ttl_days", str(duty.DEFAULT_CACHE_TTL_DAYS),
                      "Days before a cached lookup is considered too stale to reuse here")
+# ── v2 only (branch `v2`) ───────────────────────────────────────────────────
+# "table"  (v1 default) -- read dtc_wip_<customer> exactly as it stands. Correct
+#          only because v1 re-pulls the sheet AFTER Phase 10 has enriched it
+#          (repull_dtc_bom), so the snapshot already carries the material
+#          columns this notebook filters and keys on.
+# "intent" (v2)         -- v2 has NO re-pull: build_costing runs BEFORE
+#          wip_push, so the start-of-run snapshot still holds PRE-enrichment
+#          material values. In this mode the material and style-identity
+#          columns are overlaid from the same sources wip_push will write from
+#          (tpm_bom_segments and beproduct_to_dtc_staging), while every
+#          DTC-OWNED column -- Lineplan Ref #, the 4 vendor/factory slots,
+#          production country, existing HTS/duty -- still comes from the
+#          snapshot, because those are never written by this pipeline and are
+#          therefore current by definition.
+#
+# Everything downstream of Step 1a (the gates, the LinePlan join, the slot
+# transpose, the carry-forward and the cache fill) is IDENTICAL in both modes.
+# That is the point of doing this here rather than forking the notebook: one
+# costing implementation, one set of gates.
+dbutils.widgets.text("wip_effective_mode", "table", "table (v1) | intent (v2)")
+dbutils.widgets.text("bom_segments_table", "tpm_bom_segments", "Step 1a BOM source (intent mode)")
+dbutils.widgets.text("staging_table", "beproduct_to_dtc_staging", "Step 1a style source (intent mode)")
+dbutils.widgets.text("run_costing", "true", "false = no-op (v2 has no condition tasks)")
+# Output override. `costing_chart` has REAL downstream readers (the duty_compute
+# job reads and MERGEs it; push_duty_rates/wip_push read it), so any
+# experimental run must be pointed at a scratch table -- AGENTS.md's standing
+# rule is to test against `costing_chart_kei`. Previously the output name was
+# hardcoded here, which made that impossible without editing the notebook.
+dbutils.widgets.text("output_table", "costing_chart", "Output table (use costing_chart_kei to test)")
 
 catalog  = dbutils.widgets.get("catalog")
 schema   = dbutils.widgets.get("schema")
@@ -224,9 +253,13 @@ customer = dbutils.widgets.get("customer").strip().upper()
 duty_cache_table = dbutils.widgets.get("duty_cache_table").strip()
 cache_ttl_days   = int(dbutils.widgets.get("cache_ttl_days") or duty.DEFAULT_CACHE_TTL_DAYS)
 
+effective_mode = (dbutils.widgets.get("wip_effective_mode") or "table").strip().lower()
+bom_segments_table = f"{catalog}.{schema}.{dbutils.widgets.get('bom_segments_table')}"
+staging_table = f"{catalog}.{schema}.{dbutils.widgets.get('staging_table')}"
+
 wip_table      = f"{catalog}.{schema}.dtc_wip_{customer.lower()}"
 lineplan_table = f"{catalog}.{schema}.dtc_lineplan_{customer.lower()}"
-output_table   = f"{catalog}.{schema}.costing_chart"
+output_table   = f"{catalog}.{schema}.{dbutils.widgets.get('output_table').strip()}"
 
 now = datetime.now(timezone.utc)
 
@@ -236,6 +269,18 @@ print("=" * 72)
 print(f"  WIP input     : {wip_table}")
 print(f"  LinePlan input: {lineplan_table}")
 print(f"  Output        : {output_table}")
+print(f"  WIP mode      : {effective_mode}"
+      + ("   (v1: snapshot as-is, relies on a post-enrichment re-pull)"
+         if effective_mode == "table"
+         else "   (v2: material + style columns overlaid from intent)"))
+
+# Checked HERE, not via a condition task -- Databricks propagates a condition
+# task's EXCLUDED outcome to every downstream dependent unconditionally,
+# ignoring run_if, and wip_push depends on this stage. See docs/PIPELINE.md
+# design rule 4.
+if (dbutils.widgets.get("run_costing") or "true").strip().lower() != "true":
+    print("\nrun_costing=false -- skipping entirely (costing_chart left untouched).")
+    dbutils.notebook.exit("SKIPPED_run_costing_false")
 
 # COMMAND ----------
 
@@ -260,6 +305,10 @@ wip = wip_raw.select(
     F.col("bp_style_number").alias("bp_style_no"),
     F.col("lf_style_number").alias("lf_style_no"),
     F.col("color_wash").alias("color_name"),
+    # Carried only so Step 1a ("intent" mode) can pick a DETERMINISTIC
+    # representative row per style x colour. Unused in "table" mode, and
+    # dropped again at the end of Step 1a; nothing downstream reads it.
+    F.col("row_index"),
     jcol("data_json", "Legacy Code",       "legacy_code"),
     jcol("data_json", "Style Description", "style_description"),
     jcol("data_json", "Brand",             "brand"),
@@ -310,6 +359,132 @@ wip = wip_raw.select(
 )
 
 print(f"  WIP columns extracted: {len(wip.columns)}")
+
+# COMMAND ----------
+
+# ── Step 1a (v2 "intent" mode only): overlay material + style identity ───────
+# v1 relies on a re-pull (repull_dtc_bom) so the snapshot already carries
+# Phase 10's enrichment. v2 has no re-pull -- build_costing runs BEFORE
+# wip_push -- so the snapshot's material columns are still pre-enrichment and
+# Step 1b would drop nearly everything.
+#
+# This step reconstructs the row Step 1b expects, from the SAME sources
+# wip_push will write from:
+#
+#   material_no     <- BOM "Main Fabric" segment's **SupplierRefNo
+#   fabric_content  <- the live cell if non-blank, else the segment's
+#                      **MaterialContent. That ordering is not arbitrary: it
+#                      mirrors Content's write-once rule (2026-09-15) -- DTC's
+#                      own trigger owns the value once set, and wip_push only
+#                      fills a blank. Using the live value here keeps
+#                      costing_chart agreeing with what DTC will actually hold.
+#   fabric_group    <- literal "Main Fabric" (only that segment is costed)
+#   style identity  <- staging (Sub Class / Class / Gender / Description), which
+#                      is what wip_push is about to push. Using the snapshot's
+#                      values would feed NT Orbit a product_description built
+#                      from cells we already know are stale or blank.
+#
+# Every DTC-OWNED column is left untouched: Lineplan Ref #, the 4
+# vendor/factory slots, production country, and any existing HTS/duty values
+# all still come from the snapshot, because this pipeline never writes them.
+#
+# One synthetic row per (bp_style_no, color_name) -- only the "Main Fabric"
+# segment is ever costed, and there is exactly one per style by construction.
+# The representative snapshot row is chosen deterministically: a row already
+# marked "Main Fabric" wins, else the lowest row_index. Vendor slots are
+# row-copied when Phase 10 duplicates a row, so any row of the style x colour
+# carries the same DTC-owned values.
+if effective_mode == "intent":
+    print("\nStep 1a: overlaying material + style identity from intent (v2 mode) …")
+
+    from pyspark.sql import Window
+    from sync import bom as _bom
+
+    # -- BOM "Main Fabric" segment per style. Parsed on the driver with the
+    #    SAME function wip_push uses (sync.bom), not re-implemented in Spark:
+    #    ~250 styles, so the collect is trivial and the parsing stays in one
+    #    place. A style with no Main Fabric segment contributes nothing and is
+    #    simply not costed this run -- never an error, never a revert.
+    _bom_rows = []
+    _bom_no_main = 0
+    try:
+        for _r in spark.table(bom_segments_table).collect():
+            if _r["parse_error"]:
+                continue
+            try:
+                _parsed = _bom.parse_bom_segments(_r["custom_fields"])
+            except Exception:  # noqa: BLE001
+                continue
+            if not _parsed.main_fabric:
+                _bom_no_main += 1
+                continue
+            _f = _bom.extract_enrichment_fields(_parsed.main_fabric)
+            _bom_rows.append((_r["bp_style_number"],
+                              _f.get("mill_fabric_article"),
+                              _f.get("content")))
+    except Exception as _e:  # noqa: BLE001
+        print(f"  ⚠ {bom_segments_table} unavailable ({_e}) -- no material overlay; "
+              f"Step 1b will drop rows that have no enrichment yet.")
+
+    print(f"  styles with a Main Fabric segment : {len(_bom_rows)}")
+    print(f"  styles with BOM but no Main Fabric: {_bom_no_main}  (not costed, not an error)")
+
+    _bom_df = spark.createDataFrame(
+        _bom_rows,
+        StructType([StructField("bom_style", StringType()),
+                    StructField("bom_material_no", StringType()),
+                    StructField("bom_content", StringType())]),
+    ) if _bom_rows else None
+
+    # -- Representative snapshot row per (style, colour).
+    _rank = F.row_number().over(
+        Window.partitionBy("bp_style_no", "color_name").orderBy(
+            F.when(F.trim(F.coalesce(F.col("fabric_group"), F.lit(""))) == "Main Fabric", 0)
+             .otherwise(1),
+            F.col("row_index").asc_nulls_last()))
+    wip = (wip.withColumn("_rk", _rank).filter(F.col("_rk") == 1).drop("_rk"))
+    print(f"  representative rows (1 per style x colour) : {wip.count()}")
+
+    # -- Style identity from staging (what wip_push is about to write).
+    _stg = (spark.table(staging_table)
+            .select(F.col("bp_style_number").alias("stg_style"),
+                    F.col("color").alias("stg_color"),
+                    F.col("description").alias("stg_description"),
+                    F.col("product_category").alias("stg_class"),
+                    F.col("product_sub_category").alias("stg_sub_class"),
+                    F.col("gender").alias("stg_gender"))
+            .dropDuplicates(["stg_style", "stg_color"]))
+
+    wip = wip.join(_stg,
+                   (F.col("bp_style_no").eqNullSafe(F.col("stg_style")))
+                   & (F.col("color_name").eqNullSafe(F.col("stg_color"))), "left")
+    for _dst, _src in (("style_description", "stg_description"), ("class_", "stg_class"),
+                       ("sub_class", "stg_sub_class"), ("gender", "stg_gender")):
+        wip = wip.withColumn(_dst, F.coalesce(F.col(_src), F.col(_dst)))
+    wip = wip.drop("stg_style", "stg_color", "stg_description", "stg_class",
+                   "stg_sub_class", "stg_gender")
+
+    # -- Material overlay. INNER-equivalent: a style with no Main Fabric
+    #    segment keeps its snapshot values and is dropped by Step 1b if those
+    #    are still blank -- exactly what v1 does for an un-enriched style.
+    if _bom_df is not None:
+        wip = wip.join(_bom_df, F.col("bp_style_no").eqNullSafe(F.col("bom_style")), "left")
+        wip = (wip
+               .withColumn("material_no",
+                           F.coalesce(F.col("bom_material_no"), F.col("material_no")))
+               # Live value wins when non-blank -- Content is write-once.
+               .withColumn("fabric_content",
+                           F.when(F.col("fabric_content").isNotNull()
+                                  & (F.trim(F.col("fabric_content")) != ""),
+                                  F.col("fabric_content"))
+                            .otherwise(F.col("bom_content")))
+               .withColumn("fabric_group",
+                           F.when(F.col("bom_material_no").isNotNull(), F.lit("Main Fabric"))
+                            .otherwise(F.col("fabric_group")))
+               .drop("bom_style", "bom_material_no", "bom_content"))
+    print(f"  rows after overlay : {wip.count()}")
+
+wip = wip.drop("row_index")
 
 # COMMAND ----------
 
@@ -527,7 +702,13 @@ slot_dfs = [
              "hts_3",        "duty_us_3",     "duty_ca_3",     "duty_mx_3"),
 ]
 
-costing_chart = reduce(DataFrame.unionByName, slot_dfs)
+# NOTE: must be a lambda calling the BOUND method, not `DataFrame.unionByName`
+# passed as an unbound function. Under Spark Connect (serverless) the unbound
+# form routes through `self._jdf`, which Connect DataFrames do not have, and
+# fails with PySparkAttributeError: JVM_ATTRIBUTE_NOT_SUPPORTED. It works fine
+# on the classic cluster, so this only surfaced when v2 ran the notebook
+# serverless (2026-09-15). Behaviour is identical in both runtimes.
+costing_chart = reduce(lambda _a, _b: _a.unionByName(_b), slot_dfs)
 
 # Rename class_ back to class_name for output (avoid Python keyword confusion)
 costing_chart = costing_chart.withColumnRenamed("class_", "class_name")

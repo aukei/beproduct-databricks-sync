@@ -364,6 +364,56 @@ this stays true by construction; verify it stays true after any change).
 
 ## Verified discoveries log (append-dated; do not delete)
 
+**v2 stage 4 -- `costing_chart` from intent, validated against v1
+(2026-09-15, run 875000189962231):**
+- **`p9a_build_costing_chart.py` gained a `wip_effective_mode` parameter
+  instead of being forked.** `"table"` (default) is v1's behaviour -- read the
+  WIP snapshot as-is, which is only correct because v1 re-pulls the sheet AFTER
+  Phase 10 enriches it. `"intent"` (v2) adds a **Step 1a** that overlays the
+  material and style-identity columns from the SAME sources `wip_push` will
+  write from (`tpm_bom_segments`, `beproduct_to_dtc_staging`), because v2 has
+  no re-pull and runs this BEFORE the push. Every DTC-OWNED column --
+  `Lineplan Ref #`, the 4 vendor/factory slots, production country, existing
+  HTS/duty -- still comes from the snapshot, since this pipeline never writes
+  them. Everything downstream (gates, LinePlan join, slot transpose,
+  carry-forward, cache fill) is IDENTICAL in both modes: one costing
+  implementation, one set of gates.
+- **Result: an EXACT match against v1.** 7 rows, 5 styles in both; key-set
+  comparison on `(bp_style_no, color_name, material_no, supplier_type,
+  supplier, factory)` gives 0 rows in v1 only, 0 in v2 only, 7 in both. This is
+  the strongest available evidence that dropping `repull_dtc_bom` loses
+  nothing.
+- **One deliberate difference: `sub_class` is now POPULATED where v1 had
+  `NULL`** (5 of 7 rows -- e.g. `Top / Tank / Vest (sleeveless)`, `Jacket`).
+  v1 read it from the WIP cell, which we already know is blank on 40 of 60 rows
+  because the style-level pre-filters made it unreachable; v2 reads it from
+  staging, i.e. what `wip_push` is about to write. All other non-key fields
+  (`class_name`, `fabric_content`, `style_description`) are identical.
+- **CONSEQUENCE, must not be discovered by surprise:** `sub_class` is part of
+  `duty.PRODUCT_DESCRIPTION_COLS`, and `duty.cache_key()` is built on
+  `product_description`. Changing it from blank to a real value CHANGES the
+  cache key, so those rows MISS the persistent NT Orbit cache and trigger fresh
+  lookups (~30-60 s each, serial by default). One-off, bounded -- 5 rows x up
+  to 3 markets here -- and the right outcome, since the classification input is
+  genuinely better. Existing `hts_code`/`duty_rate_*` values are NOT lost: Step
+  4 still reads them from the live WIP row, so `hts_filled` is 7 in both
+  tables.
+- **SERVERLESS INCOMPATIBILITY FOUND AND FIXED -- my earlier serverless audit
+  had a gap.** `reduce(DataFrame.unionByName, slot_dfs)` passes the UNBOUND
+  method, which routes through `self._jdf`; Spark Connect DataFrames have no
+  `_jdf` and it fails with `PySparkAttributeError:
+  JVM_ATTRIBUTE_NOT_SUPPORTED`. It works fine on the classic cluster, so it
+  only surfaced when v2 ran the notebook serverless. Fixed with a lambda
+  calling the BOUND method; behaviour is identical in both runtimes. **The
+  audit pattern to remember: grepping for `sparkContext` / `.rdd` / UDFs is NOT
+  sufficient -- an unbound `DataFrame.<method>` reference passed to `reduce`/
+  `map` is equally fatal and looks nothing like the usual suspects.**
+- `p9a_build_costing_chart.py` also gained an **`output_table` widget**. The
+  output name was hardcoded to `costing_chart`, which made AGENTS.md's standing
+  "always test against `costing_chart_kei`" rule impossible to follow without
+  editing the notebook. The v2 job passes the real name via the
+  `costing_chart_table_name` job parameter.
+
 **`Content` is WRITE-ONCE, and `-SUPPLIER` requests are out of scope
 (both owner decisions, 2026-09-15):**
 - **`Content` notation conflict, RESOLVED as write-once.** A full-scan dry run

@@ -76,6 +76,25 @@ brand-new style × color gets its material fan-out in the same run, and
 
 ### 3. `costing_chart` is built from intent, not from a round-trip
 
+**Implemented as a mode on the existing notebook, not a fork.**
+`p9a_build_costing_chart.py` takes `wip_effective_mode`: `"table"` (v1, read the
+snapshot as-is) or `"intent"` (v2, overlay the material and style-identity
+columns from `tpm_bom_segments` + staging first). Everything downstream — the
+gates, the LinePlan join, the slot transpose, the carry-forward, the cache fill
+— is shared. One costing implementation, one set of gates.
+
+**Validated against v1: an exact match.** 7 rows, 5 styles in both; key-set
+comparison gives 0 rows in v1 only, 0 in v2 only, 7 in both. That is the
+strongest available evidence that dropping `repull_dtc_bom` loses nothing.
+
+One deliberate difference: `sub_class` is populated where v1 had `NULL` (5 of 7
+rows), because v2 reads it from staging rather than from a WIP cell the
+pre-filters had made unreachable. Note the knock-on — `sub_class` is part of
+`duty.PRODUCT_DESCRIPTION_COLS`, so the NT Orbit cache key changes and those
+rows will take fresh lookups once. Bounded and correct, but not a surprise worth
+discovering in production.
+
+
 v1 built it from the twice-re-pulled WIP table. v2 builds it from **staging**
 (the material dimension we own) ⋈ **the start-of-run WIP pull** (the DTC-owned
 dimension: `lineplan_ref`, vendor/factory slots, production country) ⋈ **LinePlan**.
@@ -317,7 +336,7 @@ exists solely to feed `build_costing`.
 | 1 | Serverless port; `module_path` parameter; in-notebook run flags | — | **done** |
 | 2 | `sync/wip_plan.py` + `test_wip_plan.py` — composition, zero-diff-zero-write | — | **done** |
 | 3 | `v2_pull_bom_segments` + `v2_wip_push`; drop `repull_dtc` | 3 → 2 | **done** |
-| 4 | `v2_build_costing_chart` off staging; drop `repull_dtc_bom` | 2 → 2 | |
+| 4 | `build_costing` in "intent" mode; drop `repull_dtc_bom` | 2 → 2 | **done** |
 | 5 | Fold the duty contribution into `wip_push` | 2 → **1** | |
 
 Each stage ships independently and each reduces either window count or runtime, so
@@ -350,8 +369,9 @@ diff-gated.
 
 **Blocking the first v2 run**
 
-- `v2_build_costing_chart` (stage 4). Stages 1–3 are done: `sync/wip_plan.py`,
-  `v2_pull_bom_segments` and `v2_wip_push` all exist.
+- Stage 5 only: folding the duty contribution's *write* into `wip_push` is
+  already done, so what remains is end-to-end validation and cutover. Stages
+  1–4 are complete.
 
 ### `sync/wip_plan.py` — the composition layer (stage 2, done)
 

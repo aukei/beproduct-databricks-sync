@@ -54,7 +54,7 @@ DEFAULT_WS_ROOT = "/Workspace/Repos/beproduct-sync-v2"
 NOTEBOOK_DIRS = {
     "v2_pull_bom_segments": "DTC/notebooks",
     "v2_wip_push": "DTC/notebooks",
-    "v2_build_costing_chart": "DTC/notebooks",
+    "p9a_build_costing_chart": "DTC/notebooks",
     "v2_smoke_check": "DTC/notebooks",
     "v2_probe_write": "DTC/notebooks",
     "v2_inspect_requests": "DTC/notebooks",
