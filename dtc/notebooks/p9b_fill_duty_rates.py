@@ -76,7 +76,8 @@ secret on every subsequent run.
 
 Costing chart table name is a PARAMETER (widget ``costing_chart_table``):
   default:  lft.beproduct.costing_chart
-  testing:  lft.beproduct.costing_chart_kei
+  testing:  any unused table name -- `costing_chart_kei` was RETIRED and
+            DROPPED 2026-09-15; the override parameter itself remains.
 """
 
 # COMMAND ----------
@@ -119,7 +120,7 @@ dbutils.widgets.text("schema", "beproduct", "Schema")
 dbutils.widgets.text("customer", "KTB", "Customer code")
 dbutils.widgets.text("costing_chart_table", "lft.beproduct.costing_chart",
                      "Costing Chart table (fully-qualified; test override e.g. "
-                     "lft.beproduct.costing_chart_kei)")
+                     "any unused name; costing_chart_kei was dropped 2026-09-15)")
 dbutils.widgets.text("dtc_environment", "uat", "DTC Environment")
 dbutils.widgets.text("dtc_workspace", "KTB", "DTC Workspace")
 dbutils.widgets.text("dry_run", "true", "Dry run (true/false) — skip writes")

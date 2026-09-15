@@ -264,7 +264,7 @@ JOB_PARAMS = {
     "run_phase9a": "true",           # Phase 9a: pull LinePlan + build costing chart
     "lineplan_document": "KTB LinePlan",  # DTC document name for Phase 9a
     "run_phase9b": "true",           # Phase 9b: NT Orbit duty/HTS/tariff fill (live in the DAG 2026-09-01)
-    "costing_chart_table": "lft.beproduct.costing_chart",  # test override: lft.beproduct.costing_chart_kei
+    "costing_chart_table": "lft.beproduct.costing_chart",  # override with any unused name to test; costing_chart_kei dropped 2026-09-15
     "duty_cache_table": "lft.beproduct.nt_orbit_duty_cache",  # Phase 9b: persistent cross-run NT Orbit result cache
     "duty_cache_ttl_days": "180",     # Phase 9b: re-query a cached lookup after this many days
     "orbit_parallel_calls": "false",  # Phase 9b: call NT Orbit serially by default (safer; set true + tune max_workers for throughput)
@@ -295,9 +295,11 @@ JOB_PARAMS = {
     "bom_table": "customer_teckpack_style_latest",  # resolves latest_techpack_style_log_id
     "bom_log_table": "customer_teckpack_style_log",  # custom_fields -- the actual BOM source
     "bom_segments_table": "tpm_bom_segments",  # Stage 20b output; read by wip_push + build_costing
-    # Unqualified output table name for build_costing. Point at
-    # "costing_chart_kei" to run the stage without touching the real table,
-    # which the duty_compute job reads and MERGEs (AGENTS.md standing rule).
+    # Unqualified output table name for build_costing. Routine runs write the
+    # real table; override it to build a comparison copy without replacing what
+    # duty_compute reads and MERGEs. (The old `costing_chart_kei` scratch table
+    # was retired 2026-09-15 once "intent" mode was proven to reproduce v1's
+    # output exactly.) A bad build is recoverable via Delta time travel.
     "costing_chart_table_name": "costing_chart",
     "explain_limit": "40",            # rows per request in wip_push's stdout provenance trace
     "sample_limit": "12",             # current-vs-new samples per request in wip_push's exit JSON

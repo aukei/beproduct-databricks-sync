@@ -124,7 +124,8 @@ sheets), staged through **Databricks/Delta**.
   across every phase, same as Phase 1/2/3), so scheduled runs push for real.
   Costing chart table name is a job parameter `costing_chart_table` (default
   `lft.beproduct.costing_chart`; testing override
-  `lft.beproduct.costing_chart_kei`); cache table/TTL are also job
+  any unused name -- `costing_chart_kei` was DROPPED 2026-09-15);
+  cache table/TTL are also job
   parameters (`duty_cache_table` / `duty_cache_ttl_days`). Notebook:
   `dtc/notebooks/p9b_fill_duty_rates.py`; pure logic + tests:
   `dtc/python/sync/duty.py` / `dtc/tests/test_duty.py`.
@@ -409,10 +410,24 @@ this stays true by construction; verify it stays true after any change).
   sufficient -- an unbound `DataFrame.<method>` reference passed to `reduce`/
   `map` is equally fatal and looks nothing like the usual suspects.**
 - `p9a_build_costing_chart.py` also gained an **`output_table` widget**. The
-  output name was hardcoded to `costing_chart`, which made AGENTS.md's standing
-  "always test against `costing_chart_kei`" rule impossible to follow without
-  editing the notebook. The v2 job passes the real name via the
-  `costing_chart_table_name` job parameter.
+  output name was hardcoded to `costing_chart`, which made the standing "test
+  against a scratch table" rule impossible to follow without editing the
+  notebook.
+- **`costing_chart_kei` is RETIRED (dropped 2026-09-15, owner decision).**
+  "Intent" mode was proven to reproduce v1's output exactly, so routine runs
+  now write `costing_chart` directly and the scratch table had no further
+  purpose. The `output_table` / `costing_chart_table_name` parameter REMAINS
+  for future comparison builds. Earlier guidance in this file to "always test
+  against the `_kei` table" is superseded -- that table no longer exists.
+- **Live write to the real `costing_chart` verified (2026-09-15).** Delta
+  version 246 was recorded as a rollback point first
+  (`RESTORE TABLE lft.beproduct.costing_chart VERSION AS OF 246`). After the
+  intent-mode build: key sets identical (0 in old only, 0 in new only, 7 in
+  both), and `hts_code` / `duty_rate_us` / `fabric_content` all byte-identical
+  per row. The ONLY change was `sub_class` filling from `NULL` on 5 of 7 rows.
+  Nothing was lost -- worth remembering that `costing_chart` is fully
+  overwritten every run anyway, so Delta time travel is the recovery path, not
+  a backup copy.
 
 **`Content` is WRITE-ONCE, and `-SUPPLIER` requests are out of scope
 (both owner decisions, 2026-09-15):**
@@ -2420,11 +2435,15 @@ kept below for historical reference only (see decisions log):**
     rows, last written 2026-06-17, zero current code references) — owner
     confirmed these are an intentional artifact demonstrating the pipeline
     generalizes beyond `KTB` to another customer folder (`WMT`); leave as-is,
-    do not treat as orphaned/stale in future audits. `costing_chart_kei`
-    (job param `costing_chart_table` test override) — owner's own active
-    Phase 9b DAG-testing table; **`costing_chart` itself must stay stable**
-    since it has real downstream readers, which is exactly why the test
-    override table exists — keep both.
+    do not treat as orphaned/stale in future audits.
+    **`costing_chart_kei` — SUPERSEDED: RETIRED and DROPPED 2026-09-15**
+    (owner decision), once v2's "intent" mode was proven to reproduce v1's
+    `costing_chart` exactly. The entry above said to keep it; that no longer
+    applies. The `costing_chart_table` / `costing_chart_table_name` override
+    parameter REMAINS for future comparison builds, but there is no longer a
+    standing scratch table. `costing_chart` still has real downstream readers
+    (`duty_compute` MERGEs it, `wip_push` reads it); recovery for a bad build
+    is Delta time travel, since it is fully overwritten every run anyway.
   - Already gone before this audit (per the 2026-06-17 decision above,
     confirmed still absent): `dtc_master_chart_uat`,
     `dtc_master_chart_uat_change_log`. Confirmed never created:

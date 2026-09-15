@@ -426,6 +426,13 @@ zero-diff-zero-write invariant means considering every row costs zero extra API
 calls when nothing differs (planning measured at 36 ms for 250 styles / 1500
 rows). They now only cost correctness, so both default to `false`.
 
+> `costing_chart_kei` was retired on 2026-09-15 once intent mode was proven to
+> match v1 exactly; routine runs write `costing_chart` directly. The
+> `costing_chart_table_name` parameter remains for future comparison builds,
+> and Delta time travel is the recovery path for a bad build
+> (`RESTORE TABLE … VERSION AS OF <n>`) since the table is fully overwritten
+> every run regardless.
+
 > **Expect a one-off catch-up on the first real v2 run.** In UAT that is 60 rows
 > — but still **one write window and one PATCH call**, which is precisely the
 > cost model v2 exists to create. Review a `dry_run=true` run's `sample_changes`

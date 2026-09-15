@@ -172,7 +172,8 @@ SELECT sync_status, COUNT(*) FROM lft.beproduct.beproduct_to_dtc_staging GROUP B
 SELECT request_reference, COUNT(*) FROM lft.beproduct.dtc_wip_ktb GROUP BY request_reference;
 
 -- Costing chart summary (costing_chart has real downstream readers — for
--- Phase 9b testing use lft.beproduct.costing_chart_kei instead, never write
+-- Phase 9b testing: override costing_chart_table with any unused name.
+-- (costing_chart_kei was retired and DROPPED 2026-09-15.) Never write
 -- test data into costing_chart directly)
 SELECT supplier_type, COUNT(*) rows, COUNT(hts_code) with_hts FROM lft.beproduct.costing_chart GROUP BY supplier_type;
 

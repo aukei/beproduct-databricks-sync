@@ -240,12 +240,20 @@ dbutils.widgets.text("wip_effective_mode", "table", "table (v1) | intent (v2)")
 dbutils.widgets.text("bom_segments_table", "tpm_bom_segments", "Step 1a BOM source (intent mode)")
 dbutils.widgets.text("staging_table", "beproduct_to_dtc_staging", "Step 1a style source (intent mode)")
 dbutils.widgets.text("run_costing", "true", "false = no-op (v2 has no condition tasks)")
-# Output override. `costing_chart` has REAL downstream readers (the duty_compute
-# job reads and MERGEs it; push_duty_rates/wip_push read it), so any
-# experimental run must be pointed at a scratch table -- AGENTS.md's standing
-# rule is to test against `costing_chart_kei`. Previously the output name was
-# hardcoded here, which made that impossible without editing the notebook.
-dbutils.widgets.text("output_table", "costing_chart", "Output table (use costing_chart_kei to test)")
+# Output override. `costing_chart` has REAL downstream readers -- the
+# duty_compute job reads and MERGEs it, and wip_push reads it -- so an
+# experimental run may need to go somewhere else. The name used to be hardcoded
+# here, which made that impossible without editing the notebook.
+#
+# `costing_chart_kei` was the standing scratch target; it was retired
+# 2026-09-15 once v2's "intent" mode was proven to reproduce v1's output
+# exactly, and routine runs now write `costing_chart` directly. The parameter
+# stays for the next time a build needs to be diffed against the live table
+# without replacing it -- pass any other name and nothing downstream is
+# touched. Note the table is FULLY OVERWRITTEN every run, so a bad build is
+# recoverable via Delta time travel:
+#     RESTORE TABLE lft.beproduct.costing_chart VERSION AS OF <n>
+dbutils.widgets.text("output_table", "costing_chart", "Output table (override to build without replacing the live one)")
 
 catalog  = dbutils.widgets.get("catalog")
 schema   = dbutils.widgets.get("schema")
