@@ -364,62 +364,52 @@ this stays true by construction; verify it stays true after any change).
 
 ## Verified discoveries log (append-dated; do not delete)
 
-**`Content` notation conflict -- DTC trigger vs techpack BOM (2026-09-15):**
-- With v2's coverage pre-filters off, a full-scan dry run planned a `Content`
-  write on **60 of 60 rows**. Dumping the concrete values showed **none of them
-  is a semantic change** -- every one is the same fibre content in different
-  NOTATION:
-  | live DTC | techpack BOM | rows |
-  |---|---|---|
-  | `100% Cotton` | `Cotton 100%` | 14 |
-  | `97% Cotton / 3% Spandex` | `Cotton 97%, Spandex 3%` | 14 |
-  | `100% test from ML` | `test from ML 100%` | 10 |
-  | `Polyester 96% / Spandex 4%` | `Polyester 96%, Spandex 4%` | 8 |
-  | `100% Polyester` | `Polyester 100%` | 6 |
-  | `70% Rayon / 30% Tencel` | `Rayon 70%, Tencel 30%` | 4 |
-  | `Cotton 65% / Modal 28% / Spandex 7%` | `Cotton 65%, Modal 28%, Spandex 7%` | 4 |
-  DTC writes `<pct>% <fibre>` joined by `" / "`; the BOM writes
-  `<fibre> <pct>%` joined by `", "`.
-- **Why this matters far more than it looks.** DTC's own Content trigger
-  (polls `Mill Fabric Article #`) and Phase 10 both write this column. Each
-  would immediately rewrite the other's notation, so the cell NEVER settles:
-  a write on every single run, forever. At 3 runs/day that is background noise;
-  at the target 2-hourly cadence it is a PERMANENT write window on the request,
-  which defeats the entire purpose of v2.
-- **Holding position: `material_exclude_columns="Content"`** (new job
-  parameter, threaded through `wip_plan.compute_request_plan(
-  material_exclude_cols=...)`). The column is still PLANNED -- so the diff stays
-  visible in `columns_changed` / `sample_changes` -- but not written, and the
-  suppression is recorded in `PlannedRow.dropped` rather than silently applied.
-  With it set, the same request plans 40 updates (`Sub Class` only) instead of
-  60, in 1 PATCH call.
-- **This needs an owner + DTC-developer decision, not a code fix**: declare ONE
-  canonical notation, then either set the parameter back to `""` (BOM owns
-  Content, per the 2026-09-09 decision) or disable DTC's trigger for the
-  column. A normalizer that treats the two forms as equal is the wrong answer
-  -- it would hide a real disagreement between two systems that both claim the
-  field.
-- By contrast `Sub Class` (40 rows, `NULL` -> a real BeProduct value) is an
-  unambiguous correction with no competing writer, and is exactly the drift the
-  pre-filters had made unreachable.
-
-**Live DTC request inventory (2026-09-15, `KTB WIP`, uat):** 109 requests, of
-which **10 pass `is_in_scope()` but only 1 is in the registry**
-(`KTB SS28 Collaborations` / `6aa21c8c50d01f6864e28546`, 60 rows). Nine in-scope
-requests exist in DTC that the pipeline has never registered, including four
-created the same afternoon: `KTB SS28 Collaborations-SUPPLIER {TUNAPP, CENOVE,
-STEDES, CHELLP}`, plus `KTB SS28 Wrangler Collaborations`, `KTB SS28 Wrangler
-Western`, `KTB SS28 Cancel Wrangler-INCAS INTERNAT` and
-`KTB FW26 Cancel Wrangler Global TALISMAN LTD` **twice, with two different
-request_ids** -- a genuine duplicate in-scope name that will trip
-`DUPLICATE_ACTIVE_NAME` the moment the registry discovers it.
-- **Naming-convention consequence worth a decision:** `is_in_scope()` parses
-  `<customer> <seasonCode> <brand>` and takes EVERYTHING after the season code
-  as the brand, so `KTB SS28 Collaborations-SUPPLIER TUNAPP` registers as brand
-  `"Collaborations-SUPPLIER TUNAPP"` and `KTB SS28 Cancel Wrangler-INCAS
-  INTERNAT` as brand `"Cancel Wrangler-INCAS INTERNAT"`. Supplier-scoped and
-  "Cancel" sheets therefore become first-class push targets on the next registry
-  refresh. Read-only diagnostic: `dtc/notebooks/v2_inspect_requests.py`.
+**`Content` is WRITE-ONCE, and `-SUPPLIER` requests are out of scope
+(both owner decisions, 2026-09-15):**
+- **`Content` notation conflict, RESOLVED as write-once.** A full-scan dry run
+  planned a `Content` write on 60 of 60 rows, and **none was a semantic
+  change** -- every one was the same fibre content in different notation
+  (`100% Cotton` vs `Cotton 100%`; `97% Cotton / 3% Spandex` vs
+  `Cotton 97%, Spandex 3%`; `Polyester 96% / Spandex 4%` vs
+  `Polyester 96%, Spandex 4%`; and so on). DTC writes `<pct>% <fibre>` joined
+  by `" / "`; the techpack BOM writes `<fibre> <pct>%` joined by `", "`.
+- **Owner ruling:** DTC's own Content trigger WILL overwrite whatever Phase 10
+  writes -- that is known and expected -- and the two notations are
+  semantically identical. The value's purpose is to feed Phase 9's NT Orbit
+  `product_description`, and the notation does not change the API's results.
+- **Therefore the only thing Phase 10's `Content` write must achieve is making
+  the cell NON-BLANK**, which is precisely what Phase 9a's Step 1b completeness
+  gate requires. So `Content` is now treated as **write-once default-fill** --
+  the same rule `phase1.DEFAULT_FILL_COLS` already applies to Supplier /
+  Fabric Group / Placement: fill a blank cell, never touch a filled one.
+  Parameter: `material_fill_if_blank_columns` (default `"Content"`), threaded
+  through `wip_plan.compute_request_plan(material_fill_if_blank_cols=...)`;
+  skips are recorded in `PlannedRow.dropped`, never silent.
+- **Why this matters beyond tidiness:** re-writing a non-blank `Content` would
+  diff on EVERY run (60 of 60 rows in UAT), opening a write window on the
+  request every single time. At the target 2-hourly cadence that alone would
+  defeat v2's entire premise. Write-once removes it while still satisfying the
+  gate. A hard exclusion (`material_exclude_columns`, now empty by default) was
+  the earlier holding position and is strictly worse -- it would also refuse to
+  fill a genuinely blank cell.
+- **`-SUPPLIER` requests are DTC artifacts, never sync write targets.**
+  `phase1.is_in_scope()` now also excludes any reference matching
+  `-supplier\b` (case-insensitive), alongside the existing `\(backup` rule.
+  DTC generates `"<customer> <seasonCode> <brand>-SUPPLIER <xxx>"` requests --
+  four appeared in one afternoon in UAT (`KTB SS28 Collaborations-SUPPLIER
+  {TUNAPP, CENOVE, STEDES, CHELLP}`). Without the rule they parse as perfectly
+  valid in-scope requests, because `is_in_scope()` takes EVERYTHING after the
+  season code as the brand -- so each would have become a first-class push
+  target on the next registry refresh. Live effect: in-scope requests dropped
+  from 10 to 6 of 109.
+- **Still unresolved, flagged not fixed:** `KTB FW26 Cancel Wrangler Global
+  TALISMAN LTD` exists TWICE with different `request_id`s -- a genuine
+  duplicate in-scope name that will trip `DUPLICATE_ACTIVE_NAME` the moment the
+  registry discovers it. And `"Cancel ..."`-prefixed requests
+  (`KTB SS28 Cancel Wrangler-INCAS INTERNAT`) are still in scope, registering
+  brand `"Cancel Wrangler-INCAS INTERNAT"`; no ruling yet on whether cancelled
+  sheets should be sync targets. Read-only inventory:
+  `dtc/notebooks/v2_inspect_requests.py`.
 
 **v2 stage-3 live validation + the "Sub Class" investigation (2026-09-15, UAT
 `TEST KTB`, runs 825470679933630 / 364534660603185 / probe):**

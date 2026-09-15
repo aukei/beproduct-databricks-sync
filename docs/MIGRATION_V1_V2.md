@@ -416,30 +416,42 @@ rows). They now only cost correctness, so both default to `false`.
 > BOM's `"test from ML 100%"` — real drift, and BOM has owned `Content` since
 > 2026-09-09.)
 
-**`Content` is held back pending a canonical-notation decision**
+**`Content` is write-once (resolved 2026-09-15)**
 
 The first full-scan dry run planned a `Content` write on **60 of 60 rows** — and
 not one was a semantic change. DTC writes `97% Cotton / 3% Spandex`; the
 techpack BOM writes `Cotton 97%, Spandex 3%`. Same fibres, same percentages,
 different notation.
 
-Both DTC's own Content trigger and Phase 10 write this column, so each would
-rewrite the other's notation on every run. The cell never settles — which at a
-2-hourly cadence means a **permanent write window**, defeating the point of v2.
+Owner ruling: DTC's own trigger will overwrite whatever Phase 10 writes — known
+and expected — and the notation does not affect Phase 9's NT Orbit call, which
+is what the value feeds. So the only thing the write must achieve is making the
+cell **non-blank**, which is exactly what Phase 9a's completeness gate needs.
 
-Holding position: the job parameter `material_exclude_columns` defaults to
-`"Content"`. The column is still *planned*, so the diff stays visible in
-`columns_changed` / `sample_changes`, but it is not written, and the suppression
-is recorded in `PlannedRow.dropped`. With it set, the same request plans 40
-updates (`Sub Class` only) rather than 60.
+`Content` is therefore **write-once default-fill** — the same rule already
+applied to Supplier / Fabric Group / Placement: fill a blank cell, never touch a
+filled one. Parameter: `material_fill_if_blank_columns` (default `"Content"`).
 
-**This needs an owner + DTC-developer decision, not a code fix**: declare one
-canonical notation, then either set the parameter back to `""` (BOM owns
-`Content`, per 2026-09-09) or disable DTC's trigger for the column. A normalizer
-treating both forms as equal would be the wrong answer — it hides a real
-disagreement between two systems that both claim the field.
+This matters beyond tidiness: re-writing a non-blank `Content` would diff on
+*every* run, opening a write window on the request every time — which at a
+2-hourly cadence would defeat v2's whole premise on its own.
 
-**Cadence-limiting, independent of this refactor**
+**`-SUPPLIER` requests are out of scope (2026-09-15)**
+
+DTC generates supplier-scoped artifact requests named
+`<customer> <seasonCode> <brand>-SUPPLIER <xxx>`; four appeared in one afternoon
+in UAT. They are DTC's own artifacts, never sync write targets, but
+`is_in_scope()` takes everything after the season code as the brand, so they
+parsed as valid in-scope requests and would each have become a push target on
+the next registry refresh. `phase1.is_in_scope()` now excludes `-supplier\b`
+alongside `\(backup`. In-scope requests dropped from 10 to 6 of 109 live.
+
+Two related items are **flagged, not fixed**: `KTB FW26 Cancel Wrangler Global
+TALISMAN LTD` exists twice with different `request_id`s (a real duplicate
+in-scope name), and `Cancel …`-prefixed requests remain in scope with brand
+`"Cancel Wrangler-INCAS INTERNAT"`. Both need an owner ruling.
+
+**Cadence-limiting, independent of this refactor****Cadence-limiting, independent of this refactor**
 
 - **Sample-app enrichment.** One `app_get` per (style × app) — ~876 calls, ~120 s
   for KTB — pinned to `FULL` because app changes do not bump `style.modifiedAt`.

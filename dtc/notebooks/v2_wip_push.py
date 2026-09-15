@@ -111,14 +111,22 @@ dbutils.widgets.text("costing_chart_table", "lft.beproduct.costing_chart", "Duty
 dbutils.widgets.text("bom_segments_table", "tpm_bom_segments", "BOM source (Stage 20b)")
 dbutils.widgets.text("run_wip_push", "true", "Run this stage (false = no-op)")
 dbutils.widgets.text("run_duty_push", "true", "Include the duty contribution")
-# Material columns to plan but NOT write. Default excludes "Content": DTC's own
-# Content trigger and the techpack BOM express the SAME fibre content in
-# different notation ("97% Cotton / 3% Spandex" vs "Cotton 97%, Spandex 3%"),
-# so each would overwrite the other on every run -- a permanent write window at
-# a 2-hourly cadence. Live-confirmed 2026-09-15: 60 of 60 rows differ this way
-# and NONE is a semantic change. Set to "" once one notation is declared
-# canonical. See docs/MIGRATION_V1_V2.md.
-dbutils.widgets.text("material_exclude_columns", "Content", "Material columns to plan but not write")
+# Material columns to plan but NEVER write (hard exclusion). Empty by default.
+dbutils.widgets.text("material_exclude_columns", "", "Material columns to plan but not write")
+# Material columns written ONLY into a blank cell -- write-once default-fill,
+# the same treatment Supplier / Fabric Group / Placement already get.
+#
+# "Content" belongs here (owner decision 2026-09-15). DTC's own Content trigger
+# will overwrite whatever Phase 10 writes, and the two notations
+# ("97% Cotton / 3% Spandex" vs "Cotton 97%, Spandex 3%") are semantically
+# identical -- they feed Phase 9's NT Orbit product_description and do not
+# change its results. The ONLY thing the Content write must achieve is making
+# the cell non-blank, which is what Phase 9a's completeness gate needs. Filling
+# it once and then leaving the trigger alone gets exactly that, and avoids a
+# diff that would otherwise reappear on EVERY run -- 60 of 60 rows in UAT --
+# opening a write window every time. See docs/MIGRATION_V1_V2.md.
+dbutils.widgets.text("material_fill_if_blank_columns", "Content",
+                     "Material columns written only when the cell is blank")
 dbutils.widgets.text("explain_limit", "40", "Rows per request in the stdout trace")
 dbutils.widgets.text("sample_limit", "12", "current-vs-new samples per request in the exit JSON")
 
@@ -139,6 +147,9 @@ sample_limit = int(dbutils.widgets.get("sample_limit") or 12)
 material_exclude = frozenset(
     c.strip() for c in (dbutils.widgets.get("material_exclude_columns") or "").split(",")
     if c.strip())
+material_fill_if_blank = frozenset(
+    c.strip() for c in (dbutils.widgets.get("material_fill_if_blank_columns") or "").split(",")
+    if c.strip())
 
 staging_full = f"{catalog}.{schema}.beproduct_to_dtc_staging"
 mapping_full = f"{catalog}.{schema}.dtc_request_mapping"
@@ -158,6 +169,8 @@ print(f"  coverage: delta_only={delta_only}  staging_pending_only={pending_only}
 print(f"  duty contribution: {'ON' if enable_duty else 'OFF'}")
 if material_exclude:
     print(f"  material columns EXCLUDED from writes: {sorted(material_exclude)}")
+if material_fill_if_blank:
+    print(f"  material columns WRITE-ONCE (fill blank only): {sorted(material_fill_if_blank)}")
 print(f"  BOM source       : {bom_table}")
 print(f"  duty source      : {costing_table}")
 
@@ -349,6 +362,7 @@ for name, m in mapping.items():
         non_writable_cols=non_writable,
         enable_duty=enable_duty,
         material_exclude_cols=material_exclude,
+        material_fill_if_blank_cols=material_fill_if_blank,
         request_name=name,
     )
 
@@ -504,6 +518,7 @@ summary = {
     # mis-wired input is to see what actually went in.
     "inputs": inputs,
     "material_exclude_columns": sorted(material_exclude),
+    "material_fill_if_blank_columns": sorted(material_fill_if_blank),
     "totals": totals,
     "fields_by_source": by_source_totals,
     "diagnostics": diagnostics_totals,

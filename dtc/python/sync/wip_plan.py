@@ -450,6 +450,7 @@ def compute_request_plan(
     enable_material: bool = True,
     enable_duty: bool = True,
     material_exclude_cols: Optional[frozenset] = None,
+    material_fill_if_blank_cols: Optional[frozenset] = None,
     request_name: Optional[str] = None,
 ) -> RequestPlan:
     """
@@ -529,7 +530,8 @@ def compute_request_plan(
     # ── 2. Material contribution ────────────────────────────────────────────
     if enable_material and bom_by_style:
         _apply_material(plan, updates, inserts, bom_by_style, exclude_cols, dtc_rows,
-                        material_exclude_cols or frozenset())
+                        material_exclude_cols or frozenset(),
+                        material_fill_if_blank_cols or frozenset())
 
     # ── 3. Duty contribution ────────────────────────────────────────────────
     if enable_duty and duty_rows:
@@ -594,6 +596,7 @@ def _apply_material(
     exclude_cols: frozenset,
     dtc_rows: List[Dict[str, Any]],
     material_exclude_cols: frozenset = frozenset(),
+    material_fill_if_blank_cols: frozenset = frozenset(),
 ) -> None:
     """
     Run `bom.plan_style_enrichment()` per style against the PROJECTED rows
@@ -645,6 +648,11 @@ def _apply_material(
                 for col, val in act.wip_fields.items():
                     if col in material_exclude_cols:
                         target.dropped[col] = "material column excluded by parameter"
+                        continue
+                    if (col in material_fill_if_blank_cols
+                            and not bom._blank(target.current.get(col))):
+                        target.dropped[col] = (
+                            "write-once material column; target already non-blank")
                         continue
                     target.set_field(col, val, SOURCE_MATERIAL)
 

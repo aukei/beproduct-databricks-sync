@@ -396,4 +396,20 @@ if _failures:
     for f in _failures:
         print("   -", f)
     sys.exit(1)
+
+# ── [-SUPPLIER] DTC supplier-artifact requests are never sync targets ───────
+# Added 2026-09-15 (owner spec). DTC generates
+# "<customer> <seasonCode> <brand>-SUPPLIER <xxx>" artifact requests; four
+# appeared in one afternoon in UAT. Without this they parse as perfectly valid
+# in-scope requests with brand="Collaborations-SUPPLIER TUNAPP".
+assert phase1.is_in_scope("KTB SS28 Collaborations", "KTB") is True
+assert phase1.is_in_scope("KTB SS28 Collaborations-SUPPLIER TUNAPP", "KTB") is False
+assert phase1.is_in_scope("KTB SS28 Collaborations-SUPPLIER CENOVE", "KTB") is False
+assert phase1.is_in_scope("KTB SS28 Wrangler-supplier stedes", "KTB") is False, "case-insensitive"
+# A brand that merely contains the word, without the leading hyphen, is fine.
+assert phase1.is_in_scope("KTB SS28 Supplier Direct", "KTB") is True
+# Both markers together still excluded.
+assert phase1.is_in_scope("KTB SS28 (BACKUP) Wrangler-SUPPLIER X", "KTB") is False
+print("  ✓ [-SUPPLIER] supplier-artifact requests excluded from scope")
+
 print("✅ ALL PHASE 1 CORE UNIT TESTS PASSED")

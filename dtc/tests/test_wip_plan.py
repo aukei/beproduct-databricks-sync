@@ -547,6 +547,50 @@ check("[7j-5] excluding the only contested column restores zero-write",
 
 
 # ---------------------------------------------------------------------------
+print("\n[7k] material_fill_if_blank_cols -- write-once material columns")
+# ---------------------------------------------------------------------------
+
+# Content is contested: DTC's own trigger rewrites whatever Phase 10 writes,
+# and the two notations are semantically identical. Phase 10's write only has
+# to make the cell NON-BLANK (Phase 9a's completeness gate). So: fill a blank,
+# never touch a filled one -- otherwise the diff reappears every single run and
+# opens a write window every time.
+filled_other_notation = dtc_row("r1", 1, **{FG: "Main Fabric", MA: "WV-0003",
+                                            PL: "HEM", CT: "97% Cotton / 3% Spandex"})
+boms_ct = {"KTB-1": bom_json([("Main Fabric", "WV-0003", "HEM", "Cotton 97%, Spandex 3%")])}
+
+p_once = wip_plan.compute_request_plan(
+    SCOPE, [filled_other_notation], [bp_row()], bom_by_style=boms_ct,
+    material_fill_if_blank_cols=frozenset({CT}), allowed_cols=ALLOWED)
+check("[7k-1] a NON-BLANK Content is left alone (no ping-pong)",
+      p_once.is_empty(), p_once.explain())
+check("[7k-2] the skip is recorded, not silent",
+      any("write-once" in v for r in p_once.updates + p_once.noops
+          for v in r.dropped.values()),
+      [r.dropped for r in p_once.updates + p_once.noops])
+
+blank_content = dtc_row("r1", 1, **{FG: "Main Fabric", MA: "WV-0003",
+                                    PL: "HEM", CT: None})
+p_fill = wip_plan.compute_request_plan(
+    SCOPE, [blank_content], [bp_row()], bom_by_style=boms_ct,
+    material_fill_if_blank_cols=frozenset({CT}), allowed_cols=ALLOWED)
+check("[7k-3] a BLANK Content IS filled (Phase 9a's gate needs non-blank)",
+      p_fill.summary()["columns_changed"].get(CT) == 1,
+      p_fill.summary()["columns_changed"])
+
+# A brand-new row has no current value at all, so it must be filled.
+p_new_ct = wip_plan.compute_request_plan(
+    SCOPE, [], [bp_row()], bom_by_style=boms_ct,
+    material_fill_if_blank_cols=frozenset({CT}), allowed_cols=ALLOWED)
+check("[7k-4] a new INSERT still receives Content",
+      p_new_ct.inserts and p_new_ct.inserts[0].fields.get(CT) == "Cotton 97%, Spandex 3%",
+      p_new_ct.explain())
+check("[7k-5] Placement is unaffected by the write-once rule",
+      p_fill.summary()["columns_changed"].get(PL) is None
+      or p_fill.summary()["columns_changed"].get(PL) == 1)
+
+
+# ---------------------------------------------------------------------------
 print("\n[8] Idempotence: planning twice over the applied result is a no-op")
 # ---------------------------------------------------------------------------
 

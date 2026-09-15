@@ -289,8 +289,9 @@ def is_in_scope(reference: str, customer: str) -> bool:
     """
     True if a request reference is in scope for the given customer.
 
-    In scope == reference does NOT contain the "(BACKUP)" marker (see below)
-    AND parses cleanly AND its customer token matches the target customer
+    In scope == reference contains NEITHER the "(BACKUP)" marker NOR a
+    "-SUPPLIER" marker (see below) AND parses cleanly AND its customer token
+    matches the target customer
     (case-insensitive). E.g. with customer='KTB', 'KTB FW26 Wrangler' is in
     scope while 'KON FW26 Wrangler' (developer test data) is not.
 
@@ -319,6 +320,19 @@ def is_in_scope(reference: str, customer: str) -> bool:
     prefix alone catches every live-observed variant regardless of what
     follows inside the parens.
 
+    **"-SUPPLIER <xxx>"-named requests are NEVER in scope either** (added
+    2026-09-15, owner spec). DTC generates supplier-scoped artifact requests
+    named `"<customer> <seasonCode> <brand>-SUPPLIER <xxx>"` -- e.g.
+    `"KTB SS28 Collaborations-SUPPLIER TUNAPP"`. They are DTC's own artifacts
+    and are NOT sync write targets. Without this they parse perfectly well as
+    in-scope, taking brand = `"Collaborations-SUPPLIER TUNAPP"` (this function
+    treats EVERYTHING after the season code as the brand), and would each
+    become a first-class push target on the next registry refresh -- four such
+    requests appeared in a single afternoon in UAT (2026-09-15), so this is not
+    a rare case. Matched case-insensitively on `-supplier` followed by a word
+    boundary, so a brand legitimately containing the word "supplier" without the
+    leading hyphen is unaffected.
+
     Deliberately NOT applied to the DTC LinePlan document: `dtc/notebooks/
     p9a_pull_lineplan_to_delta.py` has its own independent, unfiltered
     discovery loop and never imports or calls this function at all -- the
@@ -327,6 +341,8 @@ def is_in_scope(reference: str, customer: str) -> bool:
     decision, 2026-09-01) -- see that notebook's module docstring.
     """
     if re.search(r"\(backup", str(reference), re.IGNORECASE):
+        return False
+    if re.search(r"-supplier\b", str(reference), re.IGNORECASE):
         return False
     try:
         parsed = parse_request_reference(reference)
