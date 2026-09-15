@@ -722,7 +722,22 @@ costing_chart = reduce(lambda _a, _b: _a.unionByName(_b), slot_dfs)
 costing_chart = costing_chart.withColumnRenamed("class_", "class_name")
 
 total_costing = costing_chart.count()
+
+# Step 4's own gate: a joined row with NO non-blank vendor slot produces ZERO
+# costing rows and vanishes without any error. It is the third of the three
+# independent gates (completeness / LinePlan join / vendor slot) and the one
+# with no message of its own -- so count it explicitly rather than leaving the
+# reader to infer it from "16 joined -> 7 rows".
+rows_with_no_slot = joined.filter(
+    ~reduce(lambda _a, _b: _a | _b,
+            [F.col(c).isNotNull() & (F.trim(F.col(c)) != "")
+             for c in ("vendor_main", "vendor_1", "vendor_2", "vendor_3")])
+).count()
+slot_counts = {r["supplier_type"]: int(r["count"]) for r in
+               costing_chart.groupBy("supplier_type").count().collect()}
+
 print(f"  Costing chart rows after transpose: {total_costing}")
+print(f"  Joined rows with NO vendor slot at all (dropped here): {rows_with_no_slot}")
 print(f"  Breakdown by slot:")
 costing_chart.groupBy("supplier_type").count().orderBy("supplier_type").show()
 
@@ -881,3 +896,39 @@ print("    hts_code IS NULL OR duty_rate_us IS NULL OR tariff_rate IS NULL")
 print("    and fill in values + push changes back to WIP.")
 print()
 print("✅ Phase 9a Costing Chart build complete")
+
+# ── Machine-readable exit summary ───────────────────────────────────────────
+# The Jobs API returns NO notebook stdout for SERVERLESS runs -- only this exit
+# value (live-confirmed 2026-09-14). Everything printed above is therefore
+# invisible outside the Databricks UI, which for a stage that silently DROPS
+# rows at four separate gates is a real problem: "7 rows out" tells you nothing
+# about the 53 that did not make it. The per-gate drop counts are the whole
+# point of this payload.
+import json as _json
+
+_summary = {
+    "status": "OK",
+    "mode": effective_mode,
+    "output_table": output_table,
+    "inputs": {
+        "wip_rows": int(wip_raw.count()),
+        "lineplan_rows": int(lp_raw.count()),
+    },
+    "gates": {
+        # Step 1b -- all four ANDed; see that step for what each means.
+        "dropped_incomplete_fabric": int(dropped_incomplete_fabric),
+        "dropped_no_material_no": int(dropped_no_material_no),
+        "dropped_no_bp_style_no": int(dropped_no_bp_style_no),
+        "dropped_blank_content": int(dropped_no_content),
+        "dropped_not_main_fabric": int(dropped_not_main_fabric),
+        # Step 3 -- the LinePlan INNER join.
+        "dropped_no_lineplan_ref": int(dropped_no_ref),
+        "joined_to_lineplan": int(joined_count),
+        # Step 4 -- the third gate, which otherwise vanishes silently.
+        "dropped_no_vendor_slot": int(rows_with_no_slot),
+    },
+    "rows_by_vendor_slot": slot_counts,
+    "costing_chart_rows": int(total_costing),
+}
+print("\n" + _json.dumps(_summary, indent=2))
+dbutils.notebook.exit(_json.dumps(_summary))

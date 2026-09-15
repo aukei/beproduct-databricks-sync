@@ -365,6 +365,41 @@ this stays true by construction; verify it stays true after any change).
 
 ## Verified discoveries log (append-dated; do not delete)
 
+**v2 END-TO-END RUN -- job `BeProduct_DTC_sync_v2` = 367710575109755
+(2026-09-15, run 51302327795660, dry_run=true):**
+- **SUCCESS. All 12 tasks, 278 s wall.** First time the stages ran in sequence
+  rather than individually. Note all three v1 jobs were PAUSED at the time, so
+  there was no shared-Delta-table collision.
+- **Dependency order verified programmatically**, not by eye: every task's
+  start time is after the end time of all its declared dependencies. (The
+  polling output interleaves `▶ running` and `✅ done` lines within one poll
+  and LOOKS like `build_costing` started before `transform` finished -- it is a
+  display artifact of the poll loop, not a real overlap.)
+- Observed shape (seconds from run start): phase0 chain 0-103 (serial pull ->
+  upsert -> push) | bp_style_sync + pull_master_dtc + pull_lineplan_dtc
+  103-139 in parallel | transform + pull_bom 138-217 in parallel |
+  request_manager + build_costing + phase2_push 217-265 in parallel |
+  wip_push 265-278.
+- **Serverless setup is 1-4 s PER TASK** (12 tasks, ~18 s total overhead)
+  against v1's single ~3 min instance-pool startup. This is the one timing
+  number here that is dataset-independent and therefore the one worth quoting.
+  **Do NOT compare the 278 s wall against PERFORMANCE.md's v1 figures** -- those
+  were measured on the ~145-style `KTB` folder and this ran on `TEST KTB` with
+  8 styles.
+- The critical path is dominated by the Phase 0 chain (103 s, 37% of wall) and
+  `transform` (79 s). Neither is touched by the v2 revamp.
+- `wip_push` behaved exactly as in isolation: 40 updates, `Sub Class` only,
+  **1 PATCH call, 1 write window**, 0 violations, 0 degraded, 0 exceptions.
+- **Gap found and closed: `build_costing` returned NO machine-readable exit
+  value.** For a stage that silently DROPS rows at THREE independent gates that
+  is a real problem -- "7 rows out" says nothing about the 53 that did not make
+  it, and serverless returns no stdout. It now exits a JSON summary with
+  per-gate drop counts, including the Step 4 vendor-slot gate, which
+  previously had no message of its own at all. Full accounting for this run:
+  60 WIP rows -> 16 representative (style x colour, intent mode) -> Step 1b
+  drops 0 -> all 16 join LinePlan -> **9 dropped for having no vendor slot** ->
+  7 costing rows, all in the `Main` slot.
+
 **v2 stage 4 -- `costing_chart` from intent, validated against v1
 (2026-09-15, run 875000189962231):**
 - **`p9a_build_costing_chart.py` gained a `wip_effective_mode` parameter

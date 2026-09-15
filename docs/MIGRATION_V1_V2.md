@@ -342,6 +342,21 @@ exists solely to feed `build_costing`.
 Each stage ships independently and each reduces either window count or runtime, so
 there is benefit before the whole thing lands.
 
+### End-to-end validation (2026-09-15, run `51302327795660`)
+
+`BeProduct_DTC_sync_v2` = job **367710575109755**, created unscheduled.
+`dry_run=true`. **SUCCESS — all 12 tasks, 278 s wall.** Dependency order was
+verified programmatically (every task starts after all its dependencies end),
+and the three parallel groups behaved as designed.
+
+Serverless setup is **1–4 s per task** (~18 s total) against v1's single ~3 min
+pool startup — the one timing figure here that is dataset-independent. The 278 s
+wall is **not** comparable to `PERFORMANCE.md`'s v1 numbers: those were measured
+on the ~145-style `KTB` folder, this on `TEST KTB` with 8 styles.
+
+`wip_push` matched its isolated behaviour exactly: 40 updates, `Sub Class` only,
+**1 PATCH call, 1 write window**, zero violations or degraded contributions.
+
 ### Validation before cutover
 
 1. Deploy `BeProduct_DTC_sync_v2` **unscheduled** (`--no-schedule`) and with
