@@ -563,6 +563,22 @@ before doing it:
   Resolving by name alone silently picks the wrong sheet — always filter
   `request_is_active='Y' AND in_scope` and refuse on ambiguity.
 
+**Open issue — BOM reverse push (raised 2026-09-16)**
+
+Pushing DTC's `"Fabric Customer # or SAP #"` into the BOM's
+`CUSTOMER MATERIAL CODE` is **blocked pending a BeProduct API change**.
+`POST …/Variation/{v}/Update` is variation-scoped and ignores `rows[]` — ten
+body shapes across three fields all returned HTTP 200 and changed nothing, while
+the same endpoint applied a `variationName` change immediately. Needs either the
+correct payload for `Update` to accept `rows[]`, or a row-level write endpoint.
+`Reset`/`CreateVariation` are not acceptable substitutes: they would destroy and
+rebuild a variation, losing `rowId`s and any hand-entered data, to set one text
+field.
+
+Everything else is ready for it — the match key `(Group, MILL FABRIC
+CODE/SUPPLIER ITEM CODE)` is confirmed unique per style and is already
+`bom.segment_key()`, tested. Full evidence in AGENTS.md.
+
 **Deferred**
 
 - **The images job is a second write window.** It cannot share the PATCH, but it

@@ -127,7 +127,7 @@ BeProduct_DTC_sync_duty_compute   compute_duty_rates   NT Orbit → nt_orbit_dut
 | 10 | `pull_master_dtc` | `p1_pull_masters_to_delta` | reused | `phase0_push` |
 | 10 | `pull_lineplan_dtc` | `p9a_pull_lineplan_to_delta` | reused | `phase0_push` |
 | 20 | `transform` | `p1p7_beproduct_to_dtc_transform` | reused | `bp_style_sync` |
-| 20b | `pull_bom` | `v2_pull_bom_segments` | **NEW** | `bp_style_sync` |
+| 20b | `pull_bom` | `v2_pull_bom_segments` (BeProduct API) | **NEW** | `bp_style_sync` |
 | 25 | `request_manager` | `p1_dtc_request_manager` | reused | `transform`, `pull_master_dtc` |
 | 30 | `build_costing` | `p9a_build_costing_chart` (`wip_effective_mode=intent`) | reused + Step 1a | `transform`, `pull_bom`, `pull_master_dtc`, `pull_lineplan_dtc` |
 | 40 | `wip_push` | `v2_wip_push` | **NEW** | `request_manager`, `build_costing` |
@@ -246,36 +246,61 @@ no change for v2. Writes Delta only; touches no DTC.
 > **plan time** in Stage 40. `repull_dtc` still disappears — planning against
 > intent is what removed it, not the staging grain.
 
-### Stage 20b — `pull_bom` → `tpm_bom_segments`  **NEW**
+### Stage 20b — `pull_bom` → `bom_segments`  **NEW**
 
-Materializes the techpack BOM into ordinary Delta so nothing downstream has to
-touch Lakebase. Runs in **parallel** with `transform`; touches no DTC.
+Reads the BOM straight from **BeProduct's PageBomVariation API** and writes the
+parsed segments to Delta. Runs in **parallel** with `transform`; touches no DTC,
+and writes nothing back to BeProduct.
 
-**BOM source** (two-hop, unchanged semantics from v1 Phase 10's "2nd revision"):
+> **Source replaced 2026-09-16.** BOM used to arrive via a separate
+> techpack-extraction pipeline landing in `alb_tpm_uat` / `alb_tpm_prd`
+> (Lakebase). BeProduct now exposes it directly, which removes an entire
+> intermediate system, its two-hop join, and the serverless-only access
+> constraint that originally forced Phase 10 onto its own task.
+>
+> Validated against the retired source across all 8 styles: identical counts,
+> **7 of 8 byte-identical** on `(Fabric Group, Mill Fabric Article #,
+> Placement)`, and the 8th *better* — `KTB-00029`'s Lakebase placements were
+> blank where BeProduct gives `BODICE` / `LINING` / `HEM`. Switching the source
+> produced **zero** DTC writes, i.e. the new source agrees with what is already
+> live.
 
 ```
-alb_tpm_<env>.public.customer_teckpack_style_latest   -- resolves WHICH log row is current
-   .latest_techpack_style_log_id
-      → customer_teckpack_style_log.teckpack_style_log_id
-        .custom_fields → xts_data → TECH_PACK_EXTRACTION → Table[Type="BOM"]
+style.app_list(header_id)          → the "BOMVariations" page. Its pageId is
+                                     FOLDER-CONSTANT, so it is discovered once
+                                     per run (pin it with `bom_page_id`).
+style.app_get(header_id, page_id)  → the VARIATION LIST. There is no separate
+                                     list endpoint.
+GET Style/{h}/PageBomVariation/{p}/Variation/{v}
+                                   → {metadata, id, …, rows[]}
 ```
 
-Joined onto `ktb_styles` on `(bp_style_number = style_no,
-season || ' - ' || year = style_season)`, INNER throughout both hops.
-`customer_name` is pre-filtered to `bom_customer_name` for scoping/performance
-only — the join keys are already customer-correct.
+Field mapping lives in `sync/bom.py`, not the notebook, so it keeps its unit
+tests. Two traps worth knowing:
 
-`alb_tpm_*` are Lakebase databases registered in Unity Catalog and are queryable
-**only from serverless compute**. In v1 this forced Phase 10 onto a serverless task
-of its own; in v2 the whole job is serverless, so the constraint costs nothing and
-the BOM read collapses into the transform.
+- **`rows[].group` is a GUID, not the group name.** The name is
+  `fields["Group"]`, whose values are exactly the two segments the decision tree
+  already knows: `"Main Fabric"` and `"Fabric"`.
+- **Field objects carry a stable `id`** (`placement`,
+  `vendor_material_reference_no`, `fabric_content`, `customer_material_code`)
+  alongside the display `name`. Prefer `id` — display names are precisely what
+  the original spec got wrong.
 
-Only two `**MaterialCategory` values are used: **"Main Fabric"** (exactly one per
-style by construction) and **"Fabric"** (zero or more). `ColumnHeader` may contain
-dict entries (e.g. `{"Colorway": [...]}`) for per-colorway breakdowns this stage
-does not use; a plain-string column lookup never matches them, so no special-casing
-is needed. If more than one `Type == "BOM"` entry exists, all their `Data` rows are
-concatenated.
+`FACE FABRIC/MATERIAL CONTENT` is **structured**
+(`[{"value": 97.0, "code": "Cotton"}, …]`), so `bom.render_material_content()`
+chooses the rendering: `"97% Cotton / 3% Spandex"`. That matches DTC's dominant
+notation but **not all of it** — see Stage 40's Content note; write-once stays on.
+
+Colorway affinity is deliberately ignored (owner decision): variations carry
+`syncColorways` / `selectedVariationColorways`, but every variation applies to
+all colorways. Per-colorway coverage stays with `plan_style_enrichment()`.
+
+> **Open issue — the reverse push is blocked.** Pushing DTC's
+> `"Fabric Customer # or SAP #"` into `rows[].fields["CUSTOMER MATERIAL CODE"]`
+> is **not yet possible**: `POST …/Variation/{v}/Update` is **variation-scoped**
+> and ignores `rows[]`. Ten body shapes across three fields all returned HTTP
+> 200 and changed nothing, while the same endpoint applied a `variationName`
+> change immediately. Awaiting a payload/endpoint from BeProduct. See AGENTS.md.
 
 **Gates — staging eligibility** (`sync/lifecycle.py`, `sync/bom.py`):
 
@@ -696,7 +721,7 @@ own live `get_sheet()` immediately before writing.
 | `request_manager` | unchanged |
 | `phase1_push` | → folded into `wip_push` |
 | `repull_dtc` | removed |
-| `fill_bom_data` | → split: the Lakebase read becomes `pull_bom` (Stage 20b); the DTC write folds into `wip_push` |
+| `fill_bom_data` | → split: the BOM read becomes `pull_bom` (Stage 20b, now BeProduct not Lakebase); the DTC write folds into `wip_push` |
 | `repull_dtc_bom` | removed |
 | `build_costing_chart` | → `build_costing` (Stage 30), reads staging instead of the re-pull |
 | `push_duty_rates` | → folded into `wip_push` |
