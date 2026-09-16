@@ -293,6 +293,7 @@ by_source_totals = {}
 diagnostics_totals = {}
 columns_totals = {}
 columns_unseen_totals = set()
+stranded_totals = []
 all_degraded, all_violations = [], []
 per_request = []
 
@@ -386,6 +387,45 @@ for name, m in mapping.items():
     # so the two cases are indistinguishable from here. Either way it deserves
     # a human look -- if the column really is absent, every push to it is going
     # into the void.
+    # ── Stranded-row detector (added 2026-09-16) ───────────────────────────
+    # A live DTC row whose (BP Style#, Color / Wash) key exists NOWHERE in
+    # BeProduct. No stage ever touches it: compute_orphan_marks only flags a
+    # row whose key moved to a DIFFERENT request, and a key BeProduct does not
+    # have at all falls into its "not a BeProduct-driven move, leave it alone"
+    # branch -- deliberately, because that is also what protects genuinely
+    # user-entered rows. The two cases are indistinguishable from here.
+    #
+    # So these rows are invisible by design, and they are NOT inert: they still
+    # feed build_costing, so a stranded colorway can consume NT Orbit lookups
+    # and carry duty values back into DTC. Live example 2026-09-16:
+    # KTB-00028/"Rose Bisque" (3 rows, BeProduct has only "RedGingham") and
+    # KTB-00030/"OffWhite" (2 rows, and it IS in costing_chart).
+    #
+    # Reported only -- deciding whether a stranded row is deleted-in-BeProduct
+    # or legitimately DTC-owned is a data-policy call, not one to make here.
+    stranded = {}
+    for _r in dtc_rows:
+        _k = (phase1.norm(_r.get(phase1.MATCH_KEY_COLS[0])),
+              phase1.norm(_r.get(phase1.MATCH_KEY_COLS[1])))
+        if _k == (None, None) or _k[0] is None:
+            continue
+        if _k not in key_to_requests:
+            stranded[_k] = stranded.get(_k, 0) + 1
+    if stranded:
+        s["stranded_rows"] = [{"bp_style_number": k[0], "color": k[1], "dtc_rows": n}
+                              for k, n in sorted(stranded.items(),
+                                                 key=lambda kv: (-kv[1], kv[0]))]
+        stranded_totals.extend(s["stranded_rows"])
+        print(f"  ⚠ {sum(stranded.values())} row(s) in {len(stranded)} colorway(s) have NO "
+              f"BeProduct counterpart -- never updated by any stage:")
+        for k, n in sorted(stranded.items()):
+            print(f"      {k[0]} / {k[1]!r}  ({n} row(s))")
+        print("     Either the colorway was removed from BeProduct (the DTC rows are")
+        print("     now stale) or it is DTC-owned data BeProduct never had. They still")
+        print("     feed build_costing, so they can consume NT Orbit lookups.")
+        log(name, request_id, "STRANDED_ROWS", None, "warn", "no_beproduct_counterpart",
+            "; ".join(f"{k[0]}/{k[1]}={n}" for k, n in sorted(stranded.items())))
+
     unseen = sorted(set(s["columns_changed"]) - view_cols)
     if unseen:
         s["columns_not_seen_in_view"] = unseen
@@ -485,6 +525,11 @@ print(f"  {'fields_by_source':20} {by_source_totals}")
 print(f"  {'diagnostics':20} {diagnostics_totals}")
 print(f"  {'inputs':20} {inputs}")
 print(f"  {'columns changed':20} {columns_totals}")
+if stranded_totals:
+    _n = sum(x["dtc_rows"] for x in stranded_totals)
+    print(f"\n  ⚠ STRANDED: {_n} DTC row(s) across {len(stranded_totals)} colorway(s) have")
+    print("     no BeProduct counterpart. No stage updates them, but they DO feed")
+    print("     build_costing. See 'stranded_rows' in the exit JSON.")
 if columns_unseen_totals:
     print(f"\n  ⚠ COLUMNS THE LIVE VIEW NEVER REPORTS: {sorted(columns_unseen_totals)}")
     print("     Every write to a column DTC does not recognise is accepted (204)")
@@ -524,6 +569,7 @@ summary = {
     "diagnostics": diagnostics_totals,
     "columns_changed": dict(sorted(columns_totals.items(), key=lambda kv: (-kv[1], kv[0]))),
     "columns_not_seen_in_view": sorted(columns_unseen_totals),
+    "stranded_rows": stranded_totals,
     "write_windows_opened": totals["requests_written"],
     "degraded": all_degraded[:50],
     "violations": all_violations[:50],

@@ -365,6 +365,37 @@ this stays true by construction; verify it stays true after any change).
 
 ## Verified discoveries log (append-dated; do not delete)
 
+**STRANDED DTC ROWS -- a colorway DTC has that BeProduct does not
+(found 2026-09-16 from an owner observation; NOT a v2 regression):**
+- Reported symptom: in `KTB SS28 Collaborations`, LF Style# `CB-S28003`
+  (= `KTB-00028`) has 6 rows across 2 colours, and the 3 `Rose Bisque` rows
+  have a blank `Sub Class` while the 3 `RedGingham` rows are filled.
+- **Root cause: BeProduct has only ONE colorway for that style --
+  `["RedGingham"]`.** `Rose Bisque` does not exist there, so
+  `beproduct_to_dtc_staging` has no row for it, so `compute_upsert()` has no
+  BeProduct row keyed `(KTB-00028, Rose Bisque)` and correctly writes nothing.
+  v1 behaves identically; this is not something v2 changed.
+- **Why nothing ever flags it:** `phase1.compute_orphan_marks()` only marks a
+  row whose key moved to a DIFFERENT request. A key BeProduct has NOWHERE
+  falls into its "not a BeProduct-driven move; leave it alone" branch -- which
+  is deliberate, because that is the same branch protecting genuinely
+  user-entered DTC rows. From the pipeline's side the two cases are
+  indistinguishable, so stranded rows are invisible BY DESIGN.
+- **They are NOT inert.** They still feed `build_costing`:
+  `KTB-00030`/`OffWhite` (2 rows, likewise absent from BeProduct) has a real
+  `Sub Class` from an earlier era AND a live `costing_chart` row -- so a
+  stranded colorway can consume NT Orbit lookups and carry duty values back
+  into DTC.
+- Full extent in UAT: `KTB-00028`/`Rose Bisque` (3 rows, no Sub Class, not
+  costed) and `KTB-00030`/`OffWhite` (2 rows, Sub Class present, IS costed).
+- **`v2_wip_push` now DETECTS and reports them** (`stranded_rows` in the exit
+  JSON, a `STRANDED_ROWS` warn row in `beproduct_to_dtc_sync_log`, and stdout).
+  Report-only: whether a stranded row is a deleted-in-BeProduct leftover or
+  legitimately DTC-owned is a data-policy call, and marking or deleting it
+  would risk destroying real user data. **Open question for the owner:** were
+  `Rose Bisque` / `OffWhite` removed from BeProduct, or created directly in
+  DTC?
+
 **Instance pool idled to zero; `folder_name` still `TEST KTB` (2026-09-15):**
 - `beproduct-dtc-sync-pool-v5` **`min_idle_instances` 1 -> 0**. Once the v2 main
   DAG and `duty_compute` both moved to serverless, the only jobs still

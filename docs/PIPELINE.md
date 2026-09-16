@@ -477,6 +477,16 @@ limit, so it has to be re-established explicitly in the composition layer.
   that signals the DTC user. Never deleted. Only rows whose key now lives under a
   different request are marked. These marks are part of the *old* request's own
   single write window.
+- **Stranded rows** (reported, never written): a row whose `(BP Style#,
+  Color / Wash)` key exists **nowhere** in BeProduct — e.g. a colorway deleted
+  from BeProduct, or one created directly in DTC. No stage touches these:
+  `compute_orphan_marks` only handles keys that moved to a *different* request,
+  and the "exists nowhere" case shares a branch with genuinely user-entered
+  rows, which must be protected. They are **not inert** — they still feed
+  Stage 30, so a stranded colorway can consume NT Orbit lookups and carry duty
+  values. `wip_push` surfaces them as `stranded_rows` in its exit JSON and as a
+  `STRANDED_ROWS` row in the sync log; deciding what to do with one is a
+  data-policy call.
 
 **Gates — material fields** (`sync/bom.py`, `plan_style_enrichment()`):
 1. Style must have at least one row (existing or planned) — else no-op.
