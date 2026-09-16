@@ -365,6 +365,43 @@ this stays true by construction; verify it stays true after any change).
 
 ## Verified discoveries log (append-dated; do not delete)
 
+**BOM source switched to the BeProduct PageBomVariation API -- validated
+against the retired Lakebase source (2026-09-16):**
+- `v2_pull_bom_segments` now reads BeProduct directly. The `alb_tpm_*` Lakebase
+  dependency is GONE, and with it the serverless-only access constraint that
+  originally forced Phase 10 onto its own task.
+- **Equivalence check, new source vs old, all 8 TEST KTB styles:**
+  - Headline counts IDENTICAL: 8 styles, 8 with a Main Fabric segment, 14
+    "Fabric" segments.
+  - **7 of 8 styles byte-identical** on `(Fabric Group, Mill Fabric Article #,
+    Placement)`.
+  - The 1 that differs is the new source being **BETTER**: `KTB-00029`'s
+    Lakebase placements were all `''`, where BeProduct gives `BODICE` /
+    `LINING` / `HEM`.
+  - `Content` differs on every style, as expected and already documented -- the
+    Lakebase source emitted `"Cotton 97%, Spandex 3%"`, the new renderer emits
+    DTC's `"97% Cotton / 3% Spandex"`. Not a regression; see the notation entry
+    above for why write-once stays on.
+- **PYTHON 3.10 vs 3.11 -- a bug class local testing CANNOT catch.**
+  `client.style.app_list()` raised `AttributeError: module 'datetime' has no
+  attribute 'UTC'` on Databricks **serverless**, which runs Python **3.10**;
+  `datetime.UTC` is a 3.11+ alias for `timezone.utc` and the installed
+  `beproduct` SDK uses it unconditionally. It works fine on a 3.11 dev machine,
+  so it ONLY appears on the cluster. Fixed with a total, safe shim
+  (`datetime.UTC = datetime.timezone.utc` when absent) at the top of the
+  notebook. **Any future notebook importing the BeProduct SDK needs the same
+  shim** until the SDK or the runtime moves.
+  - Note this is the SECOND serverless-only failure found in two days, after
+    `reduce(DataFrame.unionByName, ...)`. Static audits keep missing these;
+    running the task on the cluster is the only reliable check.
+- **The serverless "no stdout" rule earned its keep again:** the first failure
+  returned a bare `{"status": "NO_BOM_PAGE"}` and was unactionable. Adding the
+  probe detail (styles tried, app types seen, per-style errors) to the EXIT
+  VALUE turned it into a one-line diagnosis.
+- The BOMVariations `pageId` (`2e00eced-7d15-4f47-966d-3a16e79e9e21`) is
+  folder-constant, so it is auto-discovered ONCE per run from the first few
+  styles, with a `bom_page_id` job parameter to pin it.
+
 **BeProduct PageBomVariation API -- LIVE-TESTED 2026-09-16 (read-only GET).
 Intended to replace the `alb_tpm_*` Lakebase BOM source entirely:**
 - **Access pattern** (all via `beproduct._raw_api.RawApi`; the SDK has no

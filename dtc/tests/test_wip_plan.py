@@ -591,6 +591,33 @@ check("[7k-5] Placement is unaffected by the write-once rule",
 
 
 # ---------------------------------------------------------------------------
+print("\n[7l] BOM source-agnosticism -- Lakebase payload OR prebuilt segments")
+# ---------------------------------------------------------------------------
+
+# The BeProduct PageBomVariation source hands wip_plan already-built segments
+# instead of a raw Lakebase custom_fields payload. Both must produce the
+# IDENTICAL plan -- that equivalence is what makes the migration diffable.
+_prebuilt = bom.build_target_segments(MAIN_ONLY)
+p_raw = wip_plan.compute_request_plan(
+    SCOPE, [], [bp_row()], bom_by_style={"KTB-1": MAIN_ONLY}, allowed_cols=ALLOWED)
+p_seg = wip_plan.compute_request_plan(
+    SCOPE, [], [bp_row()], bom_by_style={"KTB-1": _prebuilt}, allowed_cols=ALLOWED)
+check("[7l-1] prebuilt segments produce the same field set as the raw payload",
+      [dict(r.fields) for r in p_seg.inserts] == [dict(r.fields) for r in p_raw.inserts],
+      (p_seg.explain(), p_raw.explain()))
+check("[7l-2] and the same provenance",
+      [dict(r.sources) for r in p_seg.inserts] == [dict(r.sources) for r in p_raw.inserts])
+
+# An empty segment list must mean "no Main Fabric" -> zero actions, never a revert.
+p_none = wip_plan.compute_request_plan(
+    SCOPE, [dtc_row("r1", 1, **{FG: "Fabric", MA: "GONE", PL: "X", CT: "Y"})],
+    [bp_row()], bom_by_style={"KTB-1": []}, allowed_cols=ALLOWED)
+check("[7l-3] an empty segment list never reverts an enriched row",
+      not any(set(r.fields) & wip_plan.MATERIAL_OWNED_COLS for r in p_none.updates),
+      p_none.explain())
+
+
+# ---------------------------------------------------------------------------
 print("\n[8] Idempotence: planning twice over the applied result is a no-op")
 # ---------------------------------------------------------------------------
 

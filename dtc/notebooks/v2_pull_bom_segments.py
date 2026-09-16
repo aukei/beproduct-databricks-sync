@@ -1,67 +1,70 @@
 # Databricks notebook source
 """
-v2 Stage 20b -- techpack BOM (Lakebase) -> Delta `tpm_bom_segments`.
+v2 Stage 20b -- BOM segments from the BeProduct PageBomVariation API -> Delta.
 
-Materializes the techpack BOM for every in-scope BeProduct style into an
-ordinary Delta table, so the rest of the pipeline never has to touch Lakebase
-again. Writes NOTHING to DTC.
+REWRITTEN 2026-09-16: reads BeProduct directly and no longer touches the
+`alb_tpm_uat` / `alb_tpm_prd` Lakebase techpack tables at all. Writes NOTHING
+to DTC and nothing to BeProduct -- this stage is read-only on both.
 
-Why this is a separate notebook, not folded into the transform
----------------------------------------------------------------
-The v1 transform (`p1p7_beproduct_to_dtc_transform.py`, 839 lines) already
-produces `beproduct_to_dtc_staging` correctly and needs no change for v2.
-Copying it just to bolt on a BOM read would duplicate every field mapping,
-season-code lookup, lifecycle gate and validation rule in it -- four SSOT
-violations waiting to drift. This notebook adds the one genuinely new input as
-its own small, independently-testable step that runs in PARALLEL with it.
+Why the source changed
+----------------------
+BOM data used to arrive via a separate techpack-extraction pipeline landing in
+Lakebase. BeProduct now exposes it directly (5 new PageBomVariation endpoints,
+live 2026-09-16), which removes a whole intermediate system, its
+serverless-only access constraint, and the two-hop join that went with it.
 
-Why staging is NOT at style x color x material grain
------------------------------------------------------
-An earlier draft of docs/PIPELINE.md said the v2 transform would emit the final
-style x color x material grain. That is **not possible, and not desirable**:
+Access pattern (live-verified -- the original spec's field names were mostly
+wrong; see AGENTS.md for the full correction table):
 
-  1. The material fan-out depends on what ALREADY EXISTS in DTC -- which
-     "Fabric" segments a given colorway is already represented by. The
-     transform has no live DTC state, so it cannot compute it. Only
-     `wip_plan.compute_request_plan()`, which sees the live rows, can.
-  2. `phase1.compute_upsert()` treats a repeated (BP Style#, Color / Wash) as
-     a `duplicate_bp_key` exception. Feeding it material-grain rows would make
-     every multi-material style raise.
+    style.app_list(header_id)                -> find the "BOMVariations" page.
+                                                Its pageId is FOLDER-CONSTANT,
+                                                so it is discovered ONCE and
+                                                reused for every style.
+    style.app_get(header_id, page_id)        -> the VARIATION LIST for a style
+                                                ([{id, variationName, order,
+                                                isDefault, ...}]). There is no
+                                                separate list endpoint.
+    GET Style/{header}/PageBomVariation/{page}/Variation/{vid}
+                                             -> {metadata, id, ..., rows[]}
 
-So: staging stays at **style x color**, this table holds **style -> BOM**, and
-the material dimension is resolved at PLAN time against live DTC rows. See
-docs/PIPELINE.md Stage 20.
+`beproduct._raw_api.RawApi` is used for the last call because the SDK has no
+wrapper for it yet. NOTE: `client.public_api_url` ALREADY ends in
+`/api/{company}` -- prefixing `api/{company}` yourself gives a doubled path and
+a 404.
 
-Source (unchanged from v1 Phase 10's "2nd revision", 2026-09-09) -- two hops:
+Field mapping lives in `sync/bom.py` (`extract_variation_row_fields`), not
+here, so this notebook stays a thin IO wrapper and the mapping keeps its unit
+tests. In particular `rows[].group` is a GUID, NOT the group name -- the name
+is `fields["Group"]`, whose values are exactly the two segments the decision
+tree already knows: "Main Fabric" and "Fabric".
 
-    customer_teckpack_style_latest   resolves WHICH log row is current
-        .latest_techpack_style_log_id
-          -> customer_teckpack_style_log.teckpack_style_log_id
-             .custom_fields -> xts_data -> TECH_PACK_EXTRACTION
-                            -> Table[Type="BOM"]
+Colorway affinity is deliberately IGNORED (owner decision 2026-09-16):
+variations carry `syncColorways` / `selectedVariationColorways`, but every
+variation is treated as applying to all colorways. Per-colorway segment
+coverage remains `plan_style_enrichment()`'s job downstream.
 
-joined onto `ktb_styles` on (bp_style_number = style_no,
-season || ' - ' || year = style_season), INNER throughout both hops. A style
-with no match is simply not processed this run -- never an error, never a
-revert.
-
-`alb_tpm_*` are Lakebase databases registered in Unity Catalog and are
-queryable ONLY from serverless compute. In v1 that forced Phase 10 onto its own
-serverless task; in v2 the whole job is serverless, so this costs nothing
-(live-confirmed 2026-09-14, run 66807905429726: an ORDINARY serverless task
-reads them fine).
-
-Output: `<catalog>.<schema>.tpm_bom_segments`, fully overwritten each run.
+Output: `<catalog>.<schema>.<bom_segments_table>`, fully overwritten each run.
+Stores the PARSED segments (not the raw payload) because parsing now happens
+through a unit-tested pure function rather than being re-derived downstream.
 """
 
 # COMMAND ----------
 
 import sys
+import subprocess
+import time
 
-# ── Python module root ──────────────────────────────────────────────────────
-# Parameterized, never hardcoded: v2 deploys its modules under its own
-# workspace root so checking out the v2 branch can never change what the live
-# v1 job imports. See docs/MIGRATION_V1_V2.md ("Workspace isolation").
+print("Installing BeProduct SDK …")
+_t0 = time.perf_counter()
+try:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "beproduct"])
+    print(f"  ✅ installed in {time.perf_counter() - _t0:.1f}s")
+except Exception as e:  # noqa: BLE001
+    print(f"  ❌ install failed after {time.perf_counter() - _t0:.1f}s: {e}")
+    raise
+
+# COMMAND ----------
+
 _DEFAULT_MODULE_PATH = "/Workspace/Repos/beproduct-sync/DTC/python"
 dbutils.widgets.text("module_path", _DEFAULT_MODULE_PATH, "Python module root")
 _MODULE_PATH = (dbutils.widgets.get("module_path") or "").strip() or _DEFAULT_MODULE_PATH
@@ -70,8 +73,28 @@ for _p in (_MODULE_PATH, _MODULE_PATH.replace("/DTC/", "/dtc/")):
         sys.path.insert(0, _p)
 
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
+# ── Python 3.10 compatibility shim for the BeProduct SDK ───────────────────
+# Live-hit 2026-09-16: `client.style.app_list()` raises
+#   AttributeError: module 'datetime' has no attribute 'UTC'
+# on Databricks SERVERLESS, which runs Python 3.10. `datetime.UTC` is a 3.11+
+# alias for `datetime.timezone.utc`, and the installed SDK uses it
+# unconditionally. It works on a 3.11 dev machine, so this only ever surfaces
+# on the cluster -- exactly the class of bug that local testing cannot catch.
+#
+# Aliasing it back is safe and total: `datetime.UTC` IS `timezone.utc` in 3.11,
+# so this makes 3.10 behave identically rather than approximating it.
+import datetime as _dt_mod
+
+if not hasattr(_dt_mod, "UTC"):
+    _dt_mod.UTC = _dt_mod.timezone.utc
+    print("  (applied datetime.UTC shim for Python "
+          f"{sys.version_info.major}.{sys.version_info.minor})")
+
+from beproduct.sdk import BeProduct
+from beproduct._raw_api import RawApi
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
     StructType, StructField, StringType, IntegerType, TimestampType,
@@ -84,198 +107,203 @@ from sync import bom
 dbutils.widgets.text("catalog", "lft", "Catalog")
 dbutils.widgets.text("schema", "beproduct", "Schema")
 dbutils.widgets.text("folder_name", "TEST KTB", "BeProduct folder")
-dbutils.widgets.text("bom_catalog", "alb_tpm_uat", "Lakebase catalog (NOT derived from dtc_environment)")
-dbutils.widgets.text("bom_schema", "public", "Lakebase schema")
-dbutils.widgets.text("bom_table", "customer_teckpack_style_latest", "Resolves latest_techpack_style_log_id")
-dbutils.widgets.text("bom_log_table", "customer_teckpack_style_log", "custom_fields -- the actual BOM source")
-dbutils.widgets.text("bom_customer_name", "KONTOOR", "Scoping/perf pre-filter only")
-dbutils.widgets.text("bom_segments_table", "tpm_bom_segments", "Output table")
-dbutils.widgets.text("run_bom", "true", "Run the BOM join (false = no-op)")
+dbutils.widgets.text("bom_segments_table", "bom_segments", "Output table")
+dbutils.widgets.text("bom_page_id", "", "BOMVariations pageId (blank = auto-discover)")
+dbutils.widgets.text("bom_max_workers", "8", "Parallel BeProduct fetch workers")
+dbutils.widgets.text("run_bom", "true", "Run the BOM pull (false = no-op)")
 
 catalog = dbutils.widgets.get("catalog")
 schema = dbutils.widgets.get("schema")
 folder_name = dbutils.widgets.get("folder_name")
-bom_catalog = dbutils.widgets.get("bom_catalog")
-bom_schema = dbutils.widgets.get("bom_schema")
-bom_table = dbutils.widgets.get("bom_table")
-bom_log_table = dbutils.widgets.get("bom_log_table")
-bom_customer_name = dbutils.widgets.get("bom_customer_name")
-out_table = f"{catalog}.{schema}.{dbutils.widgets.get('bom_segments_table')}"
-
+out_table = f"{catalog}.{schema}.{dbutils.widgets.get('bom_segments_table').strip()}"
+page_id_override = (dbutils.widgets.get("bom_page_id") or "").strip()
+max_workers = int(dbutils.widgets.get("bom_max_workers") or 8)
 styles_table = f"{catalog}.{schema}.ktb_styles"
-bom_source = f"{bom_catalog}.{bom_schema}.{bom_table}"
-bom_log_source = f"{bom_catalog}.{bom_schema}.{bom_log_table}"
 now = datetime.now(timezone.utc)
 
 print("=" * 78)
-print("v2 Stage 20b -- techpack BOM -> Delta")
+print("v2 Stage 20b -- BeProduct PageBomVariation -> Delta")
 print("=" * 78)
-print(f"  styles     : {styles_table}  (folder_name={folder_name!r})")
-print(f"  BOM latest : {bom_source}")
-print(f"  BOM log    : {bom_log_source}  (custom_fields)")
-print(f"  customer   : {bom_customer_name!r}")
-print(f"  output     : {out_table}")
+print(f"  styles : {styles_table}  (folder_name={folder_name!r})")
+print(f"  output : {out_table}")
+print(f"  workers: {max_workers}")
 
-# Checked HERE, not via a condition task: Databricks propagates a condition
-# task's EXCLUDED outcome to every downstream dependent unconditionally,
-# ignoring run_if. See docs/PIPELINE.md design rule 4.
 if (dbutils.widgets.get("run_bom") or "true").strip().lower() != "true":
-    print("\nrun_bom=false -- skipping. Downstream stages will see whatever this")
-    print("table already holds; they never revert on missing BOM data.")
+    print("\nrun_bom=false -- skipping. Downstream sees whatever this table already")
+    print("holds; nothing downstream ever reverts on missing BOM data.")
     dbutils.notebook.exit(json.dumps({"status": "SKIPPED_run_bom_false"}))
 
 # COMMAND ----------
 
-# ── Step 1: styles ⋈ BOM 'latest' ⋈ BOM 'log' (INNER throughout) ────────────
-print("\nStep 1: joining ktb_styles <-> BOM …")
-
-styles = (spark.table(styles_table)
-          .where(F.col("folder_name") == folder_name)
-          .select(
-              F.col("bp_style_number"),
-              F.concat(F.col("season"), F.lit(" - "), F.col("year")).alias("style_season"),
-          )
-          .where(F.col("bp_style_number").isNotNull()
-                 & F.col("season").isNotNull() & F.col("year").isNotNull()))
-n_styles = styles.count()
-print(f"  BeProduct styles with a valid season/year : {n_styles}")
-
-# `customer_teckpack_style_latest` guarantees at most one row per
-# (style_no, customer_name, customer_department, style_season). The
-# dropDuplicates is a near-zero-cost safety net in case that is ever violated
-# for a customer/environment this pipeline has not seen; it should be a no-op.
-bom_latest = (spark.table(bom_source)
-              .where(F.col("customer_name") == bom_customer_name)
-              .where(F.col("latest_techpack_style_log_id").isNotNull())
-              .select("style_no", "customer_department", "style_season",
-                      "latest_techpack_style_log_id")
-              .dropDuplicates(["style_no", "customer_department", "style_season"]))
-n_latest = bom_latest.count()
-print(f"  BOM 'latest' rows for {bom_customer_name!r}            : {n_latest}")
-
-# Second hop: latest_techpack_style_log_id -> teckpack_style_log_id is a real
-# FK (one specific log row per "latest" row), so no further dedup is needed.
-bom_log = (spark.table(bom_log_source)
-           .where(F.col("custom_fields").isNotNull())
-           .select(F.col("teckpack_style_log_id"), F.col("custom_fields")))
-
-latest_with_fields = (bom_latest.join(
-    bom_log,
-    on=bom_latest.latest_techpack_style_log_id == bom_log.teckpack_style_log_id,
-    how="inner",
-).select(bom_latest.style_no, bom_latest.customer_department,
-         bom_latest.style_season, bom_log.custom_fields))
-
-joined = (styles.join(
-    latest_with_fields,
-    on=(styles.bp_style_number == latest_with_fields.style_no)
-       & (styles.style_season == latest_with_fields.style_season),
-    how="inner",
-).select(styles.bp_style_number, latest_with_fields.customer_department,
-         latest_with_fields.style_season, latest_with_fields.custom_fields))
-
-matched = joined.collect()
-print(f"  Matched (style x BOM) pairs              : {len(matched)}")
-print(f"  Styles with NO BOM this run              : {n_styles - len(matched)}"
-      f"   (not an error -- they keep their placeholders and are retried next run)")
+# ── Step 1: styles in scope ─────────────────────────────────────────────────
+print("\nStep 1: loading in-scope BeProduct styles …")
+styles = [
+    (r["bp_style_number"], r["id"])
+    for r in (spark.table(styles_table)
+              .where(F.col("folder_name") == folder_name)
+              .select("bp_style_number", "id")
+              .where(F.col("id").isNotNull() & F.col("bp_style_number").isNotNull())
+              .collect())
+]
+print(f"  styles: {len(styles)}")
 
 # COMMAND ----------
 
-# ── Step 2: parse + diagnose ────────────────────────────────────────────────
-# Parsing here (rather than only at push time) means a malformed payload shows
-# up in THIS task's output, attributed to a specific style, instead of silently
-# degrading a contribution three stages later.
-print("\nStep 2: parsing BOM segments (diagnostics) …")
+# ── Step 2: BeProduct client ────────────────────────────────────────────────
+client = BeProduct(
+    client_id=dbutils.secrets.get(scope="beproduct", key="client_id"),
+    client_secret=dbutils.secrets.get(scope="beproduct", key="client_secret"),
+    refresh_token=dbutils.secrets.get(scope="beproduct", key="refresh_token"),
+    company_domain=dbutils.secrets.get(scope="beproduct", key="company_domain"),
+)
+raw = RawApi(client)
 
-rows = []
-n_main = n_no_main = n_unparseable = 0
-fabric_total = 0
-no_main_styles, unparseable_styles = [], []
+# The BOMVariations pageId is folder-constant, so discover it ONCE rather than
+# per style (that would double the API calls for no benefit).
+page_id = page_id_override
+_probe = {"tried": 0, "app_types_seen": [], "errors": []}
+if not page_id:
+    print("\nStep 2: discovering the BOMVariations pageId …")
+    for _num, _sid in styles[:5]:          # 5 is plenty; they share a folder
+        _probe["tried"] += 1
+        try:
+            apps = client.style.app_list(_sid)
+            if isinstance(apps, dict):
+                apps = apps.get("data", apps)
+            for app in (apps or []):
+                atype = str(app.get("appType") or app.get("type") or "")
+                if atype not in _probe["app_types_seen"]:
+                    _probe["app_types_seen"].append(atype)
+                if atype == "BOMVariations":
+                    page_id = app.get("id")
+                    break
+        except Exception as e:  # noqa: BLE001
+            _probe["errors"].append(f"{_num}: {type(e).__name__}: {str(e)[:200]}")
+        if page_id:
+            print(f"  pageId = {page_id}  (discovered from {_num})")
+            break
+if not page_id:
+    # Serverless returns NO stdout, so the diagnosis has to travel in the exit
+    # value -- otherwise "NO_BOM_PAGE" is unactionable.
+    print("\n❌ No BOMVariations page found. Probe detail:")
+    print(json.dumps(_probe, indent=2))
+    dbutils.notebook.exit(json.dumps({"status": "NO_BOM_PAGE", "probe": _probe}))
 
-for r in matched:
-    style = r["bp_style_number"]
-    cf = r["custom_fields"]
-    cf_str = cf if isinstance(cf, str) else json.dumps(cf)
+# COMMAND ----------
 
-    main_count = fabric_count = 0
-    parse_error = None
+# ── Step 3: fetch every style's variations, in parallel ─────────────────────
+print(f"\nStep 3: fetching BOM variations for {len(styles)} style(s) …")
+
+
+def fetch(style_number: str, style_id: str):
+    """-> (style_number, style_id, variation_payloads, error). Never raises."""
     try:
-        parsed = bom.parse_bom_segments(cf)
-        # main_fabric is an Optional[dict] (at most one by construction);
-        # fabric_list holds every "Fabric" segment in document order.
-        main_count = 1 if parsed.main_fabric else 0
-        fabric_count = len(parsed.fabric_list)
+        listing = client.style.app_get(style_id, page_id)
+        if isinstance(listing, dict):
+            listing = listing.get("data", listing)
+        payloads = []
+        for v in (listing or []):
+            vid = v.get("id")
+            if not vid:
+                continue
+            body = raw.get(
+                f"Style/{style_id}/PageBomVariation/{page_id}/Variation/{vid}")
+            # Keep the variation-list entry as `metadata` so downstream
+            # ordering (`metadata.order`) works even if the GET omits it.
+            if isinstance(body, dict):
+                body.setdefault("metadata", v)
+            payloads.append(body)
+        return style_number, style_id, payloads, None
     except Exception as e:  # noqa: BLE001
-        parse_error = f"{type(e).__name__}: {e}"
-        n_unparseable += 1
-        if len(unparseable_styles) < 20:
-            unparseable_styles.append(f"{style}: {parse_error}")
+        return style_number, style_id, [], f"{type(e).__name__}: {str(e)[:300]}"
 
-    if parse_error is None:
-        if main_count:
-            n_main += 1
-        else:
-            n_no_main += 1
-            if len(no_main_styles) < 20:
-                no_main_styles.append(style)
-        fabric_total += fabric_count
 
-    rows.append((style, r["customer_department"], r["style_season"], cf_str,
-                 int(main_count), int(fabric_count), parse_error,
-                 bom_catalog, now))
-
-print(f"  Styles with a Main Fabric segment        : {n_main}")
-print(f"  Styles with BOM but NO Main Fabric       : {n_no_main}"
-      f"   (zero material actions for these -- never a revert)")
-print(f"  Styles whose custom_fields failed to parse: {n_unparseable}")
-print(f"  Total 'Fabric' segments across all styles : {fabric_total}")
-if no_main_styles:
-    print(f"    no Main Fabric: {', '.join(no_main_styles)}"
-          + (" …" if n_no_main > len(no_main_styles) else ""))
-for u in unparseable_styles:
-    print(f"    ⚠ unparseable {u}")
+results = []
+_t0 = time.perf_counter()
+with ThreadPoolExecutor(max_workers=max_workers) as pool:
+    futures = [pool.submit(fetch, num, sid) for num, sid in styles]
+    for fut in as_completed(futures):
+        results.append(fut.result())
+print(f"  fetched in {time.perf_counter() - _t0:.1f}s")
 
 # COMMAND ----------
 
-# ── Step 3: write ───────────────────────────────────────────────────────────
-print(f"\nStep 3: writing {out_table} …")
+# ── Step 4: parse into segments (pure, unit-tested) ────────────────────────
+print("\nStep 4: parsing variations into BOM segments …")
 
+rows, errors, no_main = [], [], []
+n_main = fabric_total = 0
+for style_number, style_id, payloads, err in sorted(results):
+    segments = None
+    if err is None:
+        try:
+            segments = bom.build_target_segments_from_variations(payloads)
+        except Exception as e:  # noqa: BLE001
+            err = f"parse: {type(e).__name__}: {str(e)[:300]}"
+    if err:
+        errors.append(f"{style_number}: {err}")
+    elif segments is None:
+        # No "Main Fabric" segment -> zero actions for this style downstream.
+        # Never an error, never a revert.
+        no_main.append(style_number)
+    else:
+        n_main += 1
+        fabric_total += len(segments) - 1
+    rows.append((
+        style_number, style_id, page_id,
+        len(payloads),
+        json.dumps(segments) if segments is not None else None,
+        1 if segments else 0,
+        (len(segments) - 1) if segments else 0,
+        err, now,
+    ))
+
+print(f"  styles with a Main Fabric segment  : {n_main}")
+print(f"  styles with variations but NO Main : {len(no_main)}"
+      f"   (zero actions downstream -- never a revert)")
+print(f"  styles that FAILED to fetch/parse  : {len(errors)}")
+print(f"  total 'Fabric' segments            : {fabric_total}")
+for s in no_main[:20]:
+    print(f"    no Main Fabric: {s}")
+for e in errors[:20]:
+    print(f"    ⚠ {e}")
+
+# COMMAND ----------
+
+# ── Step 5: write ───────────────────────────────────────────────────────────
+print(f"\nStep 5: writing {out_table} …")
 SCHEMA = StructType([
     StructField("bp_style_number", StringType()),
-    StructField("customer_department", StringType()),
-    StructField("style_season", StringType()),
-    # The raw payload. Kept verbatim rather than pre-parsed into segments so
-    # the single source of truth for BOM parsing stays `sync/bom.py` -- the
-    # push re-parses it with the very same function the tests cover.
-    StructField("custom_fields", StringType()),
+    StructField("beproduct_style_id", StringType()),
+    StructField("bom_page_id", StringType()),
+    StructField("variation_count", IntegerType()),
+    # PARSED segments, as a JSON array of the four enrichment fields per
+    # segment (Main Fabric first). Parsing happens here, through
+    # sync/bom.py's unit-tested pure functions, rather than being re-derived
+    # downstream -- so the raw payload shape stays an implementation detail of
+    # this stage.
+    StructField("segments_json", StringType()),
     StructField("main_fabric_count", IntegerType()),
     StructField("fabric_count", IntegerType()),
-    StructField("parse_error", StringType()),
-    StructField("source_catalog", StringType()),
+    StructField("error", StringType()),
     StructField("extracted_at", TimestampType()),
 ])
-
 (spark.createDataFrame(rows, SCHEMA)
  .write.format("delta").mode("overwrite")
- .option("overwriteSchema", "true")
- .saveAsTable(out_table))
-
+ .option("overwriteSchema", "true").saveAsTable(out_table))
 print(f"  ✅ wrote {len(rows)} row(s)")
 
 summary = {
-    "status": "OK",
+    "status": "OK" if not errors else "COMPLETED_WITH_ERRORS",
+    "source": "beproduct_PageBomVariation",
     "table": out_table,
-    "styles_considered": n_styles,
-    "styles_matched": len(matched),
+    "bom_page_id": page_id,
+    "styles_considered": len(styles),
     "styles_with_main_fabric": n_main,
-    "styles_without_main_fabric": n_no_main,
-    "styles_unparseable": n_unparseable,
+    "styles_without_main_fabric": len(no_main),
+    "styles_failed": len(errors),
     "fabric_segments_total": fabric_total,
-    "source_catalog": bom_catalog,
+    "errors": errors[:50],
 }
 print("\n" + json.dumps(summary, indent=2))
-
-# The Jobs API returns NO notebook stdout for serverless runs -- only this exit
-# value (live-confirmed 2026-09-14). Anything that must be readable outside the
-# Databricks UI has to travel here.
 dbutils.notebook.exit(json.dumps(summary))

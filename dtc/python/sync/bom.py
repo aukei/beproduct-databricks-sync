@@ -641,6 +641,7 @@ def plan_style_enrichment(
     content_key: str = "content",
     row_id_key: str = "row_id",
     color_key: str = "color",
+    target_segments: Optional[List[Dict[str, Optional[str]]]] = None,
 ) -> List[RowAction]:
     """
     Plan every action needed to upsert ONE style's existing WIP rows from
@@ -734,6 +735,11 @@ def plan_style_enrichment(
         custom_fields: `customer_teckpack_style_log.custom_fields` (raw
             JSON string or already-parsed) — NOT `bom_unified` (source
             changed 2026-09-09, "2nd revision"; see module docstring).
+            IGNORED when `target_segments` is supplied.
+        target_segments: pre-built segment list, as returned by
+            `build_target_segments()` or `build_target_segments_from_variations()`
+            (the BeProduct PageBomVariation source, 2026-09-16). Supply this to
+            make the caller's choice of BOM source invisible to this function.
 
     Returns:
         [] if there's nothing to do (no existing rows, or no "Main Fabric"
@@ -745,7 +751,13 @@ def plan_style_enrichment(
     if not existing_rows:
         return []
 
-    target_segments = build_target_segments(custom_fields)
+    # SOURCE-AGNOSTIC (2026-09-16): callers may hand in already-built segments
+    # -- e.g. from `build_target_segments_from_variations()` (the BeProduct
+    # PageBomVariation API) -- instead of raw Lakebase `custom_fields`. Both
+    # produce the identical shape, so everything below is unchanged. This is
+    # what lets the old and new sources run side by side during the migration.
+    if target_segments is None:
+        target_segments = build_target_segments(custom_fields)
     if target_segments is None:
         # No Main Fabric this run (BOM missing entirely, or Main Fabric
         # itself vanished) -- never revert existing Fabric Group/Placement/

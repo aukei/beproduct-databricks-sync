@@ -313,6 +313,10 @@ JOB_PARAMS = {
     "orbit_parallel_calls": "false",  # Phase 9b: call NT Orbit serially by default (safer; set true + tune max_workers for throughput)
     "orbit_timeout_seconds": "60",    # Phase 9b: per-call NT Orbit HTTP timeout (live-validated 2026-09-01: 30s was too short)
     "run_phase10": "true",            # Phase 10: BOM enrichment from techpack extraction (flipped true 2026-09-03 -- extensively live-validated: upsert semantics, Content backfill, material_no key, 0 errors across multiple runs)
+    # V1 ONLY. The v2 BOM source is the BeProduct PageBomVariation API
+    # (2026-09-16); these alb_tpm_* Lakebase parameters are referenced solely by
+    # build_main_tasks()'s paused fill_bom_data task and are kept so the v1
+    # rollback path still deploys.
     "bom_catalog": "alb_tpm_uat",      # Phase 10: BOM source catalog (alb_tpm_uat | alb_tpm_prd -- NOT derived from dtc_environment, suffix differs)
     "bom_customer_name": "KONTOOR",    # Phase 10: pre-filter customer_name in the shared multi-customer BOM table (scoping/perf only)
     "push_blanks": "false",
@@ -337,7 +341,10 @@ JOB_PARAMS = {
     "run_duty_push": "true",      # Stage 40: duty contribution only     (was run_phase9b)
     "bom_table": "customer_teckpack_style_latest",  # resolves latest_techpack_style_log_id
     "bom_log_table": "customer_teckpack_style_log",  # custom_fields -- the actual BOM source
-    "bom_segments_table": "tpm_bom_segments",  # Stage 20b output; read by wip_push + build_costing
+    "bom_segments_table": "bom_segments",  # Stage 20b output; read by wip_push + build_costing
+    # BOMVariations pageId is folder-constant; blank = auto-discover once per run.
+    "bom_page_id": "",
+    "bom_max_workers": "8",   # parallel BeProduct fetch workers in Stage 20b
     # Unqualified output table name for build_costing. Routine runs write the
     # real table; override it to build a comparison copy without replacing what
     # duty_compute reads and MERGEs. (The old `costing_chart_kei` scratch table
@@ -827,12 +834,16 @@ def build_v2_tasks():
     # re-pulls; here the whole job is serverless, so it is just another input
     # gathered up front. Materializing it to Delta means neither wip_push nor
     # build_costing has to touch Lakebase.
-    tasks.append(v2_task("pull_bom", f"{NB_DTC_V2}/v2_pull_bom_segments", {   # NEW
+    # REWRITTEN 2026-09-16 to read the BeProduct PageBomVariation API directly.
+    # The alb_tpm_* Lakebase parameters (bom_catalog/bom_table/bom_log_table/
+    # bom_customer_name) are gone with the dependency -- and with them the
+    # serverless-only access constraint that originally forced Phase 10 onto
+    # its own task.
+    tasks.append(v2_task("pull_bom", f"{NB_DTC_V2}/v2_pull_bom_segments", {
         "catalog": CAT, "schema": SCH, "folder_name": P("folder_name"),
-        "bom_catalog": P("bom_catalog"), "bom_table": P("bom_table"),
-        "bom_log_table": P("bom_log_table"),
-        "bom_customer_name": P("bom_customer_name"),
         "bom_segments_table": P("bom_segments_table"),
+        "bom_page_id": P("bom_page_id"),
+        "bom_max_workers": P("bom_max_workers"),
         "run_bom": P("run_bom"),
     }, depends=[dep("bp_style_sync")]))
 

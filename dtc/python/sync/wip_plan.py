@@ -624,12 +624,19 @@ def _apply_material(
         if custom_fields is None:
             continue  # no BOM for this style this run -- zero actions, never a revert
 
+        # `bom_by_style` may hold EITHER already-built segments (a list --
+        # from the BeProduct PageBomVariation source) or a raw Lakebase
+        # `custom_fields` payload (a dict/str). Supporting both is deliberate:
+        # it lets the two sources run side by side so the new one can be
+        # diffed against the old before the Lakebase dependency is dropped.
+        _segments = custom_fields if isinstance(custom_fields, list) else None
         try:
             actions = bom.plan_style_enrichment(
                 [_projected_row(r) for r in rows],
-                custom_fields,
+                None if _segments is not None else custom_fields,
                 row_id_key="_handle",
                 color_key="_color",
+                target_segments=_segments,
             )
         except Exception as e:  # noqa: BLE001
             plan.degraded.append(

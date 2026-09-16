@@ -216,13 +216,27 @@ print(f"  staging rows : {inputs['staging_rows_considered']} considered "
 bom_by_style = {}
 bom_parse_errors = []
 try:
-    for r in spark.table(bom_table).collect():
-        if r["parse_error"]:
-            bom_parse_errors.append(f"{r['bp_style_number']}: {r['parse_error']}")
+    _bom_df = spark.table(bom_table)
+    _cols = set(_bom_df.columns)
+    # Two shapes accepted on purpose, so the BeProduct-sourced table and the
+    # retired Lakebase one can both be read during the migration:
+    #   segments_json -- PARSED segments (BeProduct PageBomVariation, 2026-09-16)
+    #   custom_fields -- raw Lakebase payload (alb_tpm_*, retired)
+    # wip_plan accepts either, so nothing below cares which one it got.
+    _mode = "segments_json" if "segments_json" in _cols else "custom_fields"
+    _errcol = "error" if "error" in _cols else "parse_error"
+    for r in _bom_df.collect():
+        if r[_errcol]:
+            bom_parse_errors.append(f"{r['bp_style_number']}: {r[_errcol]}")
             continue
-        bom_by_style[r["bp_style_number"]] = r["custom_fields"]
+        _val = r[_mode]
+        if _val is None:
+            continue   # no Main Fabric segment -- zero actions, never a revert
+        bom_by_style[r["bp_style_number"]] = (
+            json.loads(_val) if _mode == "segments_json" else _val)
     inputs["styles_with_bom"] = len(bom_by_style)
-    print(f"  styles with BOM data : {len(bom_by_style)}"
+    inputs["bom_source_column"] = _mode
+    print(f"  styles with BOM data : {len(bom_by_style)}  (source column: {_mode})"
           + (f"  ⚠ {len(bom_parse_errors)} unparseable" if bom_parse_errors else ""))
 except Exception as e:  # noqa: BLE001
     # Degrade, never abort: no BOM table yet (first run, or run_bom=false)

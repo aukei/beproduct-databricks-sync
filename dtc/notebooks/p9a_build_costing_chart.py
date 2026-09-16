@@ -203,6 +203,8 @@ for _p in (_MODULE_PATH, _MODULE_PATH.replace("/DTC/", "/dtc/")):
 from functools import reduce
 from datetime import datetime, timezone
 
+import json
+
 from sync import duty
 from pyspark.sql import functions as F, DataFrame
 from pyspark.sql.types import StringType, StructType, StructField, TimestampType, LongType
@@ -413,23 +415,39 @@ if effective_mode == "intent":
     #    ~250 styles, so the collect is trivial and the parsing stays in one
     #    place. A style with no Main Fabric segment contributes nothing and is
     #    simply not costed this run -- never an error, never a revert.
+    # Accepts BOTH table shapes during the source migration:
+    #   segments_json -- PARSED segments (BeProduct PageBomVariation, 2026-09-16)
+    #   custom_fields -- raw Lakebase payload (alb_tpm_*, retired)
+    # Only the MAIN FABRIC segment matters here: it is the only one that ever
+    # reaches costing_chart (Step 1b gate 4).
     _bom_rows = []
     _bom_no_main = 0
     try:
-        for _r in spark.table(bom_segments_table).collect():
-            if _r["parse_error"]:
+        _bdf = spark.table(bom_segments_table)
+        _bcols = set(_bdf.columns)
+        _bmode = "segments_json" if "segments_json" in _bcols else "custom_fields"
+        _berr = "error" if "error" in _bcols else "parse_error"
+        print(f"  BOM source column: {_bmode}")
+        for _r in _bdf.collect():
+            if _r[_berr]:
                 continue
+            _main = None
             try:
-                _parsed = _bom.parse_bom_segments(_r["custom_fields"])
+                if _bmode == "segments_json":
+                    _segs = json.loads(_r["segments_json"]) if _r["segments_json"] else None
+                    _main = _segs[0] if _segs else None
+                else:
+                    _parsed = _bom.parse_bom_segments(_r["custom_fields"])
+                    _main = (_bom.extract_enrichment_fields(_parsed.main_fabric)
+                             if _parsed.main_fabric else None)
             except Exception:  # noqa: BLE001
                 continue
-            if not _parsed.main_fabric:
+            if not _main:
                 _bom_no_main += 1
                 continue
-            _f = _bom.extract_enrichment_fields(_parsed.main_fabric)
             _bom_rows.append((_r["bp_style_number"],
-                              _f.get("mill_fabric_article"),
-                              _f.get("content")))
+                              _main.get("mill_fabric_article"),
+                              _main.get("content")))
     except Exception as _e:  # noqa: BLE001
         print(f"  ⚠ {bom_segments_table} unavailable ({_e}) -- no material overlay; "
               f"Step 1b will drop rows that have no enrichment yet.")
@@ -904,8 +922,6 @@ print("✅ Phase 9a Costing Chart build complete")
 # rows at four separate gates is a real problem: "7 rows out" tells you nothing
 # about the 53 that did not make it. The per-gate drop counts are the whole
 # point of this payload.
-import json as _json
-
 _summary = {
     "status": "OK",
     "mode": effective_mode,
@@ -930,5 +946,5 @@ _summary = {
     "rows_by_vendor_slot": slot_counts,
     "costing_chart_rows": int(total_costing),
 }
-print("\n" + _json.dumps(_summary, indent=2))
-dbutils.notebook.exit(_json.dumps(_summary))
+print("\n" + json.dumps(_summary, indent=2))
+dbutils.notebook.exit(json.dumps(_summary))
