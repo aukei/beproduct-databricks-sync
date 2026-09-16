@@ -621,6 +621,89 @@ check("Fabric Article" not in full_payload,
       "combining INSERT_EXCLUDE_COLS with compute_non_writable_cols excludes formula fields too")
 
 # ---------------------------------------------------------------------------
+print("\n[14] PageBomVariation source (2026-09-16) — replaces the alb_tpm_* tables")
+# Field names below are the LIVE ones; the original spec had 3 of 4 wrong.
+
+
+def _bv_row(group, placement, mill_code, content, sort=0, customer_code=None):
+    return {
+        "rowId": f"r{sort}", "sort": sort, "group": "guid-" + str(group),
+        "fields": [
+            {"name": "Group", "value": group},
+            {"name": "Placement", "value": placement},
+            {"name": "MILL FABRIC CODE/SUPPLIER ITEM CODE", "value": mill_code},
+            {"name": "FACE FABRIC/MATERIAL CONTENT", "value": content},
+            {"name": "CUSTOMER MATERIAL CODE", "value": customer_code},
+            # A dict-envelope field, to prove _bv_field unwraps `value`.
+            {"name": "MILL/SUPPLIER NAME",
+             "value": {"value": "AKIJ", "code": "x", "text": "y"}},
+        ],
+    }
+
+
+def _bv_variation(rows, order=1):
+    return {"metadata": {"order": order}, "id": f"v{order}", "rows": rows}
+
+
+check(bom.render_material_content(
+    [{"value": 97.0, "code": "Cotton"}, {"value": 3.0, "code": "Spandex"}])
+    == "97% Cotton / 3% Spandex", "structured content -> DTC's own notation")
+check("97.0" not in bom.render_material_content([{"value": 97.0, "code": "Cotton"}]),
+      "97.0 renders as '97' — a trailing .0 is noise in a label")
+check(bom.render_material_content([{"value": 2.5, "code": "Elastane"}]) == "2.5% Elastane",
+      "a genuinely fractional percentage survives")
+check(bom.render_material_content([]) is None and bom.render_material_content(None) is None,
+      "empty/None content -> None (never the string 'None')")
+check(bom.render_material_content("Cotton 100%") == "Cotton 100%",
+      "a plain string passes through unchanged (defensive)")
+check(bom.render_material_content([{"value": 5.0, "code": None}]) is None,
+      "a component with no code contributes nothing")
+
+_r = _bv_row("Main Fabric", "BODICE", "WV-0063", [{"value": 100.0, "code": "test from ML"}])
+check(bom.extract_variation_row_fields(_r) == {
+        "fabric_group": "Main Fabric", "placement": "BODICE",
+        "mill_fabric_article": "WV-0063", "content": "100% test from ML"},
+      "extract_variation_row_fields matches the Lakebase output shape exactly")
+check(bom._bv_field(_r, "MILL/SUPPLIER NAME") == "AKIJ",
+      "a dict-envelope field value is unwrapped")
+check(bom._bv_field(_r, "NO SUCH FIELD") is None, "unknown field -> None")
+
+_v = _bv_variation([
+    _bv_row("Fabric", "HEM", "WV-0061", [{"value": 100.0, "code": "Cotton"}], sort=2),
+    _bv_row("Main Fabric", "BODICE", "WV-0063", [{"value": 100.0, "code": "Cotton"}], sort=1),
+    _bv_row("Fabric", "Lining", "WV-0064",
+            [{"value": 97.0, "code": "Cotton"}, {"value": 3.0, "code": "Spandex"}], sort=3),
+])
+_segs = bom.build_target_segments_from_variations([_v])
+check(len(_segs) == 3 and _segs[0]["fabric_group"] == "Main Fabric",
+      "Main Fabric is always the first segment")
+check([s["mill_fabric_article"] for s in _segs] == ["WV-0063", "WV-0061", "WV-0064"],
+      "remaining Fabric segments keep sort order")
+
+check(bom.build_target_segments_from_variations(
+        [_bv_variation([_bv_row("Fabric", "HEM", "WV-1", [])])]) is None,
+      "no Main Fabric -> None (the 'take zero actions, never revert' signal)")
+check(bom.build_target_segments_from_variations([]) is None, "no variations -> None")
+check(bom.build_target_segments_from_variations([_bv_variation([])]) is None,
+      "a variation with no rows -> None")
+
+_v1 = _bv_variation([_bv_row("Main Fabric", "A", "AAA", [], sort=1)], order=1)
+_v2 = _bv_variation([_bv_row("Main Fabric", "B", "BBB", [], sort=1),
+                     _bv_row("Fabric", "C", "CCC", [], sort=2)], order=2)
+_segs2 = bom.build_target_segments_from_variations([_v2, _v1])   # deliberately unsorted
+check(_segs2[0]["mill_fabric_article"] == "AAA",
+      "lowest variation order wins Main Fabric, regardless of input order")
+check([s["mill_fabric_article"] for s in _segs2] == ["AAA", "CCC"],
+      "multiple variations concatenate deterministically")
+
+# The whole point: these segments must drive the EXISTING decision tree.
+_existing = [{"row_id": "r1", "color": "Blue",
+              "fabric_group": bom.DUMMY_FABRIC_GROUP, "mill_fabric_article": None,
+              "placement": None, "content": None}]
+_acts = bom.plan_style_enrichment(_existing, {"xts_data": {}})
+check(_acts == [], "sanity: no BOM payload still yields no actions")
+
+# ---------------------------------------------------------------------------
 print(f"\n{'='*60}")
 if _failures:
     print(f"❌ {len(_failures)} check(s) failed:")

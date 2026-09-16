@@ -410,6 +410,165 @@ def to_wip_fields(fields: Dict[str, Optional[str]]) -> Dict[str, Optional[str]]:
 
 
 # ---------------------------------------------------------------------------
+# SOURCE 2 (2026-09-16): BeProduct PageBomVariation API
+# ---------------------------------------------------------------------------
+# Replaces the `alb_tpm_*` Lakebase techpack tables. Live-verified field names
+# -- the ones in the original spec were mostly wrong, see AGENTS.md:
+#
+#   spec said              ACTUAL
+#   rows[].group           a GUID. The human value is fields["Group"]
+#   PLACEMENT              Placement            (title case)
+#   MILL FABRIC CODE       MILL FABRIC CODE/SUPPLIER ITEM CODE
+#   MATERIAL CONTENT       FACE FABRIC/MATERIAL CONTENT
+#   CUSTOMER MATERIAL CODE (correct as written)
+#
+# `fields["Group"]` yields exactly the two segment names this module already
+# understands -- "Main Fabric" and "Fabric" -- so the entire decision tree
+# below is reused unchanged. Only the parsing differs.
+BV_FIELD_GROUP = "Group"
+BV_FIELD_PLACEMENT = "Placement"
+BV_FIELD_MILL_FABRIC_CODE = "MILL FABRIC CODE/SUPPLIER ITEM CODE"
+BV_FIELD_MATERIAL_CONTENT = "FACE FABRIC/MATERIAL CONTENT"
+BV_FIELD_CUSTOMER_MATERIAL_CODE = "CUSTOMER MATERIAL CODE"
+
+
+def _bv_field(row: Dict[str, Any], name: str) -> Any:
+    """Raw value of one named field on a PageBomVariation row.
+
+    Some fields carry a dict envelope rather than a scalar (e.g.
+    `MILL/SUPPLIER NAME` is `{"value": ..., "code": ..., "text": ...}`), so
+    unwrap `value` when present. `FACE FABRIC/MATERIAL CONTENT` is a LIST and
+    is deliberately returned as-is for `render_material_content()`.
+    """
+    for f in (row.get("fields") or []):
+        if f.get("name") == name:
+            v = f.get("value")
+            if isinstance(v, dict) and "value" in v:
+                return v["value"]
+            return v
+    return None
+
+
+def _fmt_pct(value: Any) -> str:
+    """`97.0` -> `"97"`, `2.5` -> `"2.5"`. Trailing `.0` is noise in a label."""
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    return str(int(f)) if f == int(f) else str(f)
+
+
+def render_material_content(raw: Any) -> Optional[str]:
+    """
+    Render `FACE FABRIC/MATERIAL CONTENT` into **DTC's own notation**.
+
+        [{"value": 97.0, "code": "Cotton"},
+         {"value": 3.0,  "code": "Spandex"}]   ->  "97% Cotton / 3% Spandex"
+
+    Why this specific format matters (2026-09-16): DTC's own Content trigger
+    writes `"{value}% {code}"` joined by `" / "`, while the retired Lakebase
+    source wrote `"Cotton 97%, Spandex 3%"`. Those disagreed on every row, so
+    each system overwrote the other and `Content` could never settle -- which
+    at a 2-hourly cadence meant a write window on EVERY run. It was worked
+    around by making Content write-once.
+
+    Because the BeProduct source is STRUCTURED, we choose the rendering. Matching
+    DTC's notation exactly removes the disagreement at its root, so Content
+    becomes a normally-owned, stable field instead of a fill-once special case.
+
+    A plain string passes through unchanged (defensive: the API may return one
+    for a free-text entry).
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        return raw.strip() or None
+    if not isinstance(raw, list):
+        return None
+    parts = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        code = item.get("code")
+        if _blank(code):
+            continue
+        val = item.get("value")
+        parts.append(f"{_fmt_pct(val)}% {str(code).strip()}"
+                     if not _blank(val) else str(code).strip())
+    return " / ".join(parts) or None
+
+
+def extract_variation_row_fields(row: Dict[str, Any]) -> Dict[str, Optional[str]]:
+    """One PageBomVariation row -> this module's four enrichment fields.
+
+    Same output shape as `extract_enrichment_fields()` (the Lakebase path), so
+    both sources feed `plan_style_enrichment()` identically.
+    """
+    return {
+        "fabric_group": _bv_field(row, BV_FIELD_GROUP),
+        "placement": _bv_field(row, BV_FIELD_PLACEMENT),
+        "mill_fabric_article": _bv_field(row, BV_FIELD_MILL_FABRIC_CODE),
+        "content": render_material_content(_bv_field(row, BV_FIELD_MATERIAL_CONTENT)),
+    }
+
+
+def parse_bom_variations(variations: List[Dict[str, Any]]) -> ParsedBomSegments:
+    """
+    Parse one style's PageBomVariation payloads into Main Fabric + Fabric
+    segments -- the same `ParsedBomSegments` the Lakebase parser produces.
+
+    `variations` is the list of GET responses (each `{metadata, id, ..., rows}`)
+    for every variation of the style.
+
+    **Colorway affinity is deliberately ignored** (owner decision 2026-09-16):
+    variations carry `syncColorways` / `selectedVariationColorways`, but every
+    variation is treated as applying to ALL colorways. Per-colorway segment
+    coverage is still handled downstream by `plan_style_enrichment()`, which
+    groups existing WIP rows by colour.
+
+    Rows from multiple variations are concatenated in `order` then `sort`, so
+    "first Main Fabric wins" is deterministic rather than dict-order luck.
+    """
+    rows: List[Dict[str, Any]] = []
+    for v in sorted(variations or [],
+                    key=lambda x: ((x.get("metadata") or {}).get("order") or 0)):
+        for row in sorted((v or {}).get("rows") or [],
+                          key=lambda r: (r.get("sort") or 0)):
+            rows.append(row)
+
+    parsed = ParsedBomSegments()
+    for row in rows:
+        fields = extract_variation_row_fields(row)
+        group = (fields.get("fabric_group") or "").strip()
+        if group == SEGMENT_MAIN_FABRIC and parsed.main_fabric is None:
+            parsed.main_fabric = fields
+        elif group == SEGMENT_FABRIC:
+            parsed.fabric_list.append(fields)
+    return parsed
+
+
+def build_target_segments_from_variations(
+    variations: List[Dict[str, Any]],
+) -> Optional[List[Dict[str, Optional[str]]]]:
+    """
+    PageBomVariation equivalent of `build_target_segments()`.
+
+    Returns `[main_fabric] + fabric_segments`, or **None** when there is no
+    "Main Fabric" segment at all. As with the Lakebase path, callers MUST treat
+    None as "nothing to upsert for this style right now" -- never as licence to
+    revert or blank already-enriched DTC rows.
+
+    NOTE: unlike the Lakebase parser this returns the field dicts directly --
+    `parse_bom_variations()` has already applied `extract_variation_row_fields`
+    to each row, so there is no second mapping step.
+    """
+    parsed = parse_bom_variations(variations)
+    if parsed.main_fabric is None:
+        return None
+    return [parsed.main_fabric] + list(parsed.fabric_list)
+
+
+# ---------------------------------------------------------------------------
 # Per-style enrichment decision (upsert semantics — see module docstring)
 # ---------------------------------------------------------------------------
 

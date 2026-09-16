@@ -402,13 +402,29 @@ Intended to replace the `alb_tpm_*` Lakebase BOM source entirely:**
   the second must be DTC **`Content`**. Confirm before implementing.
 - **`FACE FABRIC/MATERIAL CONTENT` IS STRUCTURED, NOT A STRING:**
   `[{"value": 97.0, "code": "Cotton"}, {"value": 3.0, "code": "Spandex"}]`.
-  **This resolves the 2026-09-15 Content notation conflict.** DTC's own trigger
-  renders `"97% Cotton / 3% Spandex"` (`{value}% {code}` joined by `" / "`);
-  the retired Lakebase source rendered `"Cotton 97%, Spandex 3%"`. Since the
-  BeProduct source is structured, WE choose the rendering -- emitting DTC's own
-  notation makes Content stable, and the write-once workaround
-  (`material_fill_if_blank_columns="Content"`) becomes unnecessary rather than
-  merely tolerable.
+  Because the source is structured, WE choose the rendering.
+  `bom.render_material_content()` emits `"{value}% {code}"` joined by `" / "`
+  -- i.e. `"97% Cotton / 3% Spandex"`.
+- **PARTIAL CORRECTION to a claim made earlier the same day.** I first wrote
+  that the structured source "resolves the Content notation conflict at its
+  root". Measured against live DTC it resolves **9 of 13** rows, not all:
+  | | DTC now | rendered | |
+  |---|---|---|---|
+  | KTB-00024/WV-0064 | `97% Cotton / 3% Spandex` | same | OK |
+  | KTB-00028/WG24-01706 | `Cotton 65% / Modal 28% / Spandex 7%` | `65% Cotton / 28% Modal / 7% Spandex` | DIFF |
+  | KTB-00030/LTCL6080 | `Polyester 96% / Spandex 4%` | `96% Polyester / 4% Spandex` | DIFF |
+  **DTC's own Content is internally INCONSISTENT** -- value-first for some
+  materials, code-first for others, with the SAME `" / "` separator and the
+  same component order. The 4 mismatches are only 2 distinct materials
+  (`WG24-01706`, `LTCL6080`), each appearing twice. That pattern says DTC's
+  trigger is copying a per-material stored string rather than rendering from
+  structure, so **no single rendering rule can match every row** and the
+  conflict is NOT fully solvable from our side.
+- **Therefore `material_fill_if_blank_columns="Content"` (write-once) STAYS the
+  default.** The renderer is still the right thing for FILLING a blank cell --
+  it produces the well-formed, majority notation -- but it must not be promoted
+  to an owning writer on the strength of a 9/13 match. Revisit only if DTC
+  confirms a canonical notation.
 - **Variations carry COLORWAY AFFINITY**: `syncColorways` (bool) and
   `selectedVariationColorways` (list). Every TEST KTB style currently has
   exactly ONE variation with `isDefault=true`, `syncColorways=true`,

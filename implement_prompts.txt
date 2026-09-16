@@ -768,9 +768,7 @@ BOM variation Create
             "rows[].group" = DTC."Fabric Group"
             "rows[].fields[name="PLACEMENT"].value = DTC."Placement"
             "rows[].fields[name="MILL FABRIC CODE"].value" = DTC."Mill Fabric Article#"
-            "rows[].fields[name="MATERIAL CONTENT"].value" = DTC."Mill Fabric Article#"
+            "rows[].fields[name="MATERIAL CONTENT"].value" = DTC."Content"
         - This DTC field, if not blank/null, should push to PageBomVariation:
             DTC."Fabric Customer # or SAP #" = "rows[].fields[name="CUSTOMER MATERIAL CODE"].value"
     - This is comprehensive rewrite of whole phase 10, removing dependency on alb tables
-    
-                
