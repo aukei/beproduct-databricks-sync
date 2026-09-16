@@ -739,3 +739,38 @@ judge overall complexity whether this is worth.
 
 implement the 4-key/dummy-value/self-healing-delete redesign as its own change, scoped to phase1.py + the existing transform/push notebooks + bom.py's fan-out logic called from there (this is the real, valuable fix). Keep Phase 9b (push_duty_rates) and the repull_dtc/repull_dtc_bom DAG simplification as a separate, smaller follow-up (still worth doing — those two repulls genuinely are redundant once the 4-key model makes Phase 1's own live-sheet read authoritative) rather than one monolithic notebook merge.
 
+## 2026-09-15 test
+- Subclass is not copied when BOM expand rows
+- look at live WIP request "KTB SS28 Collaborations", LF Style# = "CB-S28003", there are 6 rows in 2 colors: RedGingham and Rose Bisque. Notice the 3 rows of "Rose Bisque" do not have "sub class" filled.
+
+## 2026-09-16 BeProduct BOM Variation API deployed
+- https://developers.beproduct.com/documentation/index.html
+- 5 new API on PageBomVariation are live 
+    GET
+/api/{company}/Style/{headerId}/PageBomVariation/{pageId}/Variation/{variationId}
+BOM variation Get
+    DELETE
+/api/{company}/Style/{headerId}/PageBomVariation/{pageId}/Variation/{variationId}
+BOM variation Delete
+    POST
+/api/{company}/Style/{headerId}/PageBomVariation/{pageId}/Variation/{variationId}/Reset
+BOM variation Reset
+    POST
+/api/{company}/Style/{headerId}/PageBomVariation/{pageId}/Variation/{variationId}/Update
+BOM variation Update
+    POST
+/api/{company}/Style/{headerId}/PageBomVariation/{pageId}/CreateVariation
+BOM variation Create
+- Study and test the API, objective:
+    - Replace BOM reading from Techpack lakebase (alb_tpm_[uat|prd].public.*) with direct call to BeProduct PageBomVariation
+        - Each Style could have zero or more associated PageBomVariations. 
+        - Each PageBomVariation returning payload has (from UI field name) 
+            "rows[].group" = DTC."Fabric Group"
+            "rows[].fields[name="PLACEMENT"].value = DTC."Placement"
+            "rows[].fields[name="MILL FABRIC CODE"].value" = DTC."Mill Fabric Article#"
+            "rows[].fields[name="MATERIAL CONTENT"].value" = DTC."Mill Fabric Article#"
+        - This DTC field, if not blank/null, should push to PageBomVariation:
+            DTC."Fabric Customer # or SAP #" = "rows[].fields[name="CUSTOMER MATERIAL CODE"].value"
+    - This is comprehensive rewrite of whole phase 10, removing dependency on alb tables
+    
+                

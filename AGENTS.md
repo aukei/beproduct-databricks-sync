@@ -365,6 +365,69 @@ this stays true by construction; verify it stays true after any change).
 
 ## Verified discoveries log (append-dated; do not delete)
 
+**BeProduct PageBomVariation API -- LIVE-TESTED 2026-09-16 (read-only GET).
+Intended to replace the `alb_tpm_*` Lakebase BOM source entirely:**
+- **Access pattern** (all via `beproduct._raw_api.RawApi`; the SDK has no
+  wrapper for these 5 endpoints yet):
+  - `client.public_api_url` ALREADY ends in `/api/{company}`, so a raw URL must
+    be `Style/{headerId}/PageBomVariation/{pageId}/Variation/{variationId}` --
+    prefixing `api/{company}` yourself yields a doubled path and a 404.
+  - The BOM page is app type **`BOMVariations`**, and its `pageId` is
+    **FOLDER-CONSTANT**: `2e00eced-7d15-4f47-966d-3a16e79e9e21` for every style
+    tested. Discover it once via `style.app_list(header_id)`, do not re-derive
+    per style.
+  - **`style.app_get(header_id, page_id)` returns the VARIATION LIST** --
+    `[{id, variationName, isDefault, order, syncColorways,
+    selectedVariationColorways, sizeClasses, partners, fields}]`. That is how
+    you enumerate `variationId`; there is no separate list endpoint.
+  - GET returns `{metadata, id, createdBy, createdAt, modifiedBy, modifiedAt,
+    rows[]}`. `metadata` is just the variation-list entry echoed back.
+  - Each row: `rowId, materialId, isAdHoc, materialNumber, materialName,
+    folderType, folderTypeName, version, image, sort, parentRowId, parentId,
+    subAssemblyRowId, group, fields[], colors`.
+- **THE SPEC'S FIELD NAMES ARE WRONG -- 3 of 4.** Live names, verified:
+  | spec said | ACTUAL API name |
+  |---|---|
+  | `rows[].group` | a **GUID**. The human value is `fields[name="Group"].value` = `"Main Fabric"` / `"Fabric"` |
+  | `PLACEMENT` | `Placement` (title case) |
+  | `MILL FABRIC CODE` | `MILL FABRIC CODE/SUPPLIER ITEM CODE` |
+  | `MATERIAL CONTENT` | `FACE FABRIC/MATERIAL CONTENT` |
+  | `CUSTOMER MATERIAL CODE` | correct as written |
+  `rows[].group` being a GUID matters: grouping on it still works (rows sharing
+  a segment share the GUID) but it is NOT the DTC "Fabric Group" text. Use
+  `fields["Group"]`, whose values are exactly the two segments `sync/bom.py`
+  already knows: `"Main Fabric"` and `"Fabric"`.
+- **Probable spec typo:** the spec maps BOTH `MILL FABRIC CODE` and
+  `MATERIAL CONTENT` to DTC `"Mill Fabric Article#"`. Per the existing contract
+  the second must be DTC **`Content`**. Confirm before implementing.
+- **`FACE FABRIC/MATERIAL CONTENT` IS STRUCTURED, NOT A STRING:**
+  `[{"value": 97.0, "code": "Cotton"}, {"value": 3.0, "code": "Spandex"}]`.
+  **This resolves the 2026-09-15 Content notation conflict.** DTC's own trigger
+  renders `"97% Cotton / 3% Spandex"` (`{value}% {code}` joined by `" / "`);
+  the retired Lakebase source rendered `"Cotton 97%, Spandex 3%"`. Since the
+  BeProduct source is structured, WE choose the rendering -- emitting DTC's own
+  notation makes Content stable, and the write-once workaround
+  (`material_fill_if_blank_columns="Content"`) becomes unnecessary rather than
+  merely tolerable.
+- **Variations carry COLORWAY AFFINITY**: `syncColorways` (bool) and
+  `selectedVariationColorways` (list). Every TEST KTB style currently has
+  exactly ONE variation with `isDefault=true`, `syncColorways=true`,
+  `selectedVariationColorways=[]` -- i.e. applies to all colorways. But the
+  owner spec says "zero or more per style", so multi-variation styles exist.
+  **This is potentially a genuine style x colour x material source**, which the
+  per-style Lakebase BOM never was -- worth settling before the rewrite.
+- **`CUSTOMER MATERIAL CODE` already holds data** (`'test-again'` on
+  KTB-00024's Main Fabric row). The proposed DTC -> BeProduct push of
+  `"Fabric Customer # or SAP #"` into this field would OVERWRITE it, and it is
+  a genuinely NEW write direction for this pipeline (BeProduct BOM has never
+  been a write target). Needs a write-once/never-revert rule like every other
+  field here.
+- Cross-check against live DTC: KTB-00024's BOM gives Main Fabric `WV-0063`
+  (BODICE, 100% test from ML), Fabric `WV-0061` (HEM, 100% Cotton), Fabric
+  `WV-0064` (Lining, 97% Cotton 3% Spandex) -- matching the articles and
+  contents already in `dtc_wip_ktb` for that style. The new source agrees with
+  what the old one produced.
+
 **STRANDED DTC ROWS -- a colorway DTC has that BeProduct does not
 (found 2026-09-16 from an owner observation; NOT a v2 regression):**
 - Reported symptom: in `KTB SS28 Collaborations`, LF Style# `CB-S28003`
