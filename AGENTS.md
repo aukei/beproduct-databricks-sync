@@ -365,6 +365,51 @@ this stays true by construction; verify it stays true after any change).
 
 ## Verified discoveries log (append-dated; do not delete)
 
+**NT Orbit is NOT fully deterministic -- identical request, different HTS
+(2026-09-17):**
+- The persistent cache's stated premise is "same input -> same output, so cache
+  indefinitely (subject to TTL)". **That premise is not reliable.**
+- Live, same day, ~2h apart, byte-identical `product_description` /
+  `origin_country_code` / `import_country_code` / `de_minimis` /
+  `mode_of_transport`:
+  ```
+  "Sierra Western Slim Button Shirt Black 100% test from ML Ladies Tops
+   Top / Tank / Vest (sleeveless)"  origin BD  market US
+     07:34 UTC -> hts 6206303045  duty 0.154
+     09:23 UTC -> hts 6208913010  duty 0.112
+  ```
+  Both runs read the row from the same `costing_chart` build; the description
+  is confirmed unchanged (queried directly). Consistent with an LLM-backed
+  classifier.
+- Rate in this sample: **1 of 7 rows changed on re-query; 6 of 7 were stable.**
+  So it is mostly reproducible, not reliably so.
+- Consequences:
+  - `force_refresh_duty` has a real churn cost -- it can change a rate when
+    NOTHING upstream changed, and each change becomes a DTC write window.
+    Another reason to keep it off by default and never schedule it.
+  - A duty rate is not a pure function of the product description. Do not treat
+    a changed value after a forced refresh as evidence that policy changed.
+  - The TTL is a weak guarantee either way.
+- Worth raising with NT Orbit: ask whether classification is model-backed and
+  whether a deterministic/seeded mode exists.
+
+**`force_refresh_duty` VERIFIED LIVE end-to-end (2026-09-17, run
+962989965715221, 751s):**
+- `duty_compute` with `force_refresh_duty=true`, `dry_run=false`:
+  - cache v17: **21 updated, 0 inserted** = 7 rows x 3 markets all re-queried
+    LIVE and merged in place. Direct proof that force bypasses both the
+    blank-check (layer 1) and the TTL -- without it, ZERO calls are made.
+  - costing_chart v284: **MERGE, 3 rows updated from 3 source rows.**
+- **Zero-diff-zero-write held under force**: all 7 rows were re-queried, but
+  only 3 produced any update at all -- the other 4 got identical answers back
+  and were dropped by `_same_value()` before reaching the MERGE. A forced
+  refresh is therefore still lean; it does not rewrite the table wholesale.
+- Post-run, costing_chart matches the US cache exactly on `hts_code` /
+  `duty_rate_us` for all 7 rows, and the 3 rows that had been carrying codes
+  derived from a since-changed product description are corrected.
+- NOT yet exercised live: the main job with `force_refresh_duty=true` (p9a
+  Step 4c overwrite + the Stage 40 DTC push). Unit-tested only.
+
 **A JOB parameter OVERRIDES a task base_parameter of the same name -- and it
 had duty_compute importing v1 modules (2026-09-17):**
 - Symptom, three runs running, ~60-76s each:
