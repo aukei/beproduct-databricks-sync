@@ -365,49 +365,43 @@ this stays true by construction; verify it stays true after any change).
 
 ## Verified discoveries log (append-dated; do not delete)
 
-**BLOCKER -- `PageBomVariation/.../Update` CANNOT write row fields
-(live-probed 2026-09-16, KTB-00024):**
-- The reverse push (DTC `"Fabric Customer # or SAP #"` ->
-  `rows[].fields["CUSTOMER MATERIAL CODE"]`) **cannot be implemented with the
-  five documented endpoints.** `Update` is **VARIATION-scoped, not row-scoped**.
-- **Evidence.** `POST Style/{h}/PageBomVariation/{p}/Variation/{v}/Update`:
-  - **10 distinct body shapes** were tried carrying row changes -- bare rows
-    list; `{"rows": rows}`; full-echo rows with `id`+`name`+`type`; thin rows
-    (`rowId` + one field by `id`); by `name`; `id`+`name`+`type`; fields as a
-    flat mapping; `{"variationId","rows"}`; `{**metadata, "rows"}`; the entire
-    GET payload echoed back. **Every one returned HTTP 200 and changed
-    nothing.** Only a bare (unwrapped) list returned 400.
-  - Tried against **three different fields** to rule out a per-field
-    restriction: `customer_material_code`, `placement`, and the
-    pipeline-unused `Size`. All identical -- 200, no change.
-  - The Update RESPONSE echoes the **stored** value, not the submitted one.
-  - **CONTROL, and the decisive result:** posting the **metadata shape**
-    (`{**metadata, "variationName": "PROBE NAME"}`) **APPLIED immediately** and
-    restored cleanly. So the endpoint works, is authorised, and is wired --
-    it simply updates the variation's OWN properties (variationName, isDefault,
-    order, syncColorways, selectedVariationColorways, ...) and IGNORES `rows`.
-  - Each no-op call still stamped `modifiedBy`/`modifiedAt`, which is why this
-    looks like a successful write from the outside. **Another instance of the
-    standing rule: a 200 from a vendor API means "accepted", not "stored" --
-    always verify by re-reading.**
-- The legacy `style.app_bom_update()` (`POST Style/PageCBOM?headerId=&pageId=`)
-  and a `&variationId=` variant both return 400 against this page. Not pursued
-  further: owner direction 2026-09-16 is to use **PageBomVariation only**, for
-  read and write.
-- **Data left clean.** A full structural diff against a pre-probe backup
-  (`/tmp/bomvar_backup.json`) shows exactly 3 changed leaves -- `modifiedAt`
-  and `modifiedBy.{id,name}`. Every field value, the row count and the
-  variationName are as found. The probe always echoed the complete `rows[]`
-  with one field changed, so no shape could have truncated the BOM.
-- **What is needed from BeProduct**: either the correct payload for `Update` to
-  accept `rows[]`, or a row-level write endpoint. Until then the READ side
-  stands on its own -- it is live, validated against the retired Lakebase
-  source, and already in the DAG.
-- Useful by-product: row field objects carry a stable **`id`** alongside the
-  display `name` (`group`, `placement`, `customer_material_code`,
-  `vendor_material_reference_no`, `fabric_content`, ...). Matching on `id` is
-  more robust than on `name` -- display names are exactly what the original
-  spec got wrong.
+**`PageBomVariation/.../Update` -- CORRECTED 2026-09-17. It DOES write row
+fields; the key is `rowFields`, not `fields`:**
+- **RETRACTION.** The 2026-09-16 entry here concluded that `Update` was
+  "variation-scoped and ignores `rows[]`". **That was WRONG.** It writes rows
+  fine. Every shape I probed used `rows[].fields`, copying the GET response's
+  own key -- but the Update DTO expects **`rows[].rowFields`**, and an
+  unrecognised key was silently discarded (HTTP 200, `modifiedAt` stamped,
+  nothing applied). The API doc's sample payload has it explicitly.
+  **Lesson: a request DTO need not mirror the response DTO. Ten "200 but
+  no-op" results should have been read as "the server is ignoring my key",
+  not "the endpoint cannot do this".**
+- **Confirmed working shape** (minimal; `rowId` + only the fields to change):
+  ```
+  POST Style/{h}/PageBomVariation/{p}/Variation/{v}/Update
+  {"rows": [{"rowId": "...", "rowFields": [{"id": "placement", "value": "HEM"}]}]}
+  ```
+  Live-verified: `placement` and `Size` both APPLIED and restored cleanly.
+  Never send `deleteRow` (it appears in the doc's sample and removes the row).
+- The endpoint validates properly, with useful messages -- e.g. writing `group`
+  returns `Field [group] has bad format (expecting one of the dropdown
+  values...)`. A rejected call changes NOTHING, not even `modifiedAt`.
+- **THE REAL CONSTRAINT on the reverse push:**
+  ```
+  Field [customer_material_code] is not editable on a material-linked row.
+  ```
+  `CUSTOMER MATERIAL CODE` is owned by the linked MATERIAL record, not the BOM
+  row, whenever the row has a `materialId` (`isAdHoc: false`). It is writable
+  only on ad-hoc rows.
+- **Across all 5 probed styles: 13 of 13 BOM rows are material-linked, 0 are
+  ad-hoc.** So in practice the DTC -> BOM push of
+  `"Fabric Customer # or SAP #"` cannot target the BOM row at all; the value
+  would have to be written to the MATERIAL record instead. The material's
+  `headerData` exposes only `fields` / `mainImage` / `detailImage`, so the
+  right target there still has to be identified.
+- Data left clean throughout: a full structural diff against the pre-probe
+  backup shows only `modifiedAt` / `modifiedBy`; all values, the row count and
+  the variationName are as found.
 
 **BOM source switched to the BeProduct PageBomVariation API -- validated
 against the retired Lakebase source (2026-09-16):**

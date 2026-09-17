@@ -295,12 +295,15 @@ Colorway affinity is deliberately ignored (owner decision): variations carry
 `syncColorways` / `selectedVariationColorways`, but every variation applies to
 all colorways. Per-colorway coverage stays with `plan_style_enrichment()`.
 
-> **Open issue — the reverse push is blocked.** Pushing DTC's
-> `"Fabric Customer # or SAP #"` into `rows[].fields["CUSTOMER MATERIAL CODE"]`
-> is **not yet possible**: `POST …/Variation/{v}/Update` is **variation-scoped**
-> and ignores `rows[]`. Ten body shapes across three fields all returned HTTP
-> 200 and changed nothing, while the same endpoint applied a `variationName`
-> change immediately. Awaiting a payload/endpoint from BeProduct. See AGENTS.md.
+> **Open issue — the reverse push.** Writing BOM rows *works*: the Update DTO
+> takes `rows[].rowFields` (NOT `fields`, which the GET response uses and which
+> the endpoint silently discards), and `placement` / `Size` write and restore
+> cleanly. But the specific target field is refused:
+> `Field [customer_material_code] is not editable on a material-linked row.`
+> `CUSTOMER MATERIAL CODE` belongs to the linked **Material** record, not the
+> BOM row, and **13 of 13 probed rows are material-linked** — so the DTC
+> `"Fabric Customer # or SAP #"` push cannot target the BOM row. It needs a
+> decision on writing the Material record instead. See AGENTS.md.
 
 **Gates — staging eligibility** (`sync/lifecycle.py`, `sync/bom.py`):
 

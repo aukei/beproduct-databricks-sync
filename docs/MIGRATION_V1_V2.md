@@ -565,19 +565,29 @@ before doing it:
 
 **Open issue — BOM reverse push (raised 2026-09-16)**
 
-Pushing DTC's `"Fabric Customer # or SAP #"` into the BOM's
-`CUSTOMER MATERIAL CODE` is **blocked pending a BeProduct API change**.
-`POST …/Variation/{v}/Update` is variation-scoped and ignores `rows[]` — ten
-body shapes across three fields all returned HTTP 200 and changed nothing, while
-the same endpoint applied a `variationName` change immediately. Needs either the
-correct payload for `Update` to accept `rows[]`, or a row-level write endpoint.
-`Reset`/`CreateVariation` are not acceptable substitutes: they would destroy and
-rebuild a variation, losing `rowId`s and any hand-entered data, to set one text
-field.
+**Corrected 2026-09-17.** Writing BOM rows *does* work — the Update DTO takes
+`rows[].rowFields`, not the `fields` key the GET response uses. An unrecognised
+key was silently discarded (200, `modifiedAt` stamped, nothing applied), which
+is what produced the earlier and incorrect "variation-scoped" conclusion.
+`placement` and `Size` write and restore cleanly.
 
-Everything else is ready for it — the match key `(Group, MILL FABRIC
-CODE/SUPPLIER ITEM CODE)` is confirmed unique per style and is already
-`bom.segment_key()`, tested. Full evidence in AGENTS.md.
+The actual blocker is narrower and is a **data-model** question, not an API gap:
+
+```
+Field [customer_material_code] is not editable on a material-linked row.
+```
+
+`CUSTOMER MATERIAL CODE` is owned by the linked **Material** record, not the BOM
+row, and **13 of 13 probed rows are material-linked** (`isAdHoc: false`). So the
+DTC → BOM push cannot target the BOM row at all. Options:
+
+1. Write the **Material** record instead — needs the right field identified;
+   the material's `headerData` exposes only `fields`/`mainImage`/`detailImage`.
+2. Confirm with the owner whether ad-hoc BOM rows are ever expected, since the
+   field *is* writable on those.
+
+Everything else is ready — the match key `(Group, MILL FABRIC CODE/SUPPLIER ITEM
+CODE)` is confirmed unique per style and is already `bom.segment_key()`, tested.
 
 **Deferred**
 
