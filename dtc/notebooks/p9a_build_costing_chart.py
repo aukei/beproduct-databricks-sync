@@ -200,6 +200,20 @@ for _p in (_MODULE_PATH, _MODULE_PATH.replace("/DTC/", "/dtc/")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+# ── Drop any already-imported `sync.*` before importing it ──────────────────
+# Serverless reuses WARM Python processes between job runs, so `sys.modules`
+# can still hold the `sync` package from an EARLIER run that imported an older
+# copy of the file. The notebook body is re-read every run, the module is not,
+# giving the confusing combination of new notebook + old module (live-confirmed
+# 2026-09-17 on p9b1). Purging first makes every run import from disk, so a
+# deploy always takes effect on the very next run.
+import importlib
+
+importlib.invalidate_caches()
+for _m in [m for m in list(sys.modules)
+           if m.split(".")[0] in ("sync", "connectors", "client")]:
+    del sys.modules[_m]
+
 from functools import reduce
 from datetime import datetime, timezone
 
@@ -219,6 +233,24 @@ dbutils.widgets.text("duty_cache_table", "lft.beproduct.nt_orbit_duty_cache",
                      "Persistent cross-run NT Orbit result cache (fully-qualified)")
 dbutils.widgets.text("cache_ttl_days", str(duty.DEFAULT_CACHE_TTL_DAYS),
                      "Days before a cached lookup is considered too stale to reuse here")
+# ── force_refresh_duty (added 2026-09-17) ───────────────────────────────────
+# This notebook owns LAYER 4 of the duty write-once stack, and it is the layer
+# that actually resurrects an outdated rate: Step 4 below re-reads
+# hts_code/duty_rate_* straight from the live DTC WIP columns on EVERY rebuild,
+# so a freshly-computed value that duty_compute just MERGEd in is silently
+# replaced by the old one the next time the main job runs. Live-diagnosed
+# 2026-09-17: correct values written at 07:44 UTC were gone by 08:06 UTC.
+#
+# With force_refresh_duty=true, Step 4c stops being fill-blank-only and instead
+# OVERWRITES from the persistent NT Orbit cache, which outranks the WIP
+# fallback. Stage 40 then pushes the corrected value back to DTC by itself,
+# because sync/wip_plan.py's duty contribution sets fields unconditionally and
+# writes whatever differs -- so the WIP sheet never has to be cleared by hand.
+#
+# Run duty_compute with the SAME flag first, or the cache still holds the old
+# answer and this only re-applies it. Step 4c never calls the API itself.
+dbutils.widgets.text("force_refresh_duty", "false",
+                     "true = cache OVERWRITES existing hts/duty/tariff (see duty_compute)")
 # ── v2 only (branch `v2`) ───────────────────────────────────────────────────
 # "table"  (v1 default) -- read dtc_wip_<customer> exactly as it stands. Correct
 #          only because v1 re-pulls the sheet AFTER Phase 10 has enriched it
@@ -262,6 +294,7 @@ schema   = dbutils.widgets.get("schema")
 customer = dbutils.widgets.get("customer").strip().upper()
 duty_cache_table = dbutils.widgets.get("duty_cache_table").strip()
 cache_ttl_days   = int(dbutils.widgets.get("cache_ttl_days") or duty.DEFAULT_CACHE_TTL_DAYS)
+force_refresh_duty = (dbutils.widgets.get("force_refresh_duty") or "false").strip().lower() == "true"
 
 effective_mode = (dbutils.widgets.get("wip_effective_mode") or "table").strip().lower()
 bom_segments_table = f"{catalog}.{schema}.{dbutils.widgets.get('bom_segments_table')}"
@@ -855,27 +888,56 @@ for _r in persistent_cache_rows:
                        _rd["import_country_code"])] = _rd
 print(f"  Persistent cache has {len(persistent_cache)} entrie(s)")
 
+if force_refresh_duty:
+    print("  ⚠️  force_refresh_duty=TRUE -- the cache OVERRIDES the WIP fallback:")
+    print("      every market is considered and a differing cached answer replaces")
+    print("      the value Step 4 just re-read from the live WIP sheet.")
+    print("      NOTE: the TTL still applies. An entry older than "
+          f"{cache_ttl_days}d is NOT trusted even under force, so run duty_compute")
+    print("      with force_refresh_duty=true FIRST to refresh it from NT Orbit.")
+
 _chart_schema = costing_chart.schema
 _chart_rows = [r.asDict() for r in costing_chart.collect()]
 _filled_rows = 0
+_overwritten = []
 for _row in _chart_rows:
     _row_filled = False
-    for _market in duty.markets_needing_lookup(_row):
+    for _market in duty.markets_needing_lookup(_row, force=force_refresh_duty):
         _key = duty.cache_key(_row, _market)
         _cache_row = persistent_cache.get(_key)
+        # The TTL check is deliberately NOT forced here: this step never calls
+        # NT Orbit, so "force" must not be allowed to promote a years-old cache
+        # entry over a value a human may have corrected in WIP. Refreshing the
+        # cache is duty_compute's job.
         if _cache_row is None or duty.is_cache_entry_stale(
             _cache_row.get("looked_up_at"), now, ttl_days=cache_ttl_days
         ):
             continue
         _result = duty.cache_row_to_result(_cache_row)
-        _updates = duty.merge_lookup_into_row(_row, _market, _result)
+        _before = {c: _row.get(c) for c in duty.DUTY_VALUE_FIELDS}
+        _updates = duty.merge_lookup_into_row(_row, _market, _result,
+                                              force=force_refresh_duty)
         if _updates:
+            # Distinguish a genuine overwrite from an ordinary blank-fill, so
+            # the run log says which values this step CHANGED rather than just
+            # how many it touched.
+            for _c, _v in _updates.items():
+                if not duty.is_blank(_before.get(_c)):
+                    _overwritten.append(
+                        f"{_row.get('bp_style_no')}/{_row.get('color_name')}"
+                        f" {_c}: {_before.get(_c)!r} -> {_v!r}")
             _row.update(_updates)
             _row_filled = True
     if _row_filled:
         _filled_rows += 1
 
 print(f"  Rows with >=1 field filled directly from cache: {_filled_rows} of {len(_chart_rows)}")
+if _overwritten:
+    print(f"  ⚠️  {len(_overwritten)} EXISTING value(s) overwritten by the cache:")
+    for _line in _overwritten[:40]:
+        print(f"      {_line}")
+    if len(_overwritten) > 40:
+        print(f"      … and {len(_overwritten) - 40} more")
 costing_chart = spark.createDataFrame(_chart_rows, _chart_schema)
 
 # COMMAND ----------

@@ -190,6 +190,84 @@ check(updates_no_overwrite.get("hts_code") is None,
 check(updates_no_overwrite.get("duty_rate_us") == 0.165,
       "but a still-blank sibling column IS filled")
 
+# ---------------------------------------------------------------------------
+print("\n[5b] force_refresh_duty — the escape hatch from write-once (2026-09-17)")
+# Why this exists: duty values are fill-blank-only at four layers, so an
+# ALREADY-POPULATED but outdated rate can never be corrected, and cache_ttl_days
+# is unreachable in practice (layer 1 never requests a filled market, so its
+# entry's age is never examined). Live-diagnosed 2026-09-17.
+
+# Layer 1 -- every market, regardless of what is already there.
+check(set(markets_needing_lookup(fully_filled, force=True)) == {"US", "CA", "MX"},
+      "force re-queries every market even when all are filled")
+check(row_needs_any_lookup(fully_filled, force=True) is True,
+      "row_needs_any_lookup agrees")
+check(markets_needing_lookup(no_country, force=True) == [],
+      "but force still cannot invent a production_country (API requires origin)")
+
+# Layer 2 -- overwrite, with all three fields under ONE rule.
+stale_row = {"hts_code": "OLDCODE", "duty_rate_us": 0.067,
+             "duty_rate_ca": None, "duty_rate_mx": None, "tariff_rate": 0.05}
+forced = merge_lookup_into_row(stale_row, "US", result, force=True)
+check(forced.get("hts_code") == "6109100012", "force overwrites a stale hts_code")
+check(forced.get("duty_rate_us") == 0.165, "force overwrites a stale duty_rate_us")
+check(forced.get("tariff_rate") == 0.1, "force overwrites a stale tariff_rate")
+check(merge_lookup_into_row(stale_row, "US", result).get("hts_code") is None,
+      "…and without force the same call still changes nothing (default unchanged)")
+
+# Never CLEAR: a None means the API did not return that line, which is
+# indistinguishable from a partial failure.
+empty_result = DutyLookupResult(hts_code=None, duty_rate=None, tariff_rate=None)
+check(merge_lookup_into_row(stale_row, "US", empty_result, force=True) == {},
+      "force never clears a value just because the lookup came back empty")
+
+# Zero-diff-zero-write survives force: an unchanged answer emits no update.
+same_row = {"hts_code": "6109100012", "duty_rate_us": 0.165, "duty_rate_ca": None,
+            "duty_rate_mx": None, "tariff_rate": 0.1}
+check(merge_lookup_into_row(same_row, "US", result, force=True) == {},
+      "an identical forced answer produces NO update (no spurious MERGE/PATCH)")
+check(merge_lookup_into_row({**same_row, "duty_rate_us": "0.1650"}, "US",
+                            result, force=True) == {},
+      "duty rates compare NUMERICALLY (DOUBLE in Delta, JSON on the wire)")
+check(merge_lookup_into_row({**same_row, "hts_code": "06109100012"}, "US",
+                            result, force=True).get("hts_code") == "6109100012",
+      "but an HTS code compares as TEXT -- a leading zero is a different code")
+
+# hts_code precedence: ONE column, but every market returns its own code.
+# Live 2026-09-17, one product: US 6206403035 | CA 6206400000 | MX 61062099.
+# Without force, US wins by accident (it is applied first and the blank-check
+# makes CA/MX no-ops). Under force that accident disappears, so US is the
+# explicit owner -- otherwise MX, applied last, would push a Mexican code into
+# the WIP "Main Factory HTS Code" column.
+us_r = DutyLookupResult(hts_code="6206403035", duty_rate=0.269, tariff_rate=0.1)
+ca_r = DutyLookupResult(hts_code="6206400000", duty_rate=0.18)
+mx_r = DutyLookupResult(hts_code="61062099", duty_rate=0.20)
+combined = {}
+base = {"hts_code": "OLD", "duty_rate_us": 0.001, "duty_rate_ca": 0.002,
+        "duty_rate_mx": 0.003, "tariff_rate": 0.004}
+for _cc, _res in (("US", us_r), ("CA", ca_r), ("MX", mx_r)):
+    combined.update(merge_lookup_into_row({**base, **combined}, _cc, _res, force=True))
+check(combined["hts_code"] == "6206403035",
+      "forced multi-market merge keeps the US hts_code, not the last market's")
+check(combined["duty_rate_ca"] == 0.18 and combined["duty_rate_mx"] == 0.20,
+      "…while each market still writes its OWN duty_rate column")
+blank_hts = {**base, "hts_code": None}
+check(merge_lookup_into_row(blank_hts, "CA", ca_r).get("hts_code") == "6206400000",
+      "a CA-only row with no US lookup still fills a BLANK hts_code")
+check(merge_lookup_into_row(base, "CA", ca_r, force=True).get("hts_code") is None,
+      "but CA never OVERWRITES an existing hts_code, even forced")
+
+# Layer 2b -- force must reach the API, not re-apply the cached answer.
+# (Section [7] below covers is_cache_entry_stale properly; this is the one
+# force-specific case, kept here so the whole escape hatch reads in one place.)
+_t_now = datetime(2026, 9, 17, tzinfo=timezone.utc)
+_t_fresh = _t_now - timedelta(days=1)
+check(is_cache_entry_stale(_t_fresh, _t_now, ttl_days=DEFAULT_CACHE_TTL_DAYS) is False,
+      "a 1-day-old entry is NOT stale normally")
+check(is_cache_entry_stale(_t_fresh, _t_now, ttl_days=DEFAULT_CACHE_TTL_DAYS,
+                           force=True) is True,
+      "…but force treats it as stale, so NT Orbit is actually re-queried")
+
 print("\n[6] build_wip_patch_fields()")
 plan = build_wip_patch_fields("Main", {
     "hts_code": "6109100012", "duty_rate_us": 0.165, "tariff_rate": 0.1,

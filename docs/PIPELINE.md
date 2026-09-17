@@ -657,6 +657,49 @@ and sometimes exceeds it (HTTP timeout raised 30 s → 60 s on 2026-09-01).
 > regardless of timing — but it is not structurally closed. Manual unstick:
 > re-run `duty_compute`, then `w.jobs.run_now(job_id=…, only=["wip_push"])`.
 
+#### Refreshing a duty rate that has CHANGED — `force_refresh_duty`
+
+Everything above is **fill-blank-only**. An already-populated duty value is
+therefore never corrected, at four independent layers:
+
+| # | Layer | Where |
+|---|-------|-------|
+| 1 | a market is queried only when its `duty_rate_*` cell is blank | `duty.markets_needing_lookup()` |
+| 2 | only blank columns are filled | `duty.merge_lookup_into_row()` |
+| 3 | `t.c = COALESCE(t.c, s.c)` | `p9b1` Step 4 MERGE |
+| 4 | `hts_code`/`duty_rate_*` re-read from the **live DTC WIP columns** | `p9a` Step 4 |
+
+Layer 1 also makes `cache_ttl_days` unreachable in practice: a filled market is
+never requested, so its cache entry's age is never examined. The 180-day TTL has
+never fired for a populated row. And layers 1+4 form a closed loop — WIP →
+`costing_chart` → WIP — in which each side only re-learns what the other holds.
+
+`force_refresh_duty=true` (default `false`) inverts all four plus the staleness
+check. Run **both jobs, in this order**:
+
+```python
+w.jobs.run_now(job_id=<duty_compute>, job_parameters={"force_refresh_duty": "true"})
+# … wait for it to finish, then:
+w.jobs.run_now(job_id=<v2>,           job_parameters={"force_refresh_duty": "true"})
+```
+
+1. `duty_compute` re-queries every market **live**, refreshes the cache, and
+   overwrites `costing_chart`.
+2. the main job's `build_costing` lets that fresh cache outrank the WIP fallback,
+   and `wip_push` carries the corrected value out to DTC by itself.
+
+**Nothing has to be cleared by hand** — not the WIP duty columns, not
+`costing_chart`, not the cache. Order matters: `p9a` Step 4c never calls NT
+Orbit, so running the main job alone only re-applies what the cache already has.
+
+Preserved under force: an identical answer still writes nothing (rates compare
+numerically, `hts_code` as text — a leading zero is a different code); a failed
+market never blanks a stored value; and Step 4c still honours the TTL, so a
+years-old entry cannot override a human's correction in WIP.
+
+Cost: ~30 s per (row × market) — 3 live calls per row. Never leave it on for a
+scheduled run.
+
 ### `BeProduct_DTC_sync_images` — Style Image upload
 
 Single task `phase3_images` (`p3_beproduct_to_dtc_images`). Unchanged in v2.

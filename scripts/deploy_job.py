@@ -310,6 +310,17 @@ JOB_PARAMS = {
     "costing_chart_table": "lft.beproduct.costing_chart",  # override with any unused name to test; costing_chart_kei dropped 2026-09-15
     "duty_cache_table": "lft.beproduct.nt_orbit_duty_cache",  # Phase 9b: persistent cross-run NT Orbit result cache
     "duty_cache_ttl_days": "180",     # Phase 9b: re-query a cached lookup after this many days
+    # Phase 9b ESCAPE HATCH (2026-09-17). Duty values are write-once/fill-blank
+    # at four layers, so an already-populated but now-OUTDATED rate is invisible
+    # to every one of them and `duty_cache_ttl_days` is unreachable in practice
+    # (a filled market is never requested, so its entry's age is never read).
+    # Set true to re-query every market live and OVERWRITE. Must be true on BOTH
+    # jobs to complete the loop: duty_compute refreshes cache+costing_chart, then
+    # the main job's build_costing lets that cache outrank the live-WIP fallback
+    # and Stage 40 pushes the corrected value back to DTC. No manual clearing of
+    # WIP columns, costing_chart or the cache is needed.
+    # Ignores the cache, so ~30s per (row x market) -- leave false on a schedule.
+    "force_refresh_duty": "false",
     "orbit_parallel_calls": "false",  # Phase 9b: call NT Orbit serially by default (safer; set true + tune max_workers for throughput)
     "orbit_timeout_seconds": "60",    # Phase 9b: per-call NT Orbit HTTP timeout (live-validated 2026-09-01: 30s was too short)
     "run_phase10": "true",            # Phase 10: BOM enrichment from techpack extraction (flipped true 2026-09-03 -- extensively live-validated: upsert semantics, Content backfill, material_no key, 0 errors across multiple runs)
@@ -696,6 +707,7 @@ def build_duty_compute_tasks():
         "orbit_timeout_seconds": P("orbit_timeout_seconds"),
         "duty_cache_table":      P("duty_cache_table"),
         "cache_ttl_days":        P("duty_cache_ttl_days"),
+        "force_refresh_duty":    P("force_refresh_duty"),
     })]
 
 
@@ -882,6 +894,11 @@ def build_v2_tasks():
         "wip_effective_mode": "intent",
         "output_table": P("costing_chart_table_name"),
         "run_costing": P("run_costing"),
+        # Layer 4 of the duty write-once stack lives in this notebook's Step 4
+        # (it re-reads hts/duty from the live WIP columns on every rebuild, which
+        # is what resurrects a stale rate). Under force, Step 4c's cache fill
+        # outranks it. See JOB_PARAMS["force_refresh_duty"].
+        "force_refresh_duty": P("force_refresh_duty"),
     }, depends=[dep("transform"), dep("pull_bom"), dep("pull_master_dtc"),
                 dep("pull_lineplan_dtc")]))
 

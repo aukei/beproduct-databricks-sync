@@ -365,6 +365,104 @@ this stays true by construction; verify it stays true after any change).
 
 ## Verified discoveries log (append-dated; do not delete)
 
+**Serverless serves a STALE `sync.*` module to a NEW notebook (2026-09-17):**
+- Symptom, hit twice in a row: a task fails in ~60-76s with
+  `TypeError: row_needs_any_lookup() got an unexpected keyword argument 'force'`
+  while the traceback shows the NEW notebook body -- and the deployed
+  `sync/duty.py` provably HAS that argument (exported from the workspace and
+  grepped; `modified_at` was 40s BEFORE the run started).
+- Cause: serverless reuses WARM Python processes between job runs. The notebook
+  body is re-read every run; a module already in `sys.modules` is NOT. So a run
+  that imported an older `sync` leaves it cached for the next run, producing
+  new-notebook + old-module. Ruled out first: no `__pycache__` in the
+  workspace, no lowercase-`dtc` shadow path, correct `module_path` in the task
+  spec, correct file content in BOTH workspace roots.
+- **Fix, now in `p9b1_compute_duty_rates` and `p9a_build_costing_chart`** --
+  immediately after the `sys.path` block and BEFORE `from sync import ...`:
+  ```python
+  import importlib
+  importlib.invalidate_caches()
+  for _m in [m for m in list(sys.modules)
+             if m.split(".")[0] in ("sync", "connectors", "client")]:
+      del sys.modules[_m]
+  ```
+- **Any other serverless notebook importing `sync.*` has the same hazard.** A
+  deploy is NOT guaranteed to take effect on the next run without this purge.
+  Worth adding to the remaining v2 notebooks.
+
+**Every market returns a DIFFERENT HTS code (2026-09-17):**
+- `hts_code` is ONE costing_chart column and ONE DTC WIP column, but US/CA/MX
+  are different tariff schedules and genuinely return different codes. Live,
+  one product: `US 6206403035 | CA 6206400000 | MX 61062099`.
+- Without force, US wins **by accident**: `MARKET_COLUMNS` is ordered US,CA,MX,
+  so US is applied first and `merge_lookup_into_row`'s blank-check turns CA/MX
+  into no-ops. Under `force_refresh_duty` that accident disappears and MX --
+  applied last -- would have silently won, pushing a Mexican code into
+  `"Main Factory HTS Code"`. Caught before any live write.
+- US is now the EXPLICIT owner of `hts_code`; CA/MX may only fill a blank one
+  (which still covers a row with no US lookup). Unit-tested.
+
+**Duty rates could NEVER be updated once populated -- the four-layer
+write-once stack, and `force_refresh_duty` (2026-09-17):**
+- Owner question: "given a duty rate changes, when does costing_chart get
+  updated?" Answer, before this fix: **never.** Duty values are write-once /
+  fill-blank-only at four INDEPENDENT layers, and an already-populated but
+  outdated value is invisible to all of them:
+  1. `duty.markets_needing_lookup()` -- queries a market only when its own
+     `duty_rate_*` cell is blank.
+  2. `duty.merge_lookup_into_row()` -- fills only blank columns.
+  3. `p9b1` Step 4 MERGE -- `t.c = COALESCE(t.c, s.c)`.
+  4. `p9a` Step 4 -- re-reads `hts_code`/`duty_rate_*` from the **live DTC WIP
+     columns** on every rebuild.
+- **Layer 1 makes `cache_ttl_days` unreachable in practice.** The TTL is only
+  consulted for keys that get REQUESTED, and a filled market is never
+  requested. Owner-verified: ageing every `looked_up_at` to a year ago
+  produced zero API calls. The 180-day TTL has therefore never once fired for
+  a populated row.
+- The loop is CLOSED: WIP -> costing_chart (layer 4) -> WIP (Stage 40 push).
+  Each side only ever re-learns what the other already holds. The single
+  bridge is `p9a` Step 4c's cache fill, and it only works while the WIP cell
+  is blank -- which is how values got there originally, and the door that
+  shuts once they exist.
+- Proven from Delta history, owner's own experiment 2026-09-17 (UTC):
+  `07:22:37` cache aged (v15, 72 rows) -> `07:33:23` chart nulled (v280, 7
+  rows) -> `07:34-07:44` duty job, 643s, `dry_run=false`, **real NT Orbit
+  calls** -> `07:44:41` cache v16 (+20 inserted) -> `07:44:50` **chart v281,
+  7 rows filled** -> `08:06:28` chart v282, `CREATE OR REPLACE` by the main
+  job, **stale WIP values back**. The correct values lived 22 minutes and were
+  never pushed anywhere. The owner's reading of "nothing filled" was
+  measurement lag, not a failed run.
+- Watch `looked_up_at`, NOT the cache row COUNT: the cache MERGE updates
+  matched keys in place, so a successful refresh can leave the count unchanged.
+- **Collateral finding -- the Phase 10 BOM rewrite silently RE-KEYED the whole
+  duty cache.** `product_description` IS the cache key and contains
+  `fabric_content` + `sub_class`, both of which the rewrite changed:
+  `"Polyester 96%, Spandex 4%"` -> `"Polyester 96% / Spandex 4%"` (the ` / `
+  separator comes from `bom.render_material_content`), and `sub_class` is now
+  backfilled where it used to be absent. Hence 20 of 21 keys were INSERTS, not
+  updates. NT Orbit classifies the new strings DIFFERENTLY (e.g.
+  `6211498050`/0.073 -> `6211421056`/0.081), so 3 of 7 costing_chart rows held
+  HTS codes derived from a description that no longer exists.
+- **Fix: `force_refresh_duty` job parameter** (default `false`), on BOTH
+  `duty_compute` and `v2`. Inverts all four layers plus the cache-staleness
+  check, so every market is re-queried live and the answer OVERWRITES. No
+  manual clearing of WIP columns / costing_chart / the cache is needed -- see
+  "Decisions on record". Costs ~30s per (row x market); never leave it on for
+  scheduled runs.
+
+**DTC HAS added a Main tariff column, under a different name (2026-09-17):**
+- `duty.WIP_TARIFF_COLS_LIVE = False` and `WIP_TARIFF_COL` are STALE. Live
+  view now has **`"Main Factory Tariff"`**; the code assumes
+  `"Main Factory Tariff rate"`, which does not exist. Main slot ONLY -- still
+  no Factory 1/2/3 tariff column.
+- 2 of 60 WIP rows already carry a value, entered by a HUMAN (this pipeline has
+  never written the column), so enabling the push is not a no-op -- it would
+  overwrite hand-entered data. **Needs an owner decision before flipping.**
+- This is also the root of an asymmetry that looks arbitrary: `tariff_rate`
+  needs its own carry-forward (`p9a` Step 4b) purely because it has no live WIP
+  column to be re-read from, while `hts_code`/`duty_rate_*` do. Same intent,
+  different plumbing, because the storage differs -- not a different filter.
+
 **Reverse push PROVEN END-TO-END with a real value (2026-09-17):**
 - Owner authorised setting one DTC cell. Target chosen deliberately:
   `KTB-00024` / `Black` / article `WV-0063` -> material
@@ -1336,6 +1434,48 @@ kept below for historical reference only (see decisions log):**
   sanity assertion (should now always be a no-op).
 
 ## Decisions on record
+
+**`force_refresh_duty` -- how to re-pull duty rates after a rate change
+(2026-09-17, owner-requested):**
+
+Default `false`. Scheduled runs keep the existing fill-blank-only behaviour,
+which is what makes a routine run cheap and write-free.
+
+To refresh after NT Orbit rates change, run BOTH jobs with the parameter set,
+**in this order**:
+
+1. `BeProduct_DTC_sync_duty_compute` with `force_refresh_duty=true`
+   -- re-queries every market LIVE (cache ignored on read), refreshes
+   `nt_orbit_duty_cache`, and OVERWRITES `costing_chart`.
+2. `BeProduct_DTC_sync_v2` with `force_refresh_duty=true`
+   -- `p9a` Step 4c lets that fresh cache outrank the live-WIP fallback
+   (layer 4), and Stage 40 pushes the corrected value out to DTC on its own.
+
+**The owner does NOT need to clear anything by hand** -- not the WIP duty
+columns, not `costing_chart`, not the cache. That was only ever necessary
+because there was no way to say "overwrite".
+
+Why step 2 is separate: `p9a` Step 4c never calls NT Orbit. Running the main
+job alone with the flag re-applies whatever the cache already holds, which is
+useful (it repairs a chart that drifted from the cache) but is not a refresh.
+
+Properties deliberately preserved under force:
+- **Never clears.** A `None` from the API means "line not returned", which is
+  indistinguishable from a partial failure, so the stored value stands. The one
+  case this cannot express is a tariff REMOVED upstream; clear it by hand.
+- **Zero-diff-zero-write.** An identical answer emits no update, so a forced
+  run still produces no MERGE churn and no DTC PATCH for unchanged rows.
+  Duty rates compare numerically (DOUBLE vs JSON); `hts_code` compares as TEXT,
+  because a leading zero is a different code.
+- **The TTL still applies in `p9a` Step 4c.** Force must not let a years-old
+  cache entry override a value a human corrected in WIP. Refreshing the cache
+  is `duty_compute`'s job alone.
+- **A failed market leaves its value alone.** Layer 3's MERGE flips from
+  `COALESCE(t, s)` to `COALESCE(s, t)`; either way a NULL from a failed lookup
+  cannot blank a stored value.
+
+Cost: ignores the cache, so ~30s per (row x market) = 3 live calls per
+costing_chart row. Never leave it on for a scheduled run.
 
 - **Pipeline consolidated into one DTC write window per request — branch
   `v2`, 2026-09-14 (owner decision).** Full design record:

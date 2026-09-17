@@ -176,10 +176,27 @@ WIP_DUTY_COL: Dict[str, Dict[str, str]] = {
     },
 }
 
-# NOT present in the live WIP_ITS_USE view as of 2026-07-17 — kept here as the
-# documented, forward-compatible target names so build_wip_patch_fields() can
-# start writing to them the moment DTC adds the columns, without a code change
-# beyond flipping WIP_TARIFF_COLS_LIVE to True.
+# Tariff columns. NOT present in the live WIP_ITS_USE view as of 2026-07-17 —
+# kept here as the documented, forward-compatible target names.
+#
+# **STALE AS OF 2026-09-17 — needs an owner decision before flipping.** DTC has
+# since added a tariff column for the Main slot, but under a DIFFERENT name than
+# assumed here:
+#
+#     live:     "Main Factory Tariff"        (Delta col_Main_Factory_Tariff)
+#     assumed:  "Main Factory Tariff rate"   <- does not exist
+#
+# and for the Main slot ONLY — there is still no Factory 1/2/3 tariff column.
+# Two of 60 WIP rows already carry a value in it, written by a human, not by
+# this pipeline (we have never written the column). So enabling the push is NOT
+# a pure no-op: it would start overwriting hand-entered values.
+#
+# To enable: correct "Main" below to "Main Factory Tariff", flip
+# WIP_TARIFF_COLS_LIVE, and decide what should happen to the Factory 1/2/3
+# slots, which must keep reporting as skipped because they have no column at
+# all. Until then tariff_rate stays in costing_chart only — which is WHY it
+# needs its own carry-forward in p9a Step 4b while hts_code/duty_rate_* do not:
+# they have a live WIP column to be re-read from, and tariff_rate does not.
 WIP_TARIFF_COL: Dict[str, str] = {
     "Main": "Main Factory Tariff rate",
     "1": "Factory 1 - Tariff rate",
@@ -189,13 +206,52 @@ WIP_TARIFF_COL: Dict[str, str] = {
 WIP_TARIFF_COLS_LIVE = False
 
 
-def _blank(v: Any) -> bool:
+def is_blank(v: Any) -> bool:
     """True if a costing_chart cell is null/blank (mirrors phase1.norm's null check
-    but avoids importing phase1 just for this one helper)."""
+    but avoids importing phase1 just for this one helper).
+
+    Public because p9a_build_costing_chart.py's Step 4c needs the IDENTICAL
+    notion of "was this cell already populated" to tell a forced overwrite
+    apart from an ordinary blank-fill. A second definition there would be free
+    to drift from this one, and the whole force_refresh_duty path is defined in
+    terms of blank-vs-not.
+    """
     if v is None:
         return True
     s = str(v).strip()
     return s == "" or s.lower() in {"n/a", "na", "none", "null", "nan"}
+
+
+# Internal shorthand -- this module used `_blank` throughout before the helper
+# was made public, and the short name reads better at its many call sites.
+_blank = is_blank
+
+
+def _same_value(current: Any, new: Any, numeric: bool) -> bool:
+    """
+    True if a stored costing_chart value and a freshly-fetched one are the same
+    duty answer. Used only by `merge_lookup_into_row(force=True)`, so that a
+    forced refresh still emits ONLY genuine changes.
+
+    `numeric` must be True for `duty_rate_*`/`tariff_rate` and False for
+    `hts_code`, because the two compare differently:
+
+    * duty rates are DOUBLE in Delta but arrive from JSON, so 0.067 has to
+      equal "0.067" and 0.32 has to equal 0.320 — a string compare would
+      report spurious changes on every forced run.
+    * an HTS code is a STRING whose leading zeros are significant ("0101210010"
+      is chapter 1, not chapter 101). Comparing it as a float would treat
+      "06206900040" and "6206900040" as the same code and silently suppress a
+      real correction, so it is always compared as text.
+    """
+    if current is None or new is None:
+        return current is new
+    if numeric:
+        try:
+            return float(current) == float(new)
+        except (TypeError, ValueError):
+            pass
+    return str(current).strip() == str(new).strip()
 
 
 # ---------------------------------------------------------------------------
@@ -289,6 +345,7 @@ def is_cache_entry_stale(
     looked_up_at: Optional[Any],
     now: Any,
     ttl_days: int = DEFAULT_CACHE_TTL_DAYS,
+    force: bool = False,
 ) -> bool:
     """
     True if a persistent cache entry is old enough to be re-queried rather
@@ -302,7 +359,14 @@ def is_cache_entry_stale(
             datetime.now(), so this is deterministic/testable). May be
             naive or aware.
         ttl_days: cache lifetime in days.
+        force: `force_refresh_duty` — treat EVERY entry as stale, so the
+            caller re-queries NT Orbit instead of trusting the cache. This is
+            what makes a forced refresh actually reach the API; without it a
+            forced run would re-apply the same cached answer it is trying to
+            replace. See `markets_needing_lookup`.
     """
+    if force:
+        return True
     if looked_up_at is None:
         return True
     age = _as_naive_utc(now) - _as_naive_utc(looked_up_at)
@@ -351,7 +415,7 @@ def cache_row_to_result(cache_row: Dict[str, Any]) -> "DutyLookupResult":
 # Lookup-need decision
 # ---------------------------------------------------------------------------
 
-def markets_needing_lookup(row: Dict[str, Any]) -> List[str]:
+def markets_needing_lookup(row: Dict[str, Any], force: bool = False) -> List[str]:
     """
     Return the subset of ["US", "CA", "MX"] that still need an NT Orbit call
     for this costing_chart row: a market needs a call when its own duty_rate
@@ -362,6 +426,17 @@ def markets_needing_lookup(row: Dict[str, Any]) -> List[str]:
 
     A market is skipped entirely when the row has no production_country
     (origin/export country is required by the API and cannot be inferred).
+
+    ``force`` (= the ``force_refresh_duty`` job parameter) returns EVERY
+    market regardless of what the row already holds. This is the entry point
+    of the whole forced-refresh path and exists because the blank-check here
+    is what makes an outdated rate permanently invisible: a market that is
+    already filled is never queried, so its cache entry is never even looked
+    at, so `DEFAULT_CACHE_TTL_DAYS` can never expire for it. Live-diagnosed
+    2026-09-17 — ageing every `looked_up_at` to a year ago produced zero API
+    calls, precisely because no market was ever requested. Pair it with
+    ``merge_lookup_into_row(force=True)``, or the fresh answer is fetched and
+    then discarded by the blank-check there.
 
     US is ALSO independently re-queried when `tariff_rate` is still blank,
     even if `duty_rate_us` is already filled (fixed 2026-09-07,
@@ -376,6 +451,9 @@ def markets_needing_lookup(row: Dict[str, Any]) -> List[str]:
     """
     if _blank(row.get("production_country")):
         return []
+    if force:
+        # Every market, unconditionally. Order matters only for determinism.
+        return [cc for _, cc in MARKET_COLUMNS.items()]
     needed = [
         country_code
         for duty_col, country_code in MARKET_COLUMNS.items()
@@ -391,8 +469,8 @@ def markets_needing_lookup(row: Dict[str, Any]) -> List[str]:
     return needed
 
 
-def row_needs_any_lookup(row: Dict[str, Any]) -> bool:
-    return len(markets_needing_lookup(row)) > 0
+def row_needs_any_lookup(row: Dict[str, Any], force: bool = False) -> bool:
+    return len(markets_needing_lookup(row, force=force)) > 0
 
 
 # ---------------------------------------------------------------------------
@@ -458,6 +536,7 @@ def merge_lookup_into_row(
     row: Dict[str, Any],
     import_country_code: str,
     result: DutyLookupResult,
+    force: bool = False,
 ) -> Dict[str, Any]:
     """
     Compute the {column: value} updates for ONE market's lookup result, to be
@@ -468,31 +547,62 @@ def merge_lookup_into_row(
     columns). ``tariff_rate`` is only ever set from a US lookup (see module
     docstring).
 
+    With ``force`` (= ``force_refresh_duty``) an existing value IS overwritten.
+    All three fields are then governed by exactly one rule — "take the fetched
+    value when there is one" — applied identically to hts_code, the market's
+    duty_rate_* and tariff_rate. A forced refresh still never CLEARS a field:
+    a None in the result means the API did not return that line, which is
+    indistinguishable from a partial failure, so the old value stands. The one
+    case this cannot express is a tariff that has been genuinely REMOVED
+    upstream (no tariff line at all parses to None, not 0.0); clear
+    `tariff_rate` by hand if that happens.
+
     Args:
         row: the current costing_chart row (dict).
         import_country_code: "US" | "CA" | "MX" — which market this result is for.
         result: parsed NT Orbit response (extract_duty_fields()).
+        force: overwrite non-blank values instead of skipping them.
 
     Returns:
         Dict of only the columns that should change (may be empty).
     """
     updates: Dict[str, Any] = {}
 
-    if _blank(row.get("hts_code")) and result.hts_code:
-        updates["hts_code"] = result.hts_code
+    def _take(col: str, value: Any) -> None:
+        """One rule for all three fields: write when we have something to
+        write, and (unless forced) only into a blank cell."""
+        if value is None or value == "":
+            return
+        if _blank(row.get(col)):
+            updates[col] = value
+        elif force and not _same_value(row.get(col), value, numeric=col != "hts_code"):
+            # Forced, and it genuinely differs. Equal values are dropped so a
+            # forced run still reports (and MERGEs) only real changes.
+            updates[col] = value
+
+    # hts_code is a SINGLE costing_chart column (and a single DTC WIP column,
+    # "… Factory HTS Code") but every market returns its OWN code -- they are
+    # different tariff schedules, and they genuinely differ. Live, 2026-09-17:
+    #   US 6206403035 | CA 6206400000 | MX 61062099   (one product)
+    # Without force, the first market in MARKET_COLUMNS order (US) fills it and
+    # the blank-check makes CA/MX no-ops, so US wins by construction. Under
+    # force that accident disappears and MX -- the last market applied -- would
+    # silently win, pushing a Mexican code into the WIP HTS column. So US is
+    # made the explicit owner: CA/MX may only fill a BLANK hts_code, which is
+    # what still happens for a row that has no US lookup at all.
+    if import_country_code == "US" or is_blank(row.get("hts_code")):
+        _take("hts_code", result.hts_code)
 
     duty_col = next(
         (c for c, cc in MARKET_COLUMNS.items() if cc == import_country_code), None
     )
-    if duty_col and _blank(row.get(duty_col)) and result.duty_rate is not None:
-        updates[duty_col] = result.duty_rate
+    if duty_col:
+        _take(duty_col, result.duty_rate)
 
-    if (
-        import_country_code == "US"
-        and _blank(row.get("tariff_rate"))
-        and result.tariff_rate is not None
-    ):
-        updates["tariff_rate"] = result.tariff_rate
+    # Still US-only: tariff_rate is only ever populated from a US response
+    # (Section 301/122 are US-specific), NOT a different write rule.
+    if import_country_code == "US":
+        _take("tariff_rate", result.tariff_rate)
 
     return updates
 

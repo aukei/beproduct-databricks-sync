@@ -101,6 +101,22 @@ for _p in (_MODULE_PATH, _MODULE_PATH.replace("/DTC/", "/dtc/")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+# ── Drop any already-imported `sync.*` before importing it ──────────────────
+# Serverless reuses WARM Python processes between job runs, so `sys.modules`
+# can still hold the `sync` package from an EARLIER run that imported an older
+# copy of the file. The notebook body is re-read every run, the module is not,
+# which produces the confusing combination of new notebook + old module:
+#   TypeError: row_needs_any_lookup() got an unexpected keyword argument 'force'
+# on a run whose deployed sync/duty.py demonstrably HAS that argument
+# (live-confirmed twice, 2026-09-17). Purging first makes every run import
+# from disk, so a deploy always takes effect on the very next run.
+import importlib
+
+importlib.invalidate_caches()
+for _m in [m for m in list(sys.modules)
+           if m.split(".")[0] in ("sync", "connectors", "client")]:
+    del sys.modules[_m]
+
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
@@ -128,6 +144,27 @@ dbutils.widgets.text("duty_cache_table", "lft.beproduct.nt_orbit_duty_cache",
                      "Persistent cross-run NT Orbit result cache (fully-qualified)")
 dbutils.widgets.text("cache_ttl_days", str(duty.DEFAULT_CACHE_TTL_DAYS),
                      "Days before a cached lookup is re-queried")
+# ── force_refresh_duty (added 2026-09-17) ───────────────────────────────────
+# Normally every duty field is write-once/fill-blank-only, at four independent
+# layers, so an ALREADY-POPULATED but now-outdated rate can never be corrected:
+#   1. markets_needing_lookup()  queries a market only when its cell is blank
+#   2. merge_lookup_into_row()   fills only blank columns
+#   3. this notebook's Step 4    MERGE ... COALESCE(t.c, s.c)
+#   4. p9a Step 4                re-reads hts/duty from the live DTC WIP columns
+# Layer 1 also makes `cache_ttl_days` unreachable in practice: a filled market
+# is never requested, so its cache entry's age is never even examined.
+#
+# `force_refresh_duty=true` inverts all four (layer 4 lives in
+# p9a_build_costing_chart.py, which takes the same parameter): every market is
+# re-queried live, the cache is treated as wholly stale, and the answer
+# OVERWRITES costing_chart. Stage 40's DTC push then carries the new value out
+# to the WIP sheet on its own, because sync/wip_plan.py's duty contribution
+# already sets fields unconditionally and writes whatever differs.
+#
+# Cost: ignores the cache, so it is ~30s per (row x market) — 3 live NT Orbit
+# calls per costing_chart row. Leave it false for scheduled runs.
+dbutils.widgets.text("force_refresh_duty", "false",
+                     "true = re-query every market and OVERWRITE existing values")
 
 catalog       = dbutils.widgets.get("catalog")
 schema        = dbutils.widgets.get("schema")
@@ -138,6 +175,7 @@ max_workers   = int(dbutils.widgets.get("max_workers") or 4) if parallel_calls e
 orbit_timeout_seconds = int(dbutils.widgets.get("orbit_timeout_seconds") or 60)
 duty_cache_table = dbutils.widgets.get("duty_cache_table").strip()
 cache_ttl_days   = int(dbutils.widgets.get("cache_ttl_days") or duty.DEFAULT_CACHE_TTL_DAYS)
+force_refresh    = (dbutils.widgets.get("force_refresh_duty") or "false").strip().lower() == "true"
 
 oauth_state_tbl = f"{catalog}.{schema}.nt_orbit_oauth_state"
 now = datetime.now(timezone.utc)
@@ -150,6 +188,12 @@ print(f"  Duty cache    : {duty_cache_table}  (ttl={cache_ttl_days}d)")
 print(f"  dry_run={dry_run}")
 print(f"  parallel_calls={parallel_calls}  max_workers={max_workers}  "
       f"orbit_timeout_seconds={orbit_timeout_seconds}")
+if force_refresh:
+    print("  ⚠️  force_refresh_duty=TRUE -- every market re-queried LIVE, cache")
+    print("      ignored on read, existing hts_code/duty_rate_*/tariff_rate")
+    print("      OVERWRITTEN. Expect ~30s per (row x market).")
+else:
+    print("  force_refresh_duty=false (fill blanks only -- an existing value is never changed)")
 print("  NOTE: this notebook never touches live DTC -- see p9b2_push_duty_to_wip.py")
 
 # COMMAND ----------
@@ -247,8 +291,9 @@ print(f"  Total costing_chart rows: {len(chart_rows)}")
 # has both a Main Fabric and a Fabric-segment costing entry.
 COSTING_KEY = list(duty.COSTING_KEY)
 
-needing = [r for r in chart_rows if duty.row_needs_any_lookup(r)]
-print(f"  Rows needing at least one NT Orbit lookup: {len(needing)}")
+needing = [r for r in chart_rows if duty.row_needs_any_lookup(r, force=force_refresh)]
+print(f"  Rows needing at least one NT Orbit lookup: {len(needing)}"
+      + ("  (force_refresh_duty -- every row with a production_country)" if force_refresh else ""))
 
 # COMMAND ----------
 
@@ -276,7 +321,7 @@ print(f"  Persistent cache has {len(persistent_cache)} entrie(s)")
 
 call_jobs = []          # (row_idx, country_code, cache_key)
 for idx, row in enumerate(needing):
-    for country_code in duty.markets_needing_lookup(row):
+    for country_code in duty.markets_needing_lookup(row, force=force_refresh):
         key = duty.cache_key(row, country_code)
         call_jobs.append((idx, country_code, key))
 
@@ -288,7 +333,8 @@ keys_to_call = set()
 for key in unique_keys:
     cache_row = persistent_cache.get(key)
     if cache_row is not None and not duty.is_cache_entry_stale(
-        cache_row.get("looked_up_at"), now, ttl_days=cache_ttl_days
+        cache_row.get("looked_up_at"), now, ttl_days=cache_ttl_days,
+        force=force_refresh,
     ):
         cache[key] = duty.cache_row_to_result(cache_row)
         keys_from_cache_hit.add(key)
@@ -394,12 +440,13 @@ print("\nStep 3: Merging lookup results onto costing_chart rows …")
 row_updates: list = []   # (row_idx, {col: value})
 for idx, row in enumerate(needing):
     combined: dict = {}
-    for country_code in duty.markets_needing_lookup(row):
+    for country_code in duty.markets_needing_lookup(row, force=force_refresh):
         key = duty.cache_key(row, country_code)
         result = cache.get(key)
         if result is None:
             continue  # failed lookup for this market; skip
-        combined.update(duty.merge_lookup_into_row({**row, **combined}, country_code, result))
+        combined.update(duty.merge_lookup_into_row(
+            {**row, **combined}, country_code, result, force=force_refresh))
     if combined:
         row_updates.append((idx, combined))
 
@@ -454,9 +501,17 @@ if row_updates and not dry_run:
     # WIP-row lookup already correctly uses, via a plain dict keyed on a
     # tuple — unaffected by this SQL-specific gotcha).
     on_clause = " AND ".join(f"t.{c} <=> s.{c}" for c in COSTING_KEY)
+    # Layer 3 of the write-once stack. Normally the TARGET wins
+    # (COALESCE(t, s) = "fill only if blank"); under force_refresh_duty the
+    # SOURCE wins (COALESCE(s, t) = "overwrite when we fetched something").
+    # The argument order is the whole switch. Either way a market whose lookup
+    # FAILED contributes NULL and therefore leaves the stored value alone --
+    # a forced refresh never blanks a field just because the API was down.
+    _value_cols = ("hts_code", "duty_rate_us", "duty_rate_ca", "duty_rate_mx", "tariff_rate")
     set_clause = ", ".join(
-        f"t.{c} = COALESCE(t.{c}, s.{c})"
-        for c in ("hts_code", "duty_rate_us", "duty_rate_ca", "duty_rate_mx", "tariff_rate")
+        (f"t.{c} = COALESCE(s.{c}, t.{c})" if force_refresh
+         else f"t.{c} = COALESCE(t.{c}, s.{c})")
+        for c in _value_cols
     ) + ", t.updated_at = s.updated_at"
 
     spark.sql(f"""
@@ -483,7 +538,14 @@ print(f"  Rows needing lookup          : {len(needing)}")
 print(f"  Unique keys needed           : {len(unique_keys)}")
 print(f"    served from persistent cache : {len(keys_from_cache_hit)}  (no API call, no ~30s wait)")
 print(f"    fetched live from NT Orbit   : {len(newly_fetched)}  (failed: {len(errors)})")
-print(f"  Rows with filled fields      : {len(row_updates)}")
+print(f"  Rows with filled/changed fields : {len(row_updates)}")
 print(f"  Cache TTL                    : {cache_ttl_days} day(s)  (table: {duty_cache_table})")
+print(f"  force_refresh_duty           : {force_refresh}")
+if force_refresh:
+    print("    -> existing values were OVERWRITTEN where NT Orbit returned a")
+    print("       different answer; unchanged values were left untouched.")
+    print("    -> run the MAIN job next (with force_refresh_duty=true) so the")
+    print("       rebuild adopts these values instead of the live WIP ones, and")
+    print("       Stage 40 pushes them back out to DTC.")
 print(f"  dry_run={dry_run}")
 print("  costing_chart updated only -- see p9b2_push_duty_to_wip.py for the DTC WIP push")
