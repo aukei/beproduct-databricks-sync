@@ -365,6 +365,39 @@ this stays true by construction; verify it stays true after any change).
 
 ## Verified discoveries log (append-dated; do not delete)
 
+**Reverse push PROVEN END-TO-END with a real value (2026-09-17):**
+- Owner authorised setting one DTC cell. Target chosen deliberately:
+  `KTB-00024` / `Black` / article `WV-0063` -> material
+  `b95b1ae6-9e08-4204-b244-c1de59735aa5` (`LF-BD26-000005--TW`), whose
+  `customer_material_code` was already the dead value `'test-again'`.
+- Chain, each step verified:
+  1. DTC cell `"Fabric Customer # or SAP #"` set to
+     `kei-cust-material-no-test-01` (204, read back, `persisted: true`).
+  2. `p1_pull_masters_to_delta` refreshed the WIP snapshot.
+  3. Stage 55 `push_customer_code`, `dry_run=false`:
+     `dtc_rows_with_value: 1`, `writes: 1`, `conflicts: 0`, `failed: 0`.
+  4. **MATERIAL `customer_material_code` = `kei-cust-material-no-test-01`.**
+  5. **BOM row DISPLAYS the new value** -- the read-through relationship
+     confirmed a second time, now through the pipeline rather than by hand.
+  6. No collateral damage: material header still 45 fields, variation still 3
+     rows.
+- **Idempotence confirmed: a second real run wrote NOTHING** (`writes: 0`,
+  `noops: 1`). The material already held the value, so the lean-write check
+  suppressed it -- the same property the DTC side relies on, now proven on the
+  BeProduct side too.
+- Note the fan-in this exercised: only ONE of the 10 DTC rows sharing that
+  material had a value, and the other 9 were blank. Blank rows contribute
+  nothing, so no conflict arose -- the intended behaviour when a shared
+  material is described by exactly one row.
+- **State deliberately LEFT CONSISTENT**: DTC cell and material both hold
+  `kei-cust-material-no-test-01`. Reverting only the DTC cell would leave them
+  disagreeing, because this push never clears a code -- it can only set or
+  change one. To undo properly, clear the DTC cell AND set the material back to
+  `'test-again'`.
+- New utility: `dtc/notebooks/v2_set_dtc_cell.py` -- sets ONE DTC cell, matched
+  on (BP Style#, Color / Wash, Mill Fabric Article #). Refuses unless both the
+  request and the row match uniquely, and reads the value back afterwards.
+
 **Reverse push BUILT -- DTC customer code -> BeProduct MATERIAL master
 (2026-09-17). The BOM row was never the right target:**
 - `CUSTOMER MATERIAL CODE` is **not editable on a material-linked row**

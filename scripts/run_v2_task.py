@@ -57,6 +57,7 @@ NOTEBOOK_DIRS = {
     "p9a_build_costing_chart": "DTC/notebooks",
     "v2_smoke_check": "DTC/notebooks",
     "v2_probe_write": "DTC/notebooks",
+    "v2_set_dtc_cell": "DTC/notebooks",
     "v2_push_customer_code": "DTC/notebooks",
     "v2_inspect_requests": "DTC/notebooks",
     "p1p7_beproduct_to_dtc_transform": "beproduct",
