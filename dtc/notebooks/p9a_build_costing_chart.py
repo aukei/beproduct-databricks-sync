@@ -200,19 +200,10 @@ for _p in (_MODULE_PATH, _MODULE_PATH.replace("/DTC/", "/dtc/")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-# ── Drop any already-imported `sync.*` before importing it ──────────────────
-# Serverless reuses WARM Python processes between job runs, so `sys.modules`
-# can still hold the `sync` package from an EARLIER run that imported an older
-# copy of the file. The notebook body is re-read every run, the module is not,
-# giving the confusing combination of new notebook + old module (live-confirmed
-# 2026-09-17 on p9b1). Purging first makes every run import from disk, so a
-# deploy always takes effect on the very next run.
-import importlib
-
-importlib.invalidate_caches()
-for _m in [m for m in list(sys.modules)
-           if m.split(".")[0] in ("sync", "connectors", "client")]:
-    del sys.modules[_m]
+# Print it -- see p9b1_compute_duty_rates.py: a job-level `module_path`
+# parameter silently OVERRIDES a task base_parameter of the same name, which
+# made duty_compute import v1 modules while running the v2 notebook.
+print(f"module path: {_MODULE_PATH}")
 
 from functools import reduce
 from datetime import datetime, timezone

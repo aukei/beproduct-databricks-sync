@@ -697,7 +697,13 @@ def build_duty_compute_tasks():
     # Deployed from the v2 workspace root (the v1 root is frozen at the v1
     # branch) and therefore needs module_path pointed there too.
     return [nb_task("compute_duty_rates", f"{NB_DTC_V2}/p9b1_compute_duty_rates", {
-        "module_path":           NB_PY_V2,
+        # `P(...)`, NOT a literal NB_PY_V2. A literal here reads as the safer
+        # choice and is the opposite: a job-level parameter of the same name
+        # OVERRIDES a task base_parameter, so the literal was silently ignored
+        # and v1 modules were imported (2026-09-17, three failed runs). The
+        # real fix is JOB_SPECS["duty_compute"]["param_overrides"]; referencing
+        # the job parameter here makes that the single place it is decided.
+        "module_path":           P("module_path"),
         "catalog":               CAT,
         "schema":                SCH,
         "costing_chart_table":   COSTING_TABLE,
@@ -1034,6 +1040,22 @@ JOB_SPECS = {
         # createDataFrame/tempView/MERGE, all of which the 2026-09-14 smoke
         # check confirmed on serverless. Retiring the pool is now unblocked.
         "serverless": True,
+        # REQUIRED, and it is not redundant with build_duty_compute_tasks()'s
+        # own `"module_path": NB_PY_V2` base_parameter. **A job-level parameter
+        # OVERRIDES a task base_parameter of the same name** -- so without this
+        # line the notebook read the JOB default (the v1 root) and imported v1's
+        # `sync` package while running the v2 NOTEBOOK (notebook_path is part of
+        # the task definition, not a widget, so it is unaffected).
+        #
+        # Latent since this job was pointed at NB_DTC_V2, and INVISIBLE until
+        # 2026-09-17 because the two copies of sync/duty.py were functionally
+        # identical. The moment they diverged it surfaced as, three runs
+        # running:
+        #   TypeError: row_needs_any_lookup() got an unexpected keyword
+        #   argument 'force'
+        # with a traceback showing the NEW notebook -- while the v2 root's
+        # duty.py provably had the argument. See AGENTS.md.
+        "param_overrides": {"module_path": NB_PY_V2},
     },
     "images": {
         "display_name": "BeProduct_DTC_sync_images",

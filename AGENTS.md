@@ -365,30 +365,34 @@ this stays true by construction; verify it stays true after any change).
 
 ## Verified discoveries log (append-dated; do not delete)
 
-**Serverless serves a STALE `sync.*` module to a NEW notebook (2026-09-17):**
-- Symptom, hit twice in a row: a task fails in ~60-76s with
+**A JOB parameter OVERRIDES a task base_parameter of the same name -- and it
+had duty_compute importing v1 modules (2026-09-17):**
+- Symptom, three runs running, ~60-76s each:
   `TypeError: row_needs_any_lookup() got an unexpected keyword argument 'force'`
-  while the traceback shows the NEW notebook body -- and the deployed
-  `sync/duty.py` provably HAS that argument (exported from the workspace and
-  grepped; `modified_at` was 40s BEFORE the run started).
-- Cause: serverless reuses WARM Python processes between job runs. The notebook
-  body is re-read every run; a module already in `sys.modules` is NOT. So a run
-  that imported an older `sync` leaves it cached for the next run, producing
-  new-notebook + old-module. Ruled out first: no `__pycache__` in the
-  workspace, no lowercase-`dtc` shadow path, correct `module_path` in the task
-  spec, correct file content in BOTH workspace roots.
-- **Fix, now in `p9b1_compute_duty_rates` and `p9a_build_costing_chart`** --
-  immediately after the `sys.path` block and BEFORE `from sync import ...`:
-  ```python
-  import importlib
-  importlib.invalidate_caches()
-  for _m in [m for m in list(sys.modules)
-             if m.split(".")[0] in ("sync", "connectors", "client")]:
-      del sys.modules[_m]
-  ```
-- **Any other serverless notebook importing `sync.*` has the same hazard.** A
-  deploy is NOT guaranteed to take effect on the next run without this purge.
-  Worth adding to the remaining v2 notebooks.
+  with a traceback showing the NEW notebook body, while the v2 root's
+  `sync/duty.py` provably HAD that argument (exported and grepped;
+  `modified_at` 40s BEFORE the run started).
+- **Cause.** `build_duty_compute_tasks()` sets the task base_parameter
+  `"module_path": NB_PY_V2`, but `JOB_PARAMS["module_path"]` is the v1 root and
+  the `duty_compute` spec had no `param_overrides`. Databricks resolves the
+  JOB-level parameter into the widget and it WINS, so the notebook imported
+  `/Workspace/Repos/beproduct-sync/DTC/python` (v1) while executing from the v2
+  root. `notebook_path` is part of the task definition, not a widget, so it was
+  unaffected -- hence new notebook + old module.
+- **Latent since duty_compute was pointed at `NB_DTC_V2`, and invisible the
+  whole time** because the two copies of `sync/duty.py` were functionally
+  identical. It only surfaced the moment they diverged.
+- Fix: `JOB_SPECS["duty_compute"]["param_overrides"] = {"module_path": NB_PY_V2}`,
+  mirroring the `v2` spec. Both notebooks now also `print(_MODULE_PATH)`, since
+  this class of mismatch is otherwise silent.
+- **Rule: whenever a task's notebook lives under a workspace root, the JOB
+  parameter `module_path` must name that same root.** A task base_parameter
+  cannot be relied on to do it.
+- A theory considered and DISPROVED along the way: "serverless reuses warm
+  Python processes, so `sys.modules` serves a stale module". Purging
+  `sys.modules` + `importlib.invalidate_caches()` before the import changed
+  nothing (run 3 failed identically). Also ruled out: `__pycache__` in the
+  workspace, a lowercase-`dtc` shadow path.
 
 **Every market returns a DIFFERENT HTS code (2026-09-17):**
 - `hts_code` is ONE costing_chart column and ONE DTC WIP column, but US/CA/MX

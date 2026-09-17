@@ -101,21 +101,12 @@ for _p in (_MODULE_PATH, _MODULE_PATH.replace("/DTC/", "/dtc/")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-# ── Drop any already-imported `sync.*` before importing it ──────────────────
-# Serverless reuses WARM Python processes between job runs, so `sys.modules`
-# can still hold the `sync` package from an EARLIER run that imported an older
-# copy of the file. The notebook body is re-read every run, the module is not,
-# which produces the confusing combination of new notebook + old module:
-#   TypeError: row_needs_any_lookup() got an unexpected keyword argument 'force'
-# on a run whose deployed sync/duty.py demonstrably HAS that argument
-# (live-confirmed twice, 2026-09-17). Purging first makes every run import
-# from disk, so a deploy always takes effect on the very next run.
-import importlib
-
-importlib.invalidate_caches()
-for _m in [m for m in list(sys.modules)
-           if m.split(".")[0] in ("sync", "connectors", "client")]:
-    del sys.modules[_m]
+# Print it. A "new notebook + old module" mismatch is otherwise invisible, and
+# it cost three failed runs on 2026-09-17: a job-level `module_path` parameter
+# silently OVERRIDES a task base_parameter of the same name, so this notebook
+# was importing v1's `sync` package while running from the v2 root. See
+# JOB_SPECS["duty_compute"]["param_overrides"] in scripts/deploy_job.py.
+print(f"module path: {_MODULE_PATH}")
 
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
