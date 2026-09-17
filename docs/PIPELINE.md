@@ -572,10 +572,14 @@ limit, so it has to be re-established explicitly in the composition layer.
    one object** — two `sheetData` entries sharing a `rowId` in one call is
    rejected with `400 Duplicate rowId found` (confirmed live 2026-09-01). Merging
    is safe because slots target disjoint column names.
-5. Tariff Rate columns are defined (`duty.WIP_TARIFF_COL`) but **not live** in the
-   WIP view (`WIP_TARIFF_COLS_LIVE = False`, confirmed 2026-07-17). A computed
-   tariff stays `costing_chart`-only and the skip is logged, not silently dropped.
-   Flip the flag when DTC adds the columns; no other change needed.
+5. Tariff columns are **live for all four slots** and written unconditionally
+   (verified against the view definition 2026-09-17; the `WIP_TARIFF_COLS_LIVE`
+   switch was removed on owner instruction — tariff overwrites whatever DTC
+   holds). The names are **not** symmetric with the HTS/duty ones:
+   `Main Factory Tariff`, `Factory 1 - Tariff`, `Factory 2 - Tariff`,
+   `Factory 3 - Tariff` — no `rate` suffix, and ` - ` for the numbered slots.
+   DTC types them `string` while duty rates are `number`; `values_equal()`
+   normalises across that, so a float `0.1` and a stored `"0.1"` are not a diff.
 
 Flags: `run_wip_push` (whole stage), `run_duty_push` (duty contribution only).
 

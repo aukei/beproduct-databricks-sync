@@ -176,34 +176,32 @@ WIP_DUTY_COL: Dict[str, Dict[str, str]] = {
     },
 }
 
-# Tariff columns. NOT present in the live WIP_ITS_USE view as of 2026-07-17 —
-# kept here as the documented, forward-compatible target names.
+# Tariff columns — LIVE for all four slots, verified against the authoritative
+# view definition on 2026-09-17 (GET /v1/views/{id} -> dynamicFields, 205
+# columns). Owner instruction the same day: tariff is written unconditionally,
+# overwriting whatever DTC holds; there is no longer a switch.
 #
-# **STALE AS OF 2026-09-17 — needs an owner decision before flipping.** DTC has
-# since added a tariff column for the Main slot, but under a DIFFERENT name than
-# assumed here:
+# The names are NOT symmetric with the HTS/duty ones, and none of them match
+# what this table assumed before today ("Main Factory Tariff rate" etc., which
+# never existed). Transcribed exactly as the view reports them:
 #
-#     live:     "Main Factory Tariff"        (Delta col_Main_Factory_Tariff)
-#     assumed:  "Main Factory Tariff rate"   <- does not exist
+#     "Main Factory Tariff"   "Factory 1 - Tariff"   (note: no "rate" suffix,
+#     and the Factory N form uses " - ", matching "Factory 1 - HTS code")
 #
-# and for the Main slot ONLY — there is still no Factory 1/2/3 tariff column.
-# Two of 60 WIP rows already carry a value in it, written by a human, not by
-# this pipeline (we have never written the column). So enabling the push is NOT
-# a pure no-op: it would start overwriting hand-entered values.
+# Do not "tidy" these. A name that does not exist in the view is dropped by
+# wip_plan's allow-list and the value silently never lands.
 #
-# To enable: correct "Main" below to "Main Factory Tariff", flip
-# WIP_TARIFF_COLS_LIVE, and decide what should happen to the Factory 1/2/3
-# slots, which must keep reporting as skipped because they have no column at
-# all. Until then tariff_rate stays in costing_chart only — which is WHY it
-# needs its own carry-forward in p9a Step 4b while hts_code/duty_rate_* do not:
-# they have a live WIP column to be re-read from, and tariff_rate does not.
+# TYPE NOTE: DTC declares these `string`, while the duty-rate columns are
+# `number`. The value written is the same decimal fraction either way
+# (live-verified existing content: `0.1`, matching costing_chart exactly), and
+# wip_plan.values_equal() normalises across the two representations, so a
+# float 0.1 and a stored "0.1" do not look like a change.
 WIP_TARIFF_COL: Dict[str, str] = {
-    "Main": "Main Factory Tariff rate",
-    "1": "Factory 1 - Tariff rate",
-    "2": "Factory 2 - Tariff rate",
-    "3": "Factory 3 - Tariff rate",
+    "Main": "Main Factory Tariff",
+    "1": "Factory 1 - Tariff",
+    "2": "Factory 2 - Tariff",
+    "3": "Factory 3 - Tariff",
 }
-WIP_TARIFF_COLS_LIVE = False
 
 
 def is_blank(v: Any) -> bool:
@@ -659,13 +657,6 @@ def build_wip_patch_fields(
             plan.fields[WIP_DUTY_COL[factory_slot][country_code]] = filled_fields[duty_col]
 
     if "tariff_rate" in filled_fields:
-        if WIP_TARIFF_COLS_LIVE:
-            plan.fields[WIP_TARIFF_COL[factory_slot]] = filled_fields["tariff_rate"]
-        else:
-            plan.skipped.append(
-                "tariff_rate: DTC WIP has no 'Tariff Rate' column yet "
-                f"(would target {WIP_TARIFF_COL[factory_slot]!r}); value is kept "
-                "in costing_chart only until the column exists."
-            )
+        plan.fields[WIP_TARIFF_COL[factory_slot]] = filled_fields["tariff_rate"]
 
     return plan

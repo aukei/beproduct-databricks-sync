@@ -140,10 +140,13 @@ Per vendor slot (`Main` / `1` / `2` / `3`):
 | Main | `Main Factory HTS Code` | `Main Factory Duty Rate (US/CA/MX)` |
 | 1 / 2 / 3 | `<slot> Factory HTS Code` | `<slot> Factory Duty Rate (US/CA/MX)` |
 
-`<slot> Factory Tariff rate` is defined in `duty.WIP_TARIFF_COL` but **not live**
-in the WIP view — `duty.WIP_TARIFF_COLS_LIVE = False` (confirmed 2026-07-17).
-Computed tariff stays in `costing_chart` only, and the skip is logged rather than
-silently dropped. Flip the flag when DTC adds the columns; no other change needed.
+Tariff has its own, **non-symmetric** column names — `Main Factory Tariff`,
+`Factory 1 - Tariff`, `Factory 2 - Tariff`, `Factory 3 - Tariff` (no `rate`
+suffix; ` - ` for numbered slots). All four were verified live against the view
+definition on 2026-09-17 and are written unconditionally, overwriting whatever
+DTC holds; the former `WIP_TARIFF_COLS_LIVE` switch is gone. DTC types these
+`string` where the duty rates are `number` — immaterial, because
+`values_equal()` compares normalised strings.
 
 ### DTC → BeProduct
 
@@ -237,8 +240,8 @@ it. Add a field to a mapping and it is allowed automatically — the two cannot
 drift. Every plan is checked against it, and a field outside it is dropped and
 recorded in `RequestPlan.violations` rather than reaching a PATCH body.
 
-Tariff columns are included only while `duty.WIP_TARIFF_COLS_LIVE` is True, so
-flipping that flag when DTC adds the columns is still the only change needed.
+All three duty families — HTS, duty rate and tariff — are included
+unconditionally (the tariff gate was removed 2026-09-17).
 
 ---
 

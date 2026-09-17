@@ -109,17 +109,16 @@ MATERIAL_OWNED_COLS: frozenset = frozenset({
 def duty_columns() -> frozenset:
     """Every DTC WIP column the duty contribution may write, across all slots.
 
-    Tariff columns are included ONLY when `duty.WIP_TARIFF_COLS_LIVE` is True.
-    They are defined in `duty.WIP_TARIFF_COL` but are not present in the live
-    WIP_ITS_USE view (confirmed 2026-07-17), so a computed tariff stays in
-    costing_chart until DTC adds them -- flipping that flag is the only change
-    needed here.
+    All THREE field families -- HTS, duty rate, tariff -- are included
+    unconditionally. Tariff used to be gated behind `duty.WIP_TARIFF_COLS_LIVE`
+    because the columns did not exist in the view; all four slots were
+    live-verified on 2026-09-17 and the switch was removed (owner
+    instruction), so tariff is now a first-class duty column like the others.
     """
     cols = set(duty.WIP_HTS_COL.values())
     for slot_map in duty.WIP_DUTY_COL.values():
         cols.update(slot_map.values())
-    if duty.WIP_TARIFF_COLS_LIVE:
-        cols.update(duty.WIP_TARIFF_COL.values())
+    cols.update(duty.WIP_TARIFF_COL.values())
     return frozenset(cols)
 
 

@@ -356,12 +356,13 @@ this stays true by construction; verify it stays true after any change).
    `duty.WIP_TARIFF_COL` — costing/duty data, written at Step 55, a
    SEPARATE PATCH call from Phase 1/10's): per vendor slot (`Main`/`1`/`2`/`3`)
    — `"<slot> Factory HTS Code"` (`"Main Factory HTS Code"` for Main),
-   `"<slot> Factory Duty Rate (US/CA/MX)"`. Tariff Rate columns
-   (`"<slot> Factory Tariff rate"`) are DEFINED in code
-   (`duty.WIP_TARIFF_COL`) but NOT YET LIVE in the WIP view
-   (`duty.WIP_TARIFF_COLS_LIVE = False`, confirmed 2026-07-17) — tariff_rate
-   currently stays `costing_chart`-only; flip that flag once DTC adds the
-   columns, no other code change needed.
+   `"<slot> Factory Duty Rate (US/CA/MX)"`. Tariff columns are LIVE for all
+   four slots (verified against the view definition 2026-09-17) and are
+   written UNCONDITIONALLY, overwriting whatever DTC holds — owner
+   instruction, `WIP_TARIFF_COLS_LIVE` deleted. Their names are NOT
+   symmetric with the others and must be transcribed exactly:
+   `"Main Factory Tariff"`, `"Factory 1 - Tariff"`, `"Factory 2 - Tariff"`,
+   `"Factory 3 - Tariff"` (no `rate` suffix; ` - ` for numbered slots).
 
 ## Verified discoveries log (append-dated; do not delete)
 
@@ -499,18 +500,38 @@ write-once stack, and `force_refresh_duty` (2026-09-17):**
   "Decisions on record". Costs ~30s per (row x market); never leave it on for
   scheduled runs.
 
-**DTC HAS added a Main tariff column, under a different name (2026-09-17):**
-- `duty.WIP_TARIFF_COLS_LIVE = False` and `WIP_TARIFF_COL` are STALE. Live
-  view now has **`"Main Factory Tariff"`**; the code assumes
-  `"Main Factory Tariff rate"`, which does not exist. Main slot ONLY -- still
-  no Factory 1/2/3 tariff column.
-- 2 of 60 WIP rows already carry a value, entered by a HUMAN (this pipeline has
-  never written the column), so enabling the push is not a no-op -- it would
-  overwrite hand-entered data. **Needs an owner decision before flipping.**
-- This is also the root of an asymmetry that looks arbitrary: `tariff_rate`
-  needs its own carry-forward (`p9a` Step 4b) purely because it has no live WIP
-  column to be re-read from, while `hts_code`/`duty_rate_*` do. Same intent,
-  different plumbing, because the storage differs -- not a different filter.
+**DTC tariff columns are LIVE for ALL FOUR slots; the switch is deleted
+(2026-09-17):**
+- Names, transcribed from the authoritative view definition
+  (`GET /v1/views/{id}` -> `dynamicFields`, 205 columns):
+  ```
+  "Main Factory Tariff"   "Factory 1 - Tariff"
+  "Factory 2 - Tariff"    "Factory 3 - Tariff"
+  ```
+  **NOT symmetric with the HTS/duty names** -- no `rate` suffix, and ` - ` for
+  the numbered slots. Every one of them differs from what `WIP_TARIFF_COL`
+  assumed before today (`"Main Factory Tariff rate"` etc., which never
+  existed). Do not "tidy" them: a name absent from the view is dropped by
+  wip_plan's allow-list and the value silently never lands.
+- Owner instruction: write tariff unconditionally, overwriting whatever DTC
+  holds. `WIP_TARIFF_COLS_LIVE` is REMOVED, not flipped -- there is no switch.
+- DTC types these `string`, while the duty-rate columns are `number`. Harmless:
+  `wip_plan.values_equal()` compares normalised strings, so a float `0.1` and a
+  stored `"0.1"` are not a diff. Live-verified existing content is `0.1`, the
+  same decimal-fraction convention as `duty_rate_*`.
+- **CORRECTION to an earlier entry in this same log:** it stated the column
+  existed for the Main slot ONLY. That was wrong -- it was inferred from the
+  `dtc_wip_ktb` Delta snapshot, which only materialises columns that are
+  POPULATED in `sheetData`, so the three empty Factory N tariff columns were
+  invisible. The view definition is the authority (this is the same trap
+  `get_view_column_names()`'s docstring already warns about: 178 view columns
+  vs ~96 surfacing in sheet data). Always check the view definition, never the
+  Delta snapshot, when asking "does this column exist".
+- Consequence for the old asymmetry: `tariff_rate` needed its own
+  carry-forward (`p9a` Step 4b) purely because it had no WIP column to be
+  re-read from. It now HAS one, so Step 4b is redundant for any slot whose
+  tariff has been pushed at least once -- left in place for now (harmless, and
+  it still covers the first run), but it is the obvious next simplification.
 
 **Reverse push PROVEN END-TO-END with a real value (2026-09-17):**
 - Owner authorised setting one DTC cell. Target chosen deliberately:

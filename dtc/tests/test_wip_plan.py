@@ -173,9 +173,10 @@ check("[2b] the 4 material columns are in the allow-list",
 check("[2c] per-slot HTS + duty columns are in the allow-list",
       set(duty.WIP_HTS_COL.values()) <= allow
       and set(duty.WIP_DUTY_COL["Main"].values()) <= allow)
-check("[2d] tariff columns excluded while WIP_TARIFF_COLS_LIVE is False",
-      (not duty.WIP_TARIFF_COLS_LIVE)
-      and not (set(duty.WIP_TARIFF_COL.values()) & allow))
+check("[2d] per-slot tariff columns are in the allow-list (all 4 slots live "
+      "2026-09-17; the WIP_TARIFF_COLS_LIVE switch was removed)",
+      set(duty.WIP_TARIFF_COL.values()) <= allow
+      and len(duty.WIP_TARIFF_COL) == 4)
 check("[2e] every phase1 target column except the image is allowed",
       {c for c in phase1.FIELD_MAPPING.values() if c != phase1.STYLE_IMAGE_COL} <= allow)
 
@@ -339,7 +340,11 @@ check("[5d] both slots' columns present in that one object",
       sheet and "Main Factory HTS Code" in sheet[0]
       and "Factory 1 - HTS code" in sheet[0], sheet)
 
-# tariff_rate has no live WIP column; it must be silently skipped, not written.
+# tariff_rate IS written now -- all 4 slot columns were live-verified against
+# the view definition 2026-09-17 and the WIP_TARIFF_COLS_LIVE switch removed.
+# It used to be the one duty field with nowhere to go; this asserts the
+# reversal, since a silent regression here would look exactly like the old
+# (correct-at-the-time) behaviour.
 p_tariff = wip_plan.compute_request_plan(
     SCOPE, [dtc_row("rA", 1, **{FG: "Main Fabric", MA: "WV-0003",
                                 PL: "BODICE", CT: "Cotton 100%"})],
@@ -347,10 +352,25 @@ p_tariff = wip_plan.compute_request_plan(
     duty_rows=[{"bp_style_no": "KTB-1", "color_name": "Blue", "material_no": "WV-0003",
                 "supplier_type": "Main", "tariff_rate": 0.25}],
     allowed_cols=ALLOWED)
-check("[5e] tariff_rate is not written while its column is not live",
-      p_tariff.is_empty()
-      and p_tariff.counts.get("duty_values_not_writable", 0) >= 1,
+check("[5e] tariff_rate IS written, to the live 'Main Factory Tariff' column",
+      (not p_tariff.is_empty())
+      and p_tariff.update_sheet_data()[0].get("Main Factory Tariff") == 0.25
+      and p_tariff.counts.get("duty_values_not_writable", 0) == 0,
       p_tariff.summary())
+
+# A value already equal in DTC must still produce no write -- tariff joins the
+# zero-diff-zero-write invariant like every other column, so enabling it does
+# not open a write window on rows that already agree.
+p_tariff_same = wip_plan.compute_request_plan(
+    SCOPE, [dtc_row("rA", 1, **{FG: "Main Fabric", MA: "WV-0003",
+                                PL: "BODICE", CT: "Cotton 100%",
+                                "Main Factory Tariff": "0.25"})],
+    [bp_row()], bom_by_style={"KTB-1": MAIN_ONLY},
+    duty_rows=[{"bp_style_no": "KTB-1", "color_name": "Blue", "material_no": "WV-0003",
+                "supplier_type": "Main", "tariff_rate": 0.25}],
+    allowed_cols=ALLOWED)
+check("[5e2] a tariff DTC already holds is not rewritten (0.25 vs '0.25')",
+      p_tariff_same.is_empty(), p_tariff_same.summary())
 
 # duty_rows for a row that does not exist yet must not invent one.
 p_orphan_duty = wip_plan.compute_request_plan(

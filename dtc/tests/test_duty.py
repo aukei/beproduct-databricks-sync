@@ -275,15 +275,31 @@ plan = build_wip_patch_fields("Main", {
 check(plan.fields == {
     "Main Factory HTS Code": "6109100012",
     "Main Factory Duty Rate (US)": 0.165,
-}, "maps hts_code + duty_rate_us to the exact live WIP 'Main' slot column names")
-check(len(plan.skipped) == 1 and "Tariff Rate" in plan.skipped[0],
-      "tariff_rate is reported as skipped (no live WIP column yet), not silently dropped")
+    "Main Factory Tariff": 0.1,
+}, "maps hts_code + duty_rate_us + tariff_rate to the exact live 'Main' columns")
+check(plan.skipped == [],
+      "nothing is skipped any more -- all three families have live WIP columns")
 
-plan_slot1 = build_wip_patch_fields("1", {"duty_rate_ca": 0.2, "duty_rate_mx": 0.05})
+plan_slot1 = build_wip_patch_fields("1", {"duty_rate_ca": 0.2, "duty_rate_mx": 0.05,
+                                          "tariff_rate": 0.25})
 check(plan_slot1.fields == {
     "Factory 1 - Duty Rate (CA)": 0.2,
     "Factory 1 - Duty Rate (MX)": 0.05,
-}, "maps CA/MX duty rates to the exact 'Factory 1' slot column names")
+    "Factory 1 - Tariff": 0.25,
+}, "maps CA/MX duty rates + tariff to the exact 'Factory 1' slot column names")
+
+# The tariff names are NOT symmetric with the HTS/duty ones and every one of
+# them differs from what this table assumed before 2026-09-17 ("Main Factory
+# Tariff rate" etc., which never existed in the view). Pinned against the
+# authoritative view definition (GET /v1/views/{id} -> dynamicFields).
+check(duty.WIP_TARIFF_COL == {
+    "Main": "Main Factory Tariff",
+    "1": "Factory 1 - Tariff",
+    "2": "Factory 2 - Tariff",
+    "3": "Factory 3 - Tariff",
+}, "tariff column names match the live view EXACTLY (no 'rate' suffix; ' - ')")
+check(not hasattr(duty, "WIP_TARIFF_COLS_LIVE"),
+      "the WIP_TARIFF_COLS_LIVE switch is gone -- tariff is always written")
 
 try:
     build_wip_patch_fields("5", {"hts_code": "X"})
