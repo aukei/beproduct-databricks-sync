@@ -660,10 +660,16 @@ check(bom.render_material_content([{"value": 5.0, "code": None}]) is None,
       "a component with no code contributes nothing")
 
 _r = _bv_row("Main Fabric", "BODICE", "WV-0063", [{"value": 100.0, "code": "test from ML"}])
-check(bom.extract_variation_row_fields(_r) == {
-        "fabric_group": "Main Fabric", "placement": "BODICE",
-        "mill_fabric_article": "WV-0063", "content": "100% test from ML"},
-      "extract_variation_row_fields matches the Lakebase output shape exactly")
+_ef = bom.extract_variation_row_fields(_r)
+check({k: _ef[k] for k in ("fabric_group", "placement", "mill_fabric_article", "content")}
+      == {"fabric_group": "Main Fabric", "placement": "BODICE",
+          "mill_fabric_article": "WV-0063", "content": "100% test from ML"},
+      "extract_variation_row_fields matches the Lakebase output shape on the 4 enrichment fields")
+check(set(_ef) >= {"material_id", "lf_material_id", "is_ad_hoc"},
+      "and additionally carries material_id / lf_material_id / is_ad_hoc for the reverse push")
+check(bom.to_wip_fields(_ef).keys() == {bom.WIP_FIELD_FABRIC_GROUP, bom.WIP_FIELD_PLACEMENT,
+                                        bom.WIP_FIELD_MILL_FABRIC_ARTICLE, bom.WIP_FIELD_CONTENT},
+      "the extra keys never leak into a DTC PATCH body")
 check(bom._bv_field(_r, "MILL/SUPPLIER NAME") == "AKIJ",
       "a dict-envelope field value is unwrapped")
 check(bom._bv_field(_r, "NO SUCH FIELD") is None, "unknown field -> None")

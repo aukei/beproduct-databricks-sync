@@ -365,6 +365,50 @@ this stays true by construction; verify it stays true after any change).
 
 ## Verified discoveries log (append-dated; do not delete)
 
+**Reverse push BUILT -- DTC customer code -> BeProduct MATERIAL master
+(2026-09-17). The BOM row was never the right target:**
+- `CUSTOMER MATERIAL CODE` is **not editable on a material-linked row**
+  (`400` from the Update endpoint). The BOM row only DISPLAYS it, read through
+  from the linked material -- owner confirmation: "BomVariation now lookup this
+  code (via LF Material No) and display inline". **Proven live:** writing the
+  material's own `customer_material_code` made the BOM row show the new value
+  immediately.
+- **Working write** (live-verified, applied + restored, header field count
+  unchanged 45 -> 45):
+  `client.material.attributes_update(material_id,
+  fields={"customer_material_code": value})`.
+  Material field: `{"id": "customer_material_code", "name": "CUSTOMER MATERIAL
+  CODE", "type": "Text"}` in `headerData.fields`.
+- **Resolution chain**: DTC row --(Fabric Group, Mill Fabric Article #)-->
+  BOM segment --`materialId`--> material. The pair is unique within a style
+  (owner) and is the SAME `bom.segment_key()` the enrichment direction uses, so
+  both directions agree on what "the same fabric assignment" means. The write
+  uses the GUID `materialId`, NOT `LF MATERIAL ID`, so the planned
+  reorganisation of material master into per-customer folders cannot break it
+  (`lf_material_id` is carried for logging only).
+- **THE HAZARD, and why the planner refuses rather than guesses: materials are
+  SHARED across styles.** Resolving all 60 real DTC rows against real BOM
+  segments collapses to **8 distinct materials** -- up to 10 DTC rows per
+  material. So two DTC rows can easily disagree about one shared master record,
+  and "last row wins" would silently corrupt data other styles depend on.
+  `bom_push.plan_customer_code_push()` groups by material and **never writes a
+  material whose candidate values disagree**; it reports the conflict instead.
+- Other rules: a BLANK DTC value is never pushed (so this can only set or
+  change a code, never clear one); an already-correct material is a no-op; an
+  unmatched (group, article) or an ad-hoc row is reported, never guessed.
+- **Every write is READ BACK and verified.** This pipeline has now been burned
+  twice by "200 but not stored" (DTC `Sub Class`; PageBomVariation `Update`
+  with the wrong key), so the notebook re-reads the material after each write
+  and fails the row if the value did not stick.
+- **Live state: the DTC column `"Fabric Customer # or SAP #"` is blank on all
+  60 rows**, so the stage correctly does nothing today. Validated three ways:
+  the planner is unit-tested (`test_bom_push.py`); a live dry run reads 60 rows
+  / 8 styles and plans zero writes; and resolution was proven against REAL
+  segments and REAL DTC rows with values injected in memory -- 60/60 resolved,
+  0 unmatched, 0 conflicts, zero writes issued.
+- Deployed as Stage 55 `push_customer_code`, depending on `pull_bom` +
+  `pull_master_dtc`. It writes BeProduct only, so it opens NO DTC write window.
+
 **`PageBomVariation/.../Update` -- CORRECTED 2026-09-17. It DOES write row
 fields; the key is `rowFields`, not `fields`:**
 - **RETRACTION.** The 2026-09-16 entry here concluded that `Update` was

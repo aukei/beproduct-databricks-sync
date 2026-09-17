@@ -430,6 +430,7 @@ BV_FIELD_PLACEMENT = "Placement"
 BV_FIELD_MILL_FABRIC_CODE = "MILL FABRIC CODE/SUPPLIER ITEM CODE"
 BV_FIELD_MATERIAL_CONTENT = "FACE FABRIC/MATERIAL CONTENT"
 BV_FIELD_CUSTOMER_MATERIAL_CODE = "CUSTOMER MATERIAL CODE"
+BV_FIELD_LF_MATERIAL_ID = "LF MATERIAL ID"
 
 
 def _bv_field(row: Dict[str, Any], name: str) -> Any:
@@ -509,6 +510,17 @@ def extract_variation_row_fields(row: Dict[str, Any]) -> Dict[str, Optional[str]
         "placement": _bv_field(row, BV_FIELD_PLACEMENT),
         "mill_fabric_article": _bv_field(row, BV_FIELD_MILL_FABRIC_CODE),
         "content": render_material_content(_bv_field(row, BV_FIELD_MATERIAL_CONTENT)),
+        # Carried for the DTC -> Material-master reverse push (sync/bom_push.py).
+        # `CUSTOMER MATERIAL CODE` is NOT editable on the BOM row -- the row only
+        # DISPLAYS it, read through from the linked material -- so the write has
+        # to target the material itself. `material_id` is the direct handle;
+        # `lf_material_id` is the human key ("LF MATERIAL ID", = the material's
+        # headerNumber) and is kept for logging and traceability.
+        # Ignored by every enrichment path: to_wip_fields() maps only the 4
+        # fields above and segment_key() uses only 2 of them.
+        "material_id": row.get("materialId"),
+        "lf_material_id": _bv_field(row, BV_FIELD_LF_MATERIAL_ID),
+        "is_ad_hoc": bool(row.get("isAdHoc")),
     }
 
 

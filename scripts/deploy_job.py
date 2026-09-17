@@ -345,6 +345,10 @@ JOB_PARAMS = {
     # BOMVariations pageId is folder-constant; blank = auto-discover once per run.
     "bom_page_id": "",
     "bom_max_workers": "8",   # parallel BeProduct fetch workers in Stage 20b
+    # Stage 55: DTC "Fabric Customer # or SAP #" -> material master
+    # `customer_material_code`. Blank on every DTC row as of 2026-09-17, so a
+    # run today correctly does nothing.
+    "run_customer_code_push": "true",
     # Unqualified output table name for build_costing. Routine runs write the
     # real table; override it to build a comparison copy without replacing what
     # duty_compute reads and MERGEs. (The old `costing_chart_kei` scratch table
@@ -927,6 +931,21 @@ def build_v2_tasks():
         "http_timeout": P("img_http_timeout"), "max_uploads": P("img_max_uploads"),
         "run_phase3": P("run_phase3"),
     }, depends=[dep("wip_push")]))
+
+    # ── Stage 55: DTC customer code -> BeProduct MATERIAL master (NEW) ─────
+    # Writes BeProduct, never DTC, so it opens no DTC write window and can run
+    # alongside anything. Depends on pull_bom (for the segment -> materialId
+    # resolution) and pull_master_dtc (for the DTC values).
+    #
+    # The target is the MATERIAL, not the BOM row: `CUSTOMER MATERIAL CODE` is
+    # not editable on a material-linked row -- the row only DISPLAYS it, read
+    # through from the material. See v2_push_customer_code.py.
+    tasks.append(v2_task("push_customer_code", f"{NB_DTC_V2}/v2_push_customer_code", {
+        "catalog": CAT, "schema": SCH, "customer": CUST,
+        "bom_segments_table": P("bom_segments_table"),
+        "dry_run": DRY,
+        "run_customer_code_push": P("run_customer_code_push"),
+    }, depends=[dep("pull_bom"), dep("pull_master_dtc")]))
 
     # ── Stage 50: DTC -> BeProduct (unchanged; writes BeProduct, never DTC) ──
     tasks.append(v2_task("phase2_push", f"{NB_DTC_V2}/p2_push_dtc_to_beproduct", {

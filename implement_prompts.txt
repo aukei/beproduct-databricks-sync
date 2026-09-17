@@ -772,3 +772,63 @@ BOM variation Create
         - This DTC field, if not blank/null, should push to PageBomVariation:
             DTC."Fabric Customer # or SAP #" = "rows[].fields[name="CUSTOMER MATERIAL CODE"].value"
     - This is comprehensive rewrite of whole phase 10, removing dependency on alb tables
+- you should only use bomvariation both read and write
+
+looking at the API doc sample payload on update, there is a explicity "rows" element, in which there is a nested "rowFields": [{"id":"string", "value":"string"}]
+Suspect this "customer material code" is one of these rowFields, identified by rowId + rowFields[].id
+
+POST /api/{company}/Style/{headerId}/PageBomVariation/{pageId}/Variation/{variationId}/Update
+.
+* request body = application/json-patch+json
+* example:
+{
+  "selectedVariationColorwaysUpdate": {
+    "add": [
+      "string"
+    ],
+    "remove": [
+      "string"
+    ]
+  },
+  "rows": [
+    {
+      "rowId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+      "materialId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+      "deleteRow": true,
+      "rowFields": [
+        {
+          "id": "string",
+          "value": "string"
+        }
+      ],
+      "colorUpdate": [
+        {
+          "colorwayId": "string",
+          "materialColorwayId": "string",
+          "hex": "string",
+          "number": "string",
+          "name": "string",
+          "removeColor": true
+        }
+      ]
+    }
+  ],
+  "variationName": "string",
+  "isDefault": true,
+  "syncColorways": true,
+  "selectedVariationColorways": [
+    "string"
+  ],
+  "metadataFields": [
+    {
+      "id": "string",
+      "value": "string"
+    }
+  ]
+}
+
+We are not using adhoc BOM rows, so write to material master is the way.
+There is a "LF Material ID" on each BomVariation line, this serves as the unique key to Material master.
+The project team is planned to reorganised material master into folders that segregate by customer, but that should not affect the material master lookup. The Material master, like style, has a list of 'header' fieds, one of which is "customer material code". BomVariation now lookup this code (via LF Material No) and display inline.
+
+## costing chart validation

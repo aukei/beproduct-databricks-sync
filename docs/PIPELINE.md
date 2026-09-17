@@ -133,6 +133,7 @@ BeProduct_DTC_sync_duty_compute   compute_duty_rates   NT Orbit → nt_orbit_dut
 | 40 | `wip_push` | `v2_wip_push` | **NEW** | `request_manager`, `build_costing` |
 | 45 | `phase3_images` | `p3_beproduct_to_dtc_images` | reused, moved in | `wip_push` |
 | 50 | `phase2_push` | `p2_push_dtc_to_beproduct` | reused | `transform`, `pull_master_dtc` |
+| 55 | `push_customer_code` | `v2_push_customer_code` | **NEW** | `pull_bom`, `pull_master_dtc` |
 
 Every dependency edge carries `run_if=ALL_DONE`. A stage that fails should degrade
 the run, not abort it — notably `wip_push` still runs (and still pushes style, BOM
@@ -295,15 +296,12 @@ Colorway affinity is deliberately ignored (owner decision): variations carry
 `syncColorways` / `selectedVariationColorways`, but every variation applies to
 all colorways. Per-colorway coverage stays with `plan_style_enrichment()`.
 
-> **Open issue — the reverse push.** Writing BOM rows *works*: the Update DTO
-> takes `rows[].rowFields` (NOT `fields`, which the GET response uses and which
-> the endpoint silently discards), and `placement` / `Size` write and restore
-> cleanly. But the specific target field is refused:
-> `Field [customer_material_code] is not editable on a material-linked row.`
-> `CUSTOMER MATERIAL CODE` belongs to the linked **Material** record, not the
-> BOM row, and **13 of 13 probed rows are material-linked** — so the DTC
-> `"Fabric Customer # or SAP #"` push cannot target the BOM row. It needs a
-> decision on writing the Material record instead. See AGENTS.md.
+> **Note on writing BOM rows.** The Update DTO takes `rows[].rowFields` — NOT
+> `fields`, which is what the GET response uses and which the endpoint silently
+> discards (200, nothing applied). `placement` and `Size` write and restore
+> cleanly. `CUSTOMER MATERIAL CODE` is the exception: it is not editable on a
+> material-linked row, because the row only *displays* it. That push therefore
+> targets the Material master — see Stage 55.
 
 **Gates — staging eligibility** (`sync/lifecycle.py`, `sync/bom.py`):
 
@@ -731,3 +729,41 @@ own live `get_sheet()` immediately before writing.
 | `phase2_push` | unchanged |
 | `compute_duty_rates` (own job) | unchanged |
 | `phase3_images` (own job) | unchanged |
+
+
+---
+
+### Stage 55 — `push_customer_code` → BeProduct **material master**  **NEW**
+
+DTC `"Fabric Customer # or SAP #"` → the material's `customer_material_code`.
+Writes **BeProduct only**, so it opens no DTC write window and runs alongside
+anything.
+
+**The target is the material, not the BOM row.** `CUSTOMER MATERIAL CODE` is not
+editable on a material-linked row — the row only *displays* it, read through from
+the linked material. Writing the material makes the BOM row show the new value
+immediately (verified live).
+
+```
+DTC row --(Fabric Group, Mill Fabric Article #)--> BOM segment
+        --materialId-->                            material master
+```
+
+That pair is unique within a style and is the same `bom.segment_key()` the
+enrichment direction uses, so both directions agree on what "the same fabric
+assignment" means. The write uses the GUID `materialId`, not `LF MATERIAL ID`, so
+reorganising material master into per-customer folders cannot break it.
+
+**Gates** (`sync/bom_push.py`, all pure and unit-tested):
+1. A **blank** DTC value is never pushed — this stage can set or change a code,
+   never clear one.
+2. **Conflicting materials are never written.** Materials are *shared*: the 60
+   live DTC rows resolve to just 8 distinct materials, up to 10 rows each. If two
+   rows disagree about one material's code, "last row wins" would corrupt a
+   record other styles depend on — so the material is skipped and the conflict
+   reported.
+3. An already-correct material is a no-op.
+4. An unmatched `(group, article)`, or an ad-hoc row with no linked material, is
+   reported — never guessed.
+5. **Every write is read back and verified.** A 200 from a vendor API means
+   accepted, not stored; this pipeline has been burned by that twice.
