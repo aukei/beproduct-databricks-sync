@@ -372,6 +372,28 @@ p_tariff_same = wip_plan.compute_request_plan(
 check("[5e2] a tariff DTC already holds is not rewritten (0.25 vs '0.25')",
       p_tariff_same.is_empty(), p_tariff_same.summary())
 
+# EMPTY REQUEST (a freshly created / cleared sheet): every row is an INSERT,
+# so a fan-out duplicate has no existing DTC row to copy identity from -- its
+# style fields live only in the SAME run's planned writes. Live-confirmed
+# 2026-09-18 on the recreated "KTB SS28 Collaborations": 25 of 39 rows landed
+# with BP Style# and Color / Wash NULL, which also made every fan-out collapse
+# into one indistinguishable group. Invisible on an established sheet, because
+# there `current` is populated.
+p_fresh = wip_plan.compute_request_plan(
+    SCOPE, [], [bp_row(style="KTB-1", color="Blue")],
+    bom_by_style={"KTB-1": MAIN_PLUS_ONE}, allowed_cols=ALLOWED)
+_fresh_ins = p_fresh.insert_sheet_data()
+check("[5f] empty request -> one row per segment (1 style INSERT + 1 fan-out)",
+      len(_fresh_ins) == 2, p_fresh.summary())
+check("[5f2] EVERY inserted row carries BP Style# and Color / Wash",
+      all(o.get(STYLE_COL) == "KTB-1" and o.get(COLOR_COL) == "Blue"
+          for o in _fresh_ins),
+      [{k: v for k, v in o.items() if k in (STYLE_COL, COLOR_COL, FG, MA)}
+       for o in _fresh_ins])
+check("[5f3] the fan-out row carries its own material identity",
+      sorted(str(o.get(MA)) for o in _fresh_ins) == ["WV-0003", "WV-0061"],
+      [o.get(MA) for o in _fresh_ins])
+
 # duty_rows for a row that does not exist yet must not invent one.
 p_orphan_duty = wip_plan.compute_request_plan(
     SCOPE, [], [], bom_by_style={},

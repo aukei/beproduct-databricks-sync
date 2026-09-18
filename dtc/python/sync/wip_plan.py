@@ -390,8 +390,19 @@ def _projected_row(pr: PlannedRow) -> Dict[str, Any]:
         "placement": cur(bom.WIP_FIELD_PLACEMENT),
         "content": cur(bom.WIP_FIELD_CONTENT),
         # Carried for build_insert_row_payload(): the full row a fan-out
-        # duplicate is copied from.
-        "_base_fields": dict(pr.base_row or pr.current),
+        # duplicate is copied from. Like every other value here it must reflect
+        # INTENT -- `pr.fields` (this run's planned writes) layered OVER what
+        # DTC currently holds.
+        #
+        # `dict(pr.base_row or pr.current)` alone was wrong on an EMPTY request:
+        # a style INSERT has no `current` and no `base_row` (there is nothing in
+        # DTC yet), its values exist only in `pr.fields`, so every fan-out
+        # duplicate copied `{}` and landed with NO BP Style# and NO
+        # Color / Wash. Live-confirmed 2026-09-18 on the recreated "KTB SS28
+        # Collaborations": 25 of 39 rows had a null style/colour. Invisible on
+        # an established sheet, where `current` is populated -- which is why it
+        # only surfaced on a fresh one.
+        "_base_fields": {**dict(pr.base_row or pr.current), **pr.fields},
     }
 
 
