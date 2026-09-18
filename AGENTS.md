@@ -519,6 +519,19 @@ write-once stack, and `force_refresh_duty` (2026-09-17):**
   `wip_plan.values_equal()` compares normalised strings, so a float `0.1` and a
   stored `"0.1"` are not a diff. Live-verified existing content is `0.1`, the
   same decimal-fraction convention as `duty_rate_*`.
+- **PROBED LIVE 2026-09-17 before enabling the push**, because a rejected PATCH
+  fails the WHOLE request, not just the offending cell. One cell
+  (`KTB-00024`/`Black`/`WV-0063`, `"Main Factory Tariff"`, blank before), sent
+  the way `wip_plan` sends it -- a raw Python float through
+  `DTCConnector.patch_rows`, NOT a string:
+  ```
+  before: None (NoneType)  ->  sent 0.1 (float)  ->  after: 0.1 (float)
+  ```
+  **A JSON number into a `string`-typed DTC column is accepted**, and comes
+  back as a number. The declared type is loose. Value chosen so the probe left
+  exactly what the pipeline itself would write.
+  (Note `v2_set_dtc_cell.py` could NOT have tested this: its `value` comes from
+  a widget and is therefore always a string.)
 - **CORRECTION to an earlier entry in this same log:** it stated the column
   existed for the Main slot ONLY. That was wrong -- it was inferred from the
   `dtc_wip_ktb` Delta snapshot, which only materialises columns that are
@@ -527,6 +540,22 @@ write-once stack, and `force_refresh_duty` (2026-09-17):**
   `get_view_column_names()`'s docstring already warns about: 178 view columns
   vs ~96 surfacing in sheet data). Always check the view definition, never the
   Delta snapshot, when asking "does this column exist".
+- **VERIFIED LIVE 2026-09-17/18.** All 8 DTC rows that carry duty data now hold
+  `Main Factory Tariff = 0.1`, and the sequence proves each property separately:
+  | run | result |
+  |---|---|
+  | 09-17 11:05 PERIODIC | `columns_changed: {"Main Factory Tariff": 5}` -- the 5 blank rows, 1 PATCH |
+  | 09-17 11:05 ONE_TIME (`force_refresh_duty=true`) | `{HTS: 3, Duty US: 3}` -- the forced corrections |
+  | 09-17 21:05, 09-18 01:05 | `updates=0, patch_calls=0, noops=60` -- steady state |
+  | 09-18 03:05 | a NEW Factory-1 slot wrote all 5 of its columns, incl. `"Factory 1 - Tariff"` |
+  The last row matters most: it exercises the ` - ` naming on a non-Main slot.
+  Had the name been "tidied" to `"Factory 1 - Tariff rate"`, the allow-list
+  would have dropped it and the value would have silently never landed.
+  The two 11:05 runs were CONCURRENT (a scheduled run and a manual one); the
+  scheduled one won the race to the tariff write, and the manual one then saw
+  those cells already correct and no-oped them -- an unplanned but clean
+  demonstration of zero-diff-zero-write on a newly-enabled column.
+  `KTB-00031` (x2, pre-existing `0.1`) was never written at all.
 - Consequence for the old asymmetry: `tariff_rate` needed its own
   carry-forward (`p9a` Step 4b) purely because it had no WIP column to be
   re-read from. It now HAS one, so Step 4b is redundant for any slot whose
