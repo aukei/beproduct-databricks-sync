@@ -1,5 +1,22 @@
 # Phase 3: BeProduct Image → DTC "Style Image"
 
+
+> ### ⚠️ Correction for the `v2` branch (2026-09-15)
+>
+> **"Runs as its own independent job" is no longer true.** `phase3_images` was
+> folded INTO the main v2 DAG as **Stage 45**, immediately after `wip_push`, once
+> the shorter serverless runtime made that viable. The standalone
+> `BeProduct_DTC_sync_images` job is **paused and superseded**.
+>
+> It is still a second DTC write stream, and that is irreducible — image cells
+> are writable only through the multipart `/images` endpoint and DTC rejects a
+> `sheetData` write to `Style Image`. Running it adjacent to `wip_push` keeps the
+> two write windows back-to-back rather than scattered. In steady state it
+> uploads nothing and opens no window.
+>
+> Everything else below — the live per-request read, the two Delta inputs, the
+> type classification — is unchanged.
+
 **Status**: Implemented ✅ (core unit-tested + live-verified on UAT 2026-06-18)
 
 Phase 3 uploads each BeProduct front image into the matching DTC request's

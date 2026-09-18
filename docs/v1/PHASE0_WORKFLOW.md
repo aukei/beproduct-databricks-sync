@@ -3,6 +3,9 @@
 **Status:** Implemented ✅ — **wired into the daily DAG** (2026-08-31) as the
 FIRST step, gated by `run_phase0` (default `true`):
 `wait_cluster → gate_phase0 → phase0_pull → phase0_upsert → phase0_push`.
+(On `v2`: `phase0_pull → phase0_upsert → phase0_push` — `wait_cluster` is
+meaningless on serverless and `gate_phase0` was removed with every other
+condition task. The three phase-0 tasks themselves are unchanged.)
 Every Style/Material/Costing task waits on `phase0_push` (`run_if=ALL_DONE`,
 so disabling `run_phase0` only skips Phase 0, never deadlocks the DAG).
 

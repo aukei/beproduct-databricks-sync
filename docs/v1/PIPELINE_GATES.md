@@ -1,5 +1,24 @@
 # Pipeline Gates — Criteria to Fulfill for a Style/Row to Reach the Next Step
 
+
+> ### ⚠️ Corrections for the `v2` branch
+>
+> The per-row gates below are almost all still live — this doc remains the right
+> place to walk when a row unexpectedly does not appear downstream. Four
+> structural differences on `v2`:
+>
+> 1. **No condition tasks.** Every `gate_*` task is gone; each `run_*` flag is
+>    read inside its own notebook, which exits as a SUCCESS no-op.
+> 2. **Request scoping is wider.** Also excluded: `-SUPPLIER` requests, and any
+>    name containing `cancel` / `backup` / `archiv` / `delet`.
+> 3. **`delta_only` is OFF.** It is a style-level gate that runs before any field
+>    comparison, so drift from any other cause was permanently invisible to it.
+>    v2's zero-diff-zero-write invariant makes a full scan cost zero extra calls.
+> 4. **Duty gates are bypassable.** `force_refresh_duty=true` overrides the
+>    fill-blank-only rules in the Phase 9b section (see the note there).
+>
+> Current gates: [../PIPELINE.md](../PIPELINE.md), per-stage "Gates" subsections.
+
 This is a cross-cutting reference, not a per-phase workflow doc (see
 `PHASE0_WORKFLOW.md` .. `PHASE10_WORKFLOW.md` / `ARCHITECTURE.md` for those). It
 lists every **gate** in the pipeline — the exact criteria a style, colorway, or

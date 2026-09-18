@@ -1,5 +1,26 @@
 # BeProduct ⇄ DTC Sync — Pipeline Data-Flow Diagram
 
+
+> ### ⚠️ Superseded for the `v2` branch
+>
+> This is the **v1 DAG** and is accurate for `master`. It does not describe what
+> runs on `v2`, which differs structurally, not cosmetically:
+>
+> - **No condition tasks at all** — every `run_*` flag is read inside its own
+>   notebook, because Databricks propagates a condition task's `EXCLUDED` outcome
+>   to all dependents *ignoring* `run_if`.
+> - **No re-pull steps** (`repull_dtc`, `repull_dtc_bom`) — v2 plans against a
+>   live `get_sheet()` per request.
+> - **One write stage** (`wip_push`) instead of `phase1_push` + `fill_bom_data` +
+>   `push_duty_rates`.
+> - **`fill_bom_data` is gone**; BOM comes from the BeProduct `PageBomVariation`
+>   API via `pull_bom` (Stage 20b), not Lakebase.
+> - **`phase3_images` is inside this DAG** now (Stage 45), and there is a Stage 55
+>   (`push_customer_code`) with no v1 equivalent.
+> - **Two live jobs**, not four: the main DAG and `duty_compute`.
+>
+> Current DAG: [../PIPELINE.md](../PIPELINE.md) ("The DAG").
+
 > Databricks-centred view of all implemented sync pipelines. Updated
 > 2026-09-10 to reflect the current repo: the pipeline is **3 independent
 > Databricks jobs** (split 2026-09-03 — see AGENTS.md decisions log):

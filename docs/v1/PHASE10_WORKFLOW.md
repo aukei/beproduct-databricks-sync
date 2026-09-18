@@ -1,5 +1,27 @@
 # Phase 10: BOM enrichment from externally-processed techpack data
 
+
+> ### ⚠️ Corrections for the `v2` branch (2026-09-16/17)
+>
+> **The entire BOM source described below is retired on `v2`.** This file is the
+> v1 historical record and is accurate for `master`.
+>
+> 1. **Source.** v1 read externally-processed techpack data from Lakebase
+>    (`alb_tpm_uat.customer_teckpack_style_latest` / `_log`, `custom_fields`).
+>    v2 reads the **BeProduct `PageBomVariation` API** directly
+>    (`v2_pull_bom_segments` → `bom_segments`); the `alb_tpm_*` dependency is
+>    gone. `PageCBOM` is NOT used — BomVariation for both read and write.
+> 2. **Task and DAG.** `fill_bom_data` and both `repull_dtc*` tasks no longer
+>    exist. The enrichment decision tree moved into `sync/wip_plan.py` and is
+>    applied in the single Stage 40 write window; there is no re-pull, because
+>    v2 plans against a live `get_sheet()` instead of a Delta snapshot.
+> 3. **`Content`** is now write-once default-fill, not unconditional.
+> 4. **New reverse direction** (no v1 equivalent): Stage 55 pushes DTC
+>    `"Fabric Customer # or SAP #"` → the BeProduct **material master**'s
+>    `customer_material_code`. The BOM row only displays that code.
+>
+> Current behaviour: [../PIPELINE.md](../PIPELINE.md) (Stages 20b / 40 / 55).
+
 **Status:** Implemented ✅ — **wired into the daily DAG** (2026-09-02), gated
 by `run_phase10` (**flipped to `true` 2026-09-03** after extensive live
 validation; deployed job default is `true`). Placed BEFORE

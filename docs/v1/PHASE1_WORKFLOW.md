@@ -1,5 +1,23 @@
 # Phase 1: BeProduct → DTC Sync
 
+
+> ### ⚠️ Corrections for the `v2` branch (2026-09-15/16)
+>
+> Accurate for `master`. On `v2`:
+>
+> 1. **Request scoping is wider than the `(BACKUP` rule below.**
+>    `phase1.is_in_scope()` now also excludes any request whose name matches
+>    `-SUPPLIER` (DTC artifacts, never sync targets) or contains the word-stems
+>    `cancel` / `backup` / `archiv` / `delet` anywhere.
+> 2. **The push is one stage, not several.** Phases 1, 7, 10 and 9b's push half
+>    are composed by `sync/wip_plan.py` into ONE plan per request and written in
+>    a single Stage 40 window (≤2 back-to-back PATCH calls), because any DTC
+>    write moves the request's `last_read` and locks out browser sessions.
+> 3. **Zero-diff-zero-write is an asserted invariant**, not just an emergent
+>    property of per-field diffing: an empty plan issues no calls at all.
+>
+> Current behaviour: [../PIPELINE.md](../PIPELINE.md), [../SYNC_CONTRACT.md](../SYNC_CONTRACT.md).
+
 **Status**: Implemented ✅ (core unit-tested + live-verified on UAT)
 
 Phase 1 pushes **BeProduct-owned** style fields into the matching DTC request
