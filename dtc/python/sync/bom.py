@@ -895,12 +895,29 @@ def plan_style_enrichment(
         for target in fabric_targets:
             if segment_key(target) in claimed_target_keys:
                 continue  # already represented within THIS color -- no insert needed
-            for row in rows_for_color:
-                actions.append(RowAction(
-                    kind="insert",
-                    base_row=row,
-                    wip_fields=to_wip_fields(target),
-                ))
+            # EXACTLY ONE insert per unclaimed segment. This used to loop over
+            # `rows_for_color` and append one insert PER EXISTING ROW, so the
+            # number of copies scaled with how many rows the color already had
+            # rather than with how many segments were missing: a color holding
+            # 3 rows got 3 identical copies of each new segment.
+            #
+            # Live-confirmed 2026-09-18 on "KTB SS28 Collaborations" -- 16 of 60
+            # rows (27%) were redundant duplicates, always "Fabric" and never
+            # "Main Fabric" (the Main segment is claimed by the row Phase 1
+            # already created, so it never reached this loop). Each duplicate
+            # also drew its own Style Image upload, i.e. its own DTC write
+            # window. Repro: with 2 new segments, 1 existing row planned 2
+            # inserts (right) but 4 existing rows planned 8 (wrong).
+            #
+            # `base_row` only supplies the style/color identity fields to copy
+            # onto the new row, and every row in this group shares those by
+            # construction (they are grouped by `color_key`), so the first is
+            # as good as any -- there was never a reason to iterate.
+            actions.append(RowAction(
+                kind="insert",
+                base_row=rows_for_color[0],
+                wip_fields=to_wip_fields(target),
+            ))
 
     return actions
 

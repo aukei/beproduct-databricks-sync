@@ -406,11 +406,47 @@ check(updates_00025 == {
     "r4": {WIP_FIELD_MILL_FABRIC_ARTICLE: "LTCL6080"},
 }, "all 4 blank-article rows backfilled in place -- Main Fabric rows unambiguous "
    "(single target), Fabric/LINING rows disambiguated by Placement")
-check(len(inserts_00025) == 4 and all(
+check(len(inserts_00025) == 1 and all(
     a.wip_fields[WIP_FIELD_MILL_FABRIC_ARTICLE] == "fb01art" for a in inserts_00025),
-    "ONLY the genuinely-unrepresented 'fb01art'/HEM segment triggers inserts "
-    "(one per existing row) -- the LTCL6080/LINING segment is NOT also "
-    "re-inserted now that it's been correctly backfilled instead")
+    "ONLY the genuinely-unrepresented 'fb01art'/HEM segment triggers an insert, "
+    "and exactly ONE -- the LTCL6080/LINING segment is NOT also re-inserted now "
+    "that it's been correctly backfilled instead")
+# ^ This assertion used to demand FOUR inserts, "one per existing row", which
+# encoded the very bug it looked like it was guarding (fixed 2026-09-18). The
+# fixture is not hypothetical: it is the real KTB-00025 shape, and the live
+# sheet grew 'fb01art' x3 for exactly this reason. One missing segment is one
+# row, however many rows the color already has.
+
+print("  [11l-2] insert count scales with MISSING SEGMENTS, never with existing rows")
+# The regression that produced 16 redundant rows (27%) in "KTB SS28
+# Collaborations", live-diagnosed 2026-09-18. Always "Fabric", never "Main
+# Fabric" -- Phase 1 already created a row that claims the Main segment, so it
+# never reaches the insert loop. Each duplicate also drew its own Style Image
+# upload, i.e. its own DTC write window.
+CF_TWO_NEW = bom_table(
+    ["**MaterialCategory", "**SupplierRefNo", "**MaterialContent", "**Placement"],
+    [
+        ["Main Fabric", "WV-0063", "Content A", "BODICE"],
+        ["Fabric", "WV-0061", "Content B", "HEM"],
+        ["Fabric", "WV-0064", "Content C", "Lining"],
+    ],
+)
+for _n in (1, 2, 3, 6):
+    _existing = [{"row_id": "m", "fabric_group": "Main Fabric",
+                  "mill_fabric_article": "WV-0063", "placement": "BODICE",
+                  "content": "Content A", "color": "Black"}]
+    # Unrelated rows already present in the same color. They must NOT multiply
+    # the inserts; they are left untouched by the never-revert rule.
+    for _i in range(1, _n):
+        _existing.append({"row_id": f"o{_i}", "fabric_group": "Fabric",
+                          "mill_fabric_article": f"OTHER-{_i}", "placement": "X",
+                          "content": "Y", "color": "Black"})
+    _ins = [a for a in plan_style_enrichment(_existing, CF_TWO_NEW, color_key="color")
+            if a.kind == "insert"]
+    _arts = sorted(a.wip_fields[WIP_FIELD_MILL_FABRIC_ARTICLE] for a in _ins)
+    check(_arts == ["WV-0061", "WV-0064"],
+          f"{_n} existing row(s) in the color -> exactly 2 inserts, one per missing "
+          f"segment (got {len(_ins)}: {_arts})")
 
 print("  [11m] blank Mill Fabric Article # backfill -- ambiguous case (2+ candidates share Fabric Group AND Placement) -> no guess")
 CF_ambiguous = bom_table(
