@@ -366,6 +366,36 @@ this stays true by construction; verify it stays true after any change).
 
 ## Verified discoveries log (append-dated; do not delete)
 
+**Emptying or deleting a WIP request DESTROYS the DTC-owned costing inputs
+(2026-09-18):**
+- `Lineplan Ref #`, `Main Vendor (Sampling)` / `Vendor 1-3`,
+  `Main Factory (Sampling)` / `Factory 1-3` and the
+  `Factory Production Country for ...` columns are **DTC-OWNED**: they are not
+  in `wip_plan.allowed_patch_columns()` and this pipeline never writes them.
+  Clearing the sheet deletes them and NOTHING upstream can restore them.
+- Consequence, live: after the "KTB SS28 Collaborations" rebuild,
+  `dropped_no_lineplan_ref = 14` (every row) -> `joined_to_lineplan = 0` ->
+  **costing_chart empty**. The style/material side was perfect (material_no,
+  Content, Sub Class all present); only the human-owned columns were gone.
+- They ARE recoverable from Delta history: `dtc_wip_ktb VERSION AS OF <n>`
+  from before the rebuild still holds every value (v530 here). The refs
+  themselves survive too -- all 15 `WC-S80xx` still existed in
+  `dtc_lineplan_ktb`, so re-entering them re-joins cleanly.
+- **Country is a DTC lookup on the FACTORY field, not the Vendor** (owner
+  confirmation + verified in `dtc_xts_master_ktb`: FACTORY rows 24/24 carry a
+  country, SUPPLIER rows 0/34). `KTB-00030/Black` had vendor CENOVE (factory
+  record `IN`) and factory TALISM (`BD`) and resolved to **BD**. So a user
+  fills Lineplan Ref # + vendor + factory, and the country follows.
+- The two fields fail differently: a blank VENDOR drops the slot entirely
+  (`dropped_no_vendor_slot`); a blank FACTORY still yields a costing row but
+  leaves `production_country` blank, and `markets_needing_lookup()` returns
+  `[]` for a blank origin -- so duty/tariff stay empty forever with NO error.
+- Enter them on the **`Main Fabric` row**: Stage 30 collapses each style x
+  colour to one representative row, preferring Fabric Group == "Main Fabric"
+  (else lowest rowIndex). This used to be moot because the fan-out copied
+  vendor values across siblings; it is not, now that fan-outs are created in
+  the same run as the style row.
+
 **`delete_rows` silently deletes only ~11 rows per call, and RENUMBERS
 (2026-09-18):**
 - Clearing the 64-row "KTB SS28 Collaborations" sheet: every
