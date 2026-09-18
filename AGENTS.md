@@ -366,6 +366,22 @@ this stays true by construction; verify it stays true after any change).
 
 ## Verified discoveries log (append-dated; do not delete)
 
+**`delete_rows` silently deletes only ~11 rows per call, and RENUMBERS
+(2026-09-18):**
+- Clearing the 64-row "KTB SS28 Collaborations" sheet: every
+  `DELETE /v1/sheets/{s}/views/{v}/rows` call removed exactly **11** rows,
+  regardless of how many rowIndexes were sent, and returned **HTTP 204** each
+  time. The shortfall is completely silent.
+- Surviving rows are renumbered from 1 after each call, so a stale index list
+  no longer addresses the rows it was built from. Sending indexes in DESCENDING
+  order does not help.
+- Observed sequence, one pass each: `64 -> 53 -> 42 -> 31 -> 20 -> 9 -> 0`.
+- **To actually empty a sheet you must LOOP**: re-read, delete the rowIndexes
+  the sheet currently reports, repeat until it returns empty. Six passes for 64
+  rows. Documented on `DTCConnector.delete_rows`.
+- Nothing in the pipeline deletes rows today, so no shipped code is affected --
+  but any future cleanup/orphan-removal path must not assume one call is enough.
+
 **NT Orbit is NOT fully deterministic -- identical request, different HTS
 (2026-09-17):**
 - The persistent cache's stated premise is "same input -> same output, so cache

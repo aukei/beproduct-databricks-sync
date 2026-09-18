@@ -527,6 +527,18 @@ class DTCConnector:
         only have rowIds should resolve them to rowIndex first (e.g. from the
         current sheet data).
 
+        **It does NOT delete everything you ask for.** Live-measured 2026-09-18
+        clearing a 64-row sheet: every call removed exactly 11 rows, whatever
+        the batch size, and surviving rows were RENUMBERED from 1 each time --
+        so a single pass of [1..64] left 53 rows behind, and the indexes in a
+        stale list no longer point at the rows they did when it was built.
+        HTTP 204 is returned either way, so the shortfall is silent.
+
+        Callers that need a sheet actually emptied must LOOP: re-read the sheet,
+        delete the rowIndexes it currently reports, repeat until it comes back
+        empty (64 -> 53 -> 42 -> 31 -> 20 -> 9 -> 0, six passes). Passing
+        descending indexes does not avoid it.
+
         Args:
             sheet_id: DTC sheet ID
             view_id: DTC view ID
