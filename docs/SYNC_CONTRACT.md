@@ -35,7 +35,7 @@ code constants below, then the tests. Companion SSOTs:
 | **Plan composition (v2)** | `compute_request_plan()` | `dtc/python/sync/wip_plan.py` |
 | **Canonical allow-list (derived)** | `allowed_patch_columns()` | `dtc/python/sync/wip_plan.py` |
 | Duty value columns | `DUTY_VALUE_FIELDS` | `dtc/python/sync/duty.py` |
-| Staging denormalization | `FIELD_MAPPING` + staging `select` | `beproduct/v2_build_wip_staging.py` *(NEW)* |
+| Staging denormalization | `FIELD_MAPPING` + staging `select` | `beproduct/p1p7_beproduct_to_dtc_transform.py` |
 
 Then update the tests: `test_phase1.py`, `test_phase2.py`, `test_phase3.py`,
 `test_samples.py`, `test_bom.py`, `test_duty.py`, and `test_wip_plan.py` *(NEW)*.

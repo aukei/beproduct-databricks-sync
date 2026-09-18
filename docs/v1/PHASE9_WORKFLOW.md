@@ -1,5 +1,27 @@
 # Phase 9: LinePlan + Costing Chart (9a) → NT Orbit Duty/HTS/Tariff (9b)
 
+
+> ### ⚠️ Corrections for the `v2` branch (2026-09-17/18)
+>
+> This file is the **v1 historical record** and is accurate for `master`, where
+> `p9a_build_costing_chart.py` still contains Step 4b. Three statements below are
+> no longer true of the notebook as it runs on `v2`:
+>
+> 1. **"Tariff Rate has no live WIP column."** It does — all four slots, verified
+>    against the view definition: `"Main Factory Tariff"`, `"Factory 1 - Tariff"`,
+>    `"Factory 2 - Tariff"`, `"Factory 3 - Tariff"` (no `rate` suffix; ` - ` for
+>    numbered slots). `WIP_TARIFF_COLS_LIVE` was **deleted**, not flipped; tariff
+>    is written unconditionally.
+> 2. **Step 4b (the `tariff_rate` carry-forward) is REMOVED.** Step 4 now reads
+>    tariff from WIP like `hts_code`/`duty_rate_*`, so the carry-forward — and its
+>    null-safe-join fix described further down — no longer exist on `v2`.
+> 3. **"Write-once" is no longer absolute.** `force_refresh_duty=true` re-queries
+>    every market and overwrites. Without it, an outdated duty value can never be
+>    corrected at all — the fill-blank rule also makes `cache_ttl_days` unreachable
+>    for a populated row.
+>
+> Current behaviour: [../PIPELINE.md](../PIPELINE.md) (Stage 30 + `duty_compute`).
+
 **Status:** Implemented ✅ — both sub-phases live in the deployed DAG,
 `run_phase9a=true` / `run_phase9b=true`.
 
@@ -88,7 +110,9 @@ required in the key because Phase 10 can produce multiple physical WIP rows
 per style×color (Main Fabric + Fabric-segment duplicates) that would
 otherwise collide.
 
-**`tariff_rate` carry-forward** (Step 4b, added 2026-09-07): since Step 4
+**`tariff_rate` carry-forward** (Step 4b, added 2026-09-07; **REMOVED on `v2`
+2026-09-17** — Step 4 now reads tariff from its live WIP columns like the other
+duty fields, so the carry-forward has nothing left to do): since Step 4
 always resets `tariff_rate` to `NULL` on every full-table overwrite (no live
 WIP fallback exists for it yet, unlike `hts_code`/`duty_rate_*`), the
 existing table's own prior `tariff_rate` (keyed by `COSTING_KEY`) is
@@ -201,6 +225,12 @@ computed tariff value is pushed nowhere — it stays `costing_chart`-only;
 the push step logs this as a "skipped" reason rather than silently dropping
 it. Flip that flag once DTC adds the columns; no other code change needed.
 
+> **Superseded 2026-09-17.** The columns exist for all four slots
+> (`"Main Factory Tariff"`, `"Factory 1 - Tariff"`, …). `WIP_TARIFF_COLS_LIVE`
+> was deleted and tariff is now written unconditionally, overwriting whatever
+> DTC holds. Nothing is reported as "skipped" any more.
+> Also: "write-once" above is no longer absolute — see `force_refresh_duty`.
+
 ### Critical: `COSTING_KEY` joins/MERGE must use NULL-safe equality
 
 **Live-confirmed real bug, fixed 2026-09-10**: `lf_style_no` (and in
@@ -213,7 +243,9 @@ own counterpart, no error, no log line. This affected BOTH current
 Step 4 `MERGE` (fixed with `<=>`, Spark's null-safe equality operator) and
 `p9a_build_costing_chart.py`'s Step 4b tariff carry-forward join (fixed
 with an explicit `.eqNullSafe()` condition, since the `on=[list]` shorthand
-compiles to the same non-null-safe equality). `p9b2_push_duty_to_wip.py`'s
+compiles to the same non-null-safe equality; **that join no longer exists on
+`v2` — Step 4b was removed 2026-09-17 — but the `<=>` fix in
+`p9b1_compute_duty_rates.py` and the underlying warning both still stand**). `p9b2_push_duty_to_wip.py`'s
 own WIP-row lookup is unaffected — it's a plain Python dict keyed on a
 tuple, where `None == None` is `True` (Python semantics differ from SQL).
 See the comment on `duty.COSTING_KEY` itself for the durable warning.
@@ -223,7 +255,8 @@ See the comment on `duty.COSTING_KEY` itself for the durable warning.
 `push_duty_rates` (main job) and `compute_duty_rates` (`duty_compute` job)
 run on independent schedules with no explicit ordering guarantee between
 them. Since every main-job run's OWN `build_costing_chart` wipes
-`costing_chart` (except the `tariff_rate` carry-forward above) before
+`costing_chart` (on `v2`, with no `tariff_rate` carry-forward exception —
+Step 4b is gone; all five duty fields now survive via the WIP fallback) before
 `push_duty_rates` runs immediately after in the SAME run, a value
 `duty_compute` fills in BETWEEN two main-job runs can only survive to be
 pushed if `duty_compute` happens to run in the exact window between a

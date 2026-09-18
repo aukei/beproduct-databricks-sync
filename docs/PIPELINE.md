@@ -424,9 +424,12 @@ error — this is the most common source of "why isn't my style in `costing_char
    four → exactly two rows, transposed.
 
 *Duty back-fill, in order:*
-8. **Carry-forward** — the table's own prior `tariff_rate` (keyed by
-   `COSTING_KEY`) is `COALESCE`d back in, since a rebuild always resets it to
-   `NULL` and no live WIP fallback column exists.
+8. **WIP fallback** — all five duty fields (`hts_code`, `duty_rate_us|ca|mx`,
+   `tariff_rate`) are re-read from the live DTC WIP row's own per-slot columns,
+   which is how a value survives this table being fully overwritten every run.
+   `tariff_rate` joined this on **2026-09-17**, when its DTC columns went live;
+   before that it was reset to `NULL` and restored by a separate Step 4b
+   carry-forward keyed on `COSTING_KEY`, now **removed** as redundant.
 9. **Cache fill** — every duty field is filled directly from
    `nt_orbit_duty_cache`, read-only, zero API calls. The cache is keyed purely on
    `(product_description, origin_country, import_country)` with no style/color/
@@ -638,16 +641,18 @@ at least every ~90 days.
 **Gates — which markets need a call** (`markets_needing_lookup()`):
 1. `production_country` non-blank, else zero lookups for the row.
 2. Each blank `duty_rate_us|ca|mx` adds its market.
-3. `US` is added **even if `duty_rate_us` is filled** when `tariff_rate` is blank
-   — `tariff_rate` has no WIP fallback and always resets on rebuild, so keying
-   solely on `duty_rate_us` would mean it is never recomputed once filled.
+3. `US` is added **even if `duty_rate_us` is filled** when `tariff_rate` is blank.
+   The original reason (tariff had no WIP fallback, so it reset on every rebuild)
+   went away on 2026-09-17, but the rule is still correct and now rarely fires.
 4. If nothing above triggered a lookup but `hts_code` is blank, one `US` lookup is
    forced as a backfill.
 5. **Cache short-circuit** — skipped entirely on a `nt_orbit_duty_cache` hit
    younger than `cache_ttl_days` (default 180; tariff policy does change). A
    missing `looked_up_at` is always treated as stale.
 
-Values are written **write-once** from the response's "General Duty" detailed_line
+Values are written **write-once** (unless `force_refresh_duty=true` — see below,
+and note that write-once is also what makes `cache_ttl_days` unreachable for an
+already-populated row) from the response's "General Duty" detailed_line
 (`duty_rate_xx`) — *not* `data.duty_rate`, which also folds in tariff and fees —
 and `tariff_rate` from the sum of other `type="duty"` lines, only ever from a US
 call. Calls are serial by default (`orbit_parallel_calls=false`); each takes ~30 s

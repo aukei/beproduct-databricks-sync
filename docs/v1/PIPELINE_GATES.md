@@ -268,6 +268,11 @@ existing rows' prior `tariff_rate` (keyed by `duty.COSTING_KEY`) is
 `COALESCE`d back in so a full `costing_chart` rebuild doesn't silently wipe
 previously-computed NT Orbit tariff values.
 
+> **REMOVED on `v2`, 2026-09-17.** DTC's tariff columns went live for all four
+> slots, so Step 4 now reads `tariff_rate` from WIP exactly like
+> `hts_code`/`duty_rate_*` and this step had nothing left to preserve. Accurate
+> as written for `master`, where it still exists.
+
 ---
 
 ## Phase 9b — NT Orbit duty/HTS lookup and WIP push
@@ -275,6 +280,14 @@ previously-computed NT Orbit tariff values.
 Governs which `costing_chart` rows get a fresh NT Orbit API call, and which
 computed values actually get pushed back to DTC. Code:
 `dtc/python/sync/duty.py`, `dtc/notebooks/p9b2_push_duty_to_wip.py`.
+
+> **`force_refresh_duty` (added 2026-09-17, `v2`).** Every gate in this section
+> is fill-blank-only, which means an already-populated but OUTDATED duty value is
+> invisible to all of them and can never be corrected. It also makes
+> `cache_ttl_days` unreachable in practice: a filled market is never queried, so
+> its cache entry's age is never examined. With `force_refresh_duty=true` gates
+> 2–4 below are bypassed entirely — every market is re-queried live and the
+> answer overwrites.
 
 **Which markets need a lookup (`markets_needing_lookup()`):**
 1. `production_country` must be non-blank — otherwise **zero** lookups for

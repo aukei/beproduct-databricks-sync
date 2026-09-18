@@ -50,11 +50,11 @@ beproduct/                            # BeProduct-side notebooks (also host the 
 ├── 00_init_style_app_registry.py     # Cache folder application IDs → beproduct_style_app_registry
 ├── p1p7_beproduct_style_sync.py      # BeProduct API → ktb_styles (+ sample-app status)
 ├── p5utl_beproduct_master_data_sync.py  # Admin: pull/push-back MasterData (dropdowns) + Directory
-├── v2_build_wip_staging.py           # v2 Stage 20: ktb_styles × BOM → staging (style×color×material)
+├── p1p7_beproduct_to_dtc_transform.py  # v2 Stage 20: ktb_styles × BOM → staging (style×color×material)
 ├── p1_dtc_request_manager.py         # v2 Stage 25: resolve / CREATE / SHARE requests → dtc_request_mapping
-├── p3_beproduct_to_dtc_images.py     # images job: front image → DTC "Style Image"
+├── p3_beproduct_to_dtc_images.py     # v2 Stage 45: front image → DTC "Style Image" (folded into the main DAG 2026-09-15)
+├── p0_xts_master_to_directory_upsert.py  # v2 Stage 00: XTS Master → BeProduct Directory upsert
 ├── p1utl_dtc_share_requests.py       # Idempotent request-sharing backfill
-├── p1p7_beproduct_to_dtc_transform.py  # v1 transform — superseded by v2_build_wip_staging
 ├── p1p7_beproduct_to_dtc_push.py     # v1 Phase 1 push — superseded by v2_wip_push
 ├── wait_cluster.py                   # v1 cold-start sentinel — unused on serverless
 └── orchestrate_sync.py               # RETIRED — single-notebook fallback only
@@ -66,12 +66,13 @@ dtc/
 │   ├── p0_pull_xts_master_to_delta.py   # v2 Stage 00: DTC XTS Master → Delta
 │   ├── p1_pull_masters_to_delta.py   # v2 Stage 10: KTB WIP sheets → dtc_wip_ktb + registry
 │   ├── p9a_pull_lineplan_to_delta.py # v2 Stage 10: KTB LinePlan → dtc_lineplan_ktb
-│   ├── v2_build_costing_chart.py     # v2 Stage 30: staging × WIP × LinePlan → costing_chart
+│   ├── p9a_build_costing_chart.py    # v2 Stage 30 (wip_effective_mode=intent): staging × WIP × LinePlan → costing_chart
+│   ├── v2_pull_bom_segments.py       # v2 Stage 20b: BeProduct PageBomVariation → bom_segments
 │   ├── v2_wip_push.py                # v2 Stage 40: THE single DTC write window
+│   ├── v2_push_customer_code.py      # v2 Stage 55: DTC customer code → BeProduct material master
 │   ├── p2_push_dtc_to_beproduct.py   # v2 Stage 50: DTC → BeProduct pushback
 │   ├── p9b1_compute_duty_rates.py    # duty_compute job: NT Orbit → costing_chart only
-│   ├── p9a_build_costing_chart.py    # v1 — superseded by v2_build_costing_chart
-│   ├── p10_pull_bom_and_enrich.py    # v1 Phase 10 — folded into v2_build_wip_staging + v2_wip_push
+│   ├── p10_pull_bom_and_enrich.py    # v1 Phase 10 — folded into v2_pull_bom_segments + v2_wip_push
 │   ├── p9b2_push_duty_to_wip.py      # v1 Phase 9b push — folded into v2_wip_push
 │   ├── p9b_fill_duty_rates.py        # SUPERSEDED 2026-09-03 — manual-fallback artifact only
 │   └── p8a_pull_fabric_to_delta.py   # RETIRED 2026-09-01 (MaterialLib) — manual fallback only
@@ -115,10 +116,13 @@ The pipeline runs as **independent Databricks jobs**, all defined in
 
 | Job | Contents | Compute |
 |---|---|---|
-| `BeProduct_DTC_sync_v2` | The main DAG — Stages 00–50 | serverless |
-| `BeProduct_DTC_sync_duty_compute` (1026599988408090) | NT Orbit lookups → `costing_chart` only; zero DTC contact | classic |
-| `BeProduct_DTC_sync_images` (847087837807970) | Style Image upload | classic |
-| `BeProduct_DTC_sync_dag` (294837488757511) | **v1 main job** — kept running until v2 cutover, then paused | classic + pool |
+| `BeProduct_DTC_sync_v2` (367710575109755) | The main DAG — Stages 00–55, **including `phase3_images`** (folded in 2026-09-15) | serverless |
+| `BeProduct_DTC_sync_duty_compute` (1026599988408090) | NT Orbit lookups → `costing_chart` only; zero DTC contact | serverless (moved off classic 2026-09-15) |
+| `BeProduct_DTC_sync_images` (847087837807970) | Style Image upload — **superseded and PAUSED**; its task now runs inside the v2 DAG | classic |
+| `BeProduct_DTC_sync_dag` (294837488757511) | **v1 main job** — PAUSED after the v2 cutover; kept for rollback | classic + pool |
+
+**Two live jobs, not four.** The instance pool has been scaled to 0 VMs — only
+the two paused rollback jobs still reference it.
 
 > **The task graph, every stage and every gate live in [PIPELINE.md](PIPELINE.md).**
 > This section covers only the architectural shape; that document is
@@ -295,8 +299,8 @@ Details + BeProduct API/SDK usage: `BEPRODUCT_GUIDE.md`.
 | `dtc_lineplan_registry` | 1 row / LinePlan request | Phase 9a registry. |
 | `dtc_xts_master_ktb` | 1 row / kept XTS sheet row | Phase 0. `partner_type` (SUPPLIER/FACTORY/MILL), `name`, `directory_id`, `country`, always-NULL optional cols (no address/phone/etc. exist in XTS Master), `request_id`, `request_reference`, `view_name`, `data_json`. Brand-config rows (`Type="Brand"`/`"Fabric Brand"`) already filtered out at pull time. |
 | `dtc_xts_master_registry` | 1 row / XTS Master request | Phase 0 registry: `partner_type`, `request_id`, `request_reference`, `sheet_id`, `view_id`, `view_name`, `row_count`, `last_extracted`, `msgs`. |
-| `costing_chart` | 1 row / (style × color × vendor slot) | Phase 9a output. Key: `[customer, bp_style_no, color_name, lineplan_ref, supplier_type, supplier, factory]`. `supplier_type` = `"Main"\|"1"\|"2"\|"3"` GENERATED from which WIP vendor/factory column-pair the row came from (per original spec "Supplier Type - Generated from Master Chart data"; corrected 2026-09-01 — this is NOT LinePlan's "INTERNAL/ SOURCED", which does not flow into this table at all). `hts_code`/`duty_rate_*`/`tariff_rate` filled by Phase 9b (NT Orbit). Full overwrite each Phase 9a run — Phase 9b re-fills from `nt_orbit_duty_cache` after each rebuild. **Has real downstream readers (the `duty_compute` job MERGEs it; `wip_push` reads it).** Routine runs write it directly; to build a comparison copy without replacing it, override `costing_chart_table_name`. Recovery for a bad build is Delta time travel (`RESTORE TABLE … VERSION AS OF <n>`), since the table is fully overwritten every run regardless. |
-| `nt_orbit_duty_cache` | 1 row / (product_description, origin_country, import_country) | Phase 9b PERSISTENT cross-run cache (never wiped by Phase 9a) — avoids re-paying the ~30s/call NT Orbit cost every daily run. Stale after `cache_ttl_days` (default 180). |
+| `costing_chart` | 1 row / (style × color × vendor slot) | Phase 9a output. Key: `[customer, bp_style_no, color_name, lineplan_ref, supplier_type, supplier, factory]`. `supplier_type` = `"Main"\|"1"\|"2"\|"3"` GENERATED from which WIP vendor/factory column-pair the row came from (per original spec "Supplier Type - Generated from Master Chart data"; corrected 2026-09-01 — this is NOT LinePlan's "INTERNAL/ SOURCED", which does not flow into this table at all). `hts_code`/`duty_rate_*`/`tariff_rate` filled by `duty_compute` (NT Orbit). Full overwrite each Stage 30 run; the values survive because Stage 30 re-reads all five from the **live DTC WIP columns** and then refills any blank from `nt_orbit_duty_cache`. `tariff_rate` joined that WIP fallback on 2026-09-17 when its DTC columns went live, which is what made the former Step 4b carry-forward redundant. **All five are fill-blank-only**, so an already-populated but outdated value is never corrected — that is what `force_refresh_duty` exists for (PIPELINE.md, companion jobs). **Has real downstream readers (the `duty_compute` job MERGEs it; `wip_push` reads it).** Routine runs write it directly; to build a comparison copy without replacing it, override `costing_chart_table_name`. Recovery for a bad build is Delta time travel (`RESTORE TABLE … VERSION AS OF <n>`), since the table is fully overwritten every run regardless. |
+| `nt_orbit_duty_cache` | 1 row / (product_description, origin_country, import_country) | `duty_compute` PERSISTENT cross-run cache (never wiped by Stage 30) — avoids re-paying the ~30s/call NT Orbit cost every run. Nominally stale after `cache_ttl_days` (default 180), but **that TTL is unreachable for a populated row**: a market is only queried when its cell is blank, so a filled row's entry is never examined (live-confirmed 2026-09-17). `force_refresh_duty=true` is the only thing that re-queries it. **The key is the rendered `product_description`**, so anything that changes that text (the Phase 10 BOM rewrite changed `fabric_content`, and `sub_class` backfill changed another part) silently re-keys the whole cache. NT Orbit is also **not fully deterministic** — an identical request has returned a different HTS ~2h apart — so "same input → same output" is not a reliable premise. |
 | `nt_orbit_oauth_state` | 1 row (latest) | Phase 9b — persisted rotated Entra `refresh_token` (`dbutils.secrets` is read-only, so this table is the actual live credential store after the first seed). |
 
 - **DTC operation keys:** `row_id` → UPDATE; `row_index` → INSERT/DELETE.

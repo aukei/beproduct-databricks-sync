@@ -388,8 +388,19 @@ wip = wip_raw.select(
     jcol("data_json", "Factory 1 - Duty Rate (MX)",   "duty_mx_1"),
     jcol("data_json", "Factory 2 - Duty Rate (MX)",   "duty_mx_2"),
     jcol("data_json", "Factory 3 - Duty Rate (MX)",   "duty_mx_3"),
-    # Tariff Rate — NOT in WIP view; NULL placeholder for Phase 9b
-    # "Main Factory Tariff rate", "Factory 1 - Tariff rate" etc. do not exist yet
+    # Tariff per slot. LIVE since 2026-09-17 -- reading these is what made
+    # Step 4b (the tariff-only carry-forward) redundant and removable: tariff
+    # now survives a rebuild exactly the way hts_code/duty_rate_* do, by being
+    # re-read from the WIP row this pipeline itself wrote.
+    #
+    # Sourced from `duty.WIP_TARIFF_COL`, NOT retyped, because these names are
+    # NOT symmetric with the HTS/duty ones ("Main Factory Tariff",
+    # "Factory 1 - Tariff" -- no "rate" suffix, " - " for numbered slots) and a
+    # name that does not exist in the view reads back as NULL forever, silently.
+    jcol("data_json", duty.WIP_TARIFF_COL["Main"], "tariff_main"),
+    jcol("data_json", duty.WIP_TARIFF_COL["1"],    "tariff_1"),
+    jcol("data_json", duty.WIP_TARIFF_COL["2"],    "tariff_2"),
+    jcol("data_json", duty.WIP_TARIFF_COL["3"],    "tariff_3"),
 )
 
 print(f"  WIP columns extracted: {len(wip.columns)}")
@@ -704,7 +715,7 @@ def _slot_df(
     df: DataFrame,
     slot_name: str,
     vendor_col: str, factory_col: str, country_col: str,
-    hts_col: str, du_col: str, dc_col: str, dm_col: str,
+    hts_col: str, du_col: str, dc_col: str, dm_col: str, tf_col: str,
 ) -> DataFrame:
     """Build a single-slot DataFrame and rename to canonical column names.
 
@@ -725,7 +736,11 @@ def _slot_df(
         .withColumn("duty_rate_us",      F.col(du_col))
         .withColumn("duty_rate_ca",      F.col(dc_col))
         .withColumn("duty_rate_mx",      F.col(dm_col))
-        .withColumn("tariff_rate",       F.lit(None).cast(StringType()))  # Phase 9b
+        # Was `lit(None)` until 2026-09-17, which is exactly why tariff needed
+        # its own carry-forward (the old Step 4b): it was the one duty field
+        # with no WIP column to be re-read from, so every rebuild erased it.
+        # All four slot columns are live now, so it behaves like the others.
+        .withColumn("tariff_rate",       F.col(tf_col))
         .withColumn("updated_at",        F.lit(now.isoformat()).cast("timestamp"))
         # Drop rows where vendor is blank — no vendor = no costing row
         .filter(F.col("supplier").isNotNull() & (F.trim(F.col("supplier")) != ""))
@@ -740,16 +755,20 @@ def _slot_df(
 slot_dfs = [
     _slot_df(joined, "Main",
              "vendor_main",  "factory_main",  "prod_country_main",
-             "hts_main",     "duty_us_main",  "duty_ca_main",  "duty_mx_main"),
+             "hts_main",     "duty_us_main",  "duty_ca_main",  "duty_mx_main",
+             "tariff_main"),
     _slot_df(joined, "1",
              "vendor_1",     "factory_1",     "prod_country_1",
-             "hts_1",        "duty_us_1",     "duty_ca_1",     "duty_mx_1"),
+             "hts_1",        "duty_us_1",     "duty_ca_1",     "duty_mx_1",
+             "tariff_1"),
     _slot_df(joined, "2",
              "vendor_2",     "factory_2",     "prod_country_2",
-             "hts_2",        "duty_us_2",     "duty_ca_2",     "duty_mx_2"),
+             "hts_2",        "duty_us_2",     "duty_ca_2",     "duty_mx_2",
+             "tariff_2"),
     _slot_df(joined, "3",
              "vendor_3",     "factory_3",     "prod_country_3",
-             "hts_3",        "duty_us_3",     "duty_ca_3",     "duty_mx_3"),
+             "hts_3",        "duty_us_3",     "duty_ca_3",     "duty_mx_3",
+             "tariff_3"),
 ]
 
 # NOTE: must be a lambda calling the BOUND method, not `DataFrame.unionByName`
@@ -780,62 +799,46 @@ slot_counts = {r["supplier_type"]: int(r["count"]) for r in
 
 print(f"  Costing chart rows after transpose: {total_costing}")
 print(f"  Joined rows with NO vendor slot at all (dropped here): {rows_with_no_slot}")
+
+# Duty fields as READ BACK FROM WIP, before Step 4c touches anything. Reported
+# separately because Step 4c refills a blank one from the NT Orbit cache, which
+# would MASK a broken read here -- a mistyped tariff column name would surface
+# as "0 from WIP" but the final table would still look correct. Tariff is the
+# one to watch: its column names are not symmetric with the others
+# ("Main Factory Tariff", "Factory 1 - Tariff") and it only started being read
+# on 2026-09-17, when the former Step 4b carry-forward was removed.
+_wip_fallback = {
+    c: costing_chart.filter(F.col(c).isNotNull() & (F.trim(F.col(c)) != "")).count()
+    for c in ("hts_code", "duty_rate_us", "duty_rate_ca", "duty_rate_mx", "tariff_rate")
+}
+print(f"  Non-blank straight from the WIP fallback (pre-cache): {_wip_fallback}")
+if total_costing and not _wip_fallback["tariff_rate"] and _wip_fallback["hts_code"]:
+    print("  ⚠️  tariff_rate is blank on EVERY row while hts_code is not. Either "
+          "nothing has been pushed yet, or the tariff column names in "
+          "duty.WIP_TARIFF_COL no longer match the live view -- check the view "
+          "definition, NOT the Delta snapshot (empty columns do not appear there).")
 print(f"  Breakdown by slot:")
 costing_chart.groupBy("supplier_type").count().orderBy("supplier_type").show()
 
 # COMMAND ----------
 
-# ── Step 4b: Carry forward tariff_rate from the table's OWN prior state ──────
-# Live-discovered 2026-09-07: `hts_code`/`duty_rate_us/ca/mx` survive a full
-# rebuild via the WIP "fallback" (Step 4 above re-reads them from the live
-# WIP row's own per-slot columns, which persist across rebuilds once
-# `push_duty_rates` has written them there once). `tariff_rate` has NO such
-# fallback -- no live WIP column exists for it yet (`duty.WIP_TARIFF_COLS_
-# LIVE = False`) -- so every Step 4 slot-build hardcodes it to `NULL`
-# (unconditionally, regardless of any prior value). Since `build_costing_
-# chart` runs on a REGULAR SCHEDULE (3x/day, same job as everything else),
-# this wiped out every NT Orbit-computed `tariff_rate` within hours of it
-# ever being filled by the separate `duty_compute` job -- confirmed live: a
-# routine scheduled run erased a `tariff_rate` that had just been correctly
-# computed and pushed minutes earlier. Fixed the same way `hts_code`/
-# `duty_rate_*` are protected: read the EXISTING `costing_chart` table's OWN
-# prior `tariff_rate` (keyed by `duty.COSTING_KEY`, the same key `duty_
-# compute`'s MERGE uses) and carry it forward via `COALESCE(new, old)` --
-# `new` here is always NULL from Step 4, so this is effectively "keep
-# whatever was already there", exactly mirroring the WIP-fallback semantics
-# for the other duty fields, without requiring a live WIP column.
-print("\nStep 4b: Carrying forward tariff_rate from the table's own prior state …")
-try:
-    _key_cols = list(duty.COSTING_KEY)
-    # NULL-SAFE join (fixed 2026-09-10, live-confirmed real bug) -- PySpark's
-    # `.join(other, on=[col_list])` shorthand generates a standard (NOT
-    # null-safe) equi-join under the hood: `NULL = NULL` is NULL, never TRUE,
-    # so any row with a genuinely-NULL key column (e.g. `lf_style_no`, which
-    # is blank for some real test styles) NEVER matches its own prior row --
-    # `_prior_tariff_rate` silently comes back NULL for it every single
-    # rebuild, identical in root cause to the sibling bug just fixed in
-    # p9b1_compute_duty_rates.py's Step 4 MERGE (same `duty.COSTING_KEY`).
-    # Prefixing + `eqNullSafe()` (Spark's `<=>`) avoids both the NULL-match
-    # gotcha and a column-name collision from using an explicit join
-    # condition instead of the `on=[list]` shorthand.
-    prior_tariff = (spark.table(output_table)
-        .select(*[F.col(c).alias(f"_pk_{c}") for c in _key_cols],
-                 F.col("tariff_rate").alias("_prior_tariff_rate"))
-        .dropDuplicates([f"_pk_{c}" for c in _key_cols]))
-    _join_cond = None
-    for c in _key_cols:
-        _cond = costing_chart[c].eqNullSafe(prior_tariff[f"_pk_{c}"])
-        _join_cond = _cond if _join_cond is None else (_join_cond & _cond)
-    costing_chart = (costing_chart
-        .join(prior_tariff, on=_join_cond, how="left")
-        .withColumn("tariff_rate", F.coalesce(F.col("tariff_rate"), F.col("_prior_tariff_rate")))
-        .drop(*([f"_pk_{c}" for c in _key_cols] + ["_prior_tariff_rate"])))
-    carried = costing_chart.filter(F.col("tariff_rate").isNotNull()).count()
-    print(f"  tariff_rate carried forward for {carried} row(s) (prior table existed)")
-except Exception as e:
-    print(f"  ⚠️  No prior {output_table} to carry tariff_rate forward from "
-          f"(first-ever run, or read failed: {e}) -- tariff_rate stays NULL, "
-          f"will be filled by the next duty_compute run.")
+# ── Step 4b REMOVED 2026-09-17 ──────────────────────────────────────────────
+# It carried `tariff_rate` forward from this table's OWN prior version, keyed
+# on duty.COSTING_KEY. It existed for exactly one reason: tariff was the only
+# duty field with no live WIP column, so Step 4 hardcoded it to NULL and every
+# scheduled rebuild erased whatever duty_compute had just computed
+# (live-confirmed 2026-09-07).
+#
+# All four slot tariff columns went live on 2026-09-17, and Step 4 now reads
+# them like hts_code/duty_rate_*. Tariff therefore survives a rebuild through
+# the SAME mechanism as its siblings -- the WIP row this pipeline itself wrote
+# -- and a second, differently-keyed backstop would only add a way for the two
+# to disagree.
+#
+# The one case it covered that the WIP fallback does not: a row whose tariff
+# reached costing_chart but was NEVER pushed to WIP. That row now recomputes
+# from the cache in Step 4c, or from NT Orbit on the next duty_compute run --
+# self-healing, and identical to how hts_code/duty_rate_* have always behaved.
 
 # COMMAND ----------
 
@@ -843,13 +846,14 @@ except Exception as e:
 #             persistent NT Orbit cache -- independent of BOTH the WIP
 #             fallback AND costing_chart's own prior-run state (added
 #             2026-09-10, owner spec) ────────────────────────────────────────
-# Step 4b above only helps `tariff_rate`, and only when the EXACT same
-# `COSTING_KEY` survived from a prior `costing_chart` snapshot -- a
-# genuinely NEW row (e.g. a style reaching costing_chart for the first
-# time) has no "prior row" to carry forward from, even if the persistent
-# cache already has the answer for its exact (product_description,
-# origin_country, market) combination (e.g. because another style/color
-# with the identical description+origin was already looked up). The
+# Step 4's WIP fallback only helps a row this pipeline has ALREADY pushed
+# to DTC -- a genuinely NEW row (e.g. a style reaching costing_chart for
+# the first time) has blank WIP duty cells to read back, even when the
+# persistent cache already holds the answer for its exact
+# (product_description, origin_country, market) combination (e.g. because
+# another style/color with the identical description+origin was already
+# looked up). This step is what closes that gap. (It also subsumed the
+# former Step 4b, removed 2026-09-17 -- see above.) The
 # persistent `nt_orbit_duty_cache` table is the REAL source of truth for
 # "have we already computed this" -- it is keyed purely on
 # (product_description, origin_country_code, import_country_code), with NO
@@ -931,6 +935,17 @@ if _overwritten:
         print(f"      … and {len(_overwritten) - 40} more")
 costing_chart = spark.createDataFrame(_chart_rows, _chart_schema)
 
+# Counted from the same in-memory rows Step 4c just mutated, so this is the
+# final state of the table. Paired with `_wip_fallback` in the exit JSON, the
+# difference between the two is exactly what the cache contributed.
+_post_cache_fill = {
+    c: sum(1 for _r in _chart_rows if not duty.is_blank(_r.get(c)))
+    for c in ("hts_code", "duty_rate_us", "duty_rate_ca", "duty_rate_mx", "tariff_rate")
+}
+print(f"  Non-blank after the cache fill: {_post_cache_fill}")
+_from_cache_only = {c: _post_cache_fill[c] - _wip_fallback[c] for c in _post_cache_fill}
+print(f"  ...of which the cache supplied: {_from_cache_only}")
+
 # COMMAND ----------
 
 # ── Step 5: Write costing_chart (full overwrite) ──────────────────────────────
@@ -998,6 +1013,20 @@ _summary = {
     },
     "rows_by_vendor_slot": slot_counts,
     "costing_chart_rows": int(total_costing),
+    # Duty fields as read back from WIP (Step 4), BEFORE Step 4c's cache fill,
+    # and the same counts AFTER it. Both are needed to tell the two sources
+    # apart: Step 4c refills anything blank, so a broken WIP read produces a
+    # correct-looking final table. Watch `tariff_rate` in particular -- its
+    # column names are not symmetric with the others and it has only been read
+    # since 2026-09-17 (when the Step 4b carry-forward was removed).
+    #
+    # In the exit JSON, NOT just a print: serverless returns no notebook stdout
+    # to the Jobs API, so a printed diagnostic cannot be read back from a run
+    # and is useless for exactly the check it exists to support.
+    "duty_fields_non_blank": {
+        "from_wip_fallback": _wip_fallback,
+        "after_cache_fill": _post_cache_fill,
+    },
 }
 print("\n" + json.dumps(_summary, indent=2))
 dbutils.notebook.exit(json.dumps(_summary))

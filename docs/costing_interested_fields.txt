@@ -91,12 +91,12 @@ hts_code               | WIP JSON     | "Main Factory HTS Code" / "Factory [1-3]
 duty_rate_us           | WIP JSON     | "Main Factory Duty Rate (US)" / "Factory [1-3] - Duty Rate (US)"
 duty_rate_ca           | WIP JSON     | "Main Factory Duty Rate (CA)" / "Factory [1-3] - Duty Rate (CA)"
 duty_rate_mx           | WIP JSON     | "Main Factory Duty Rate (MX)" / "Factory [1-3] - Duty Rate (MX)"
-tariff_rate            | WIP JSON /   | Phase 9b: NT Orbit Duty Tools API (implemented -- see below).
-                       | carried fwd  | Reset to NULL by every Phase 9a rebuild, then Step 4b carries the
-                       |              | prior costing_chart value forward (COALESCE) so a rebuild doesn't
-                       |              | wipe an already-computed value; no live WIP column exists for it
-                       |              | yet (WIP_TARIFF_COLS_LIVE=False in sync/duty.py), so a fresh value
-                       |              | only ever lands here, not back in DTC WIP.
+tariff_rate            | WIP JSON     | "Main Factory Tariff" / "Factory [1-3] - Tariff"
+                       |              | REVISED 2026-09-17: read from WIP like its siblings above.
+                       |              | Previously NULL-on-rebuild + a Step 4b COALESCE carry-forward,
+                       |              | because no WIP column existed. All four went live, the
+                       |              | WIP_TARIFF_COLS_LIVE switch was DELETED (tariff is written
+                       |              | unconditionally, overwriting DTC), and Step 4b was removed.
 updated_at             | derived      | current_timestamp() at build time
 
 WIP HTS / Duty field names (exact DTC column names, confirmed 2026-07-17)
@@ -108,8 +108,20 @@ Ground rule #6 (lean sheetData PATCH bodies) --
   Factory 2 - HTS code            Factory 2 - Duty Rate (US/CA/MX)
   Factory 3 - HTS code            Factory 3 - Duty Rate (US/CA/MX)
 
-  Tariff Rate fields ("Main Factory Tariff rate", "Factory 1/2/3 - Tariff rate"):
-  NOT PRESENT in WIP_ITS_USE view as of 2026-07-17. tariff_rate = NULL placeholder.
+  Main Factory Tariff             Factory 1 - Tariff
+  Factory 2 - Tariff              Factory 3 - Tariff
+
+  ^ REVISED 2026-09-17, verified against the view definition (GET /v1/views/{id}
+    -> dynamicFields, 205 columns). These names are NOT symmetric with the HTS /
+    Duty ones above -- no "rate" suffix, and " - " on the numbered slots. The
+    earlier entry here ("Main Factory Tariff rate", "Factory 1/2/3 - Tariff
+    rate", NOT PRESENT as of 2026-07-17) was wrong on BOTH counts: the columns
+    exist, and none of those names do. Source them from duty.WIP_TARIFF_COL,
+    never by retyping -- a name absent from the view is dropped by wip_plan's
+    allow-list and the value silently never lands.
+    Check the VIEW DEFINITION, not the dtc_wip_* Delta snapshot: the snapshot
+    only materialises columns that are POPULATED in sheetData, so an empty
+    column looks like a missing one.
 
 LinePlan field names (exact DTC column names — all UPPERCASE, confirmed 2026-07-17)
 -------------------------------------------------------------------------------------
