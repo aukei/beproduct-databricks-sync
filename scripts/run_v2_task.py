@@ -12,7 +12,7 @@ therefore exits a JSON summary, and this script pretty-prints it.
 
 Usage
 -----
-    # BOM -> Delta (writes tpm_bom_segments; touches no DTC)
+    # BOM -> Delta (writes bom_segments; touches no DTC)
     python scripts/run_v2_task.py v2_pull_bom_segments
 
     # The write window, in DRY RUN (computes + logs the plan, issues no PATCH)
@@ -57,6 +57,7 @@ NOTEBOOK_DIRS = {
     "p9a_build_costing_chart": "DTC/notebooks",
     "v2_smoke_check": "DTC/notebooks",
     "v2_probe_write": "DTC/notebooks",
+    "v2_probe_material_code": "DTC/notebooks",
     "v2_set_dtc_cell": "DTC/notebooks",
     "v2_push_customer_code": "DTC/notebooks",
     "v2_inspect_requests": "DTC/notebooks",

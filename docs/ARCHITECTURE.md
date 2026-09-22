@@ -67,7 +67,7 @@ dtc/
 │   ├── p1_pull_masters_to_delta.py   # v2 Stage 10: KTB WIP sheets → dtc_wip_ktb + registry
 │   ├── p9a_pull_lineplan_to_delta.py # v2 Stage 10: KTB LinePlan → dtc_lineplan_ktb
 │   ├── p9a_build_costing_chart.py    # v2 Stage 30 (wip_effective_mode=intent): staging × WIP × LinePlan → costing_chart
-│   ├── v2_pull_bom_segments.py       # v2 Stage 20b: BeProduct PageBomVariation → bom_segments
+│   ├── v2_pull_bom_segments.py       # v2 Stage 20b: Lakebase techpack BOM → bom_segments
 │   ├── v2_wip_push.py                # v2 Stage 40: THE single DTC write window
 │   ├── v2_push_customer_code.py      # v2 Stage 55: DTC customer code → BeProduct material master
 │   ├── p2_push_dtc_to_beproduct.py   # v2 Stage 50: DTC → BeProduct pushback

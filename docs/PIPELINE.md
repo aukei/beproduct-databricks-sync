@@ -127,7 +127,7 @@ BeProduct_DTC_sync_duty_compute   compute_duty_rates   NT Orbit → nt_orbit_dut
 | 10 | `pull_master_dtc` | `p1_pull_masters_to_delta` | reused | `phase0_push` |
 | 10 | `pull_lineplan_dtc` | `p9a_pull_lineplan_to_delta` | reused | `phase0_push` |
 | 20 | `transform` | `p1p7_beproduct_to_dtc_transform` | reused | `bp_style_sync` |
-| 20b | `pull_bom` | `v2_pull_bom_segments` (BeProduct API) | **NEW** | `bp_style_sync` |
+| 20b | `pull_bom` | `v2_pull_bom_segments` (Lakebase techpack) | **NEW** | `bp_style_sync` |
 | 25 | `request_manager` | `p1_dtc_request_manager` | reused | `transform`, `pull_master_dtc` |
 | 30 | `build_costing` | `p9a_build_costing_chart` (`wip_effective_mode=intent`) | reused + Step 1a | `transform`, `pull_bom`, `pull_master_dtc`, `pull_lineplan_dtc` |
 | 40 | `wip_push` | `v2_wip_push` | **NEW** | `request_manager`, `build_costing` |
@@ -249,22 +249,49 @@ no change for v2. Writes Delta only; touches no DTC.
 
 ### Stage 20b — `pull_bom` → `bom_segments`  **NEW**
 
-Reads the BOM straight from **BeProduct's PageBomVariation API** and writes the
-parsed segments to Delta. Runs in **parallel** with `transform`; touches no DTC,
-and writes nothing back to BeProduct.
+Reads the techpack BOM from the **`alb_tpm_*` Lakebase tables** and writes the
+raw payload to Delta. Runs in **parallel** with `transform`; touches no DTC, and
+writes nothing back to BeProduct.
 
-> **Source replaced 2026-09-16.** BOM used to arrive via a separate
-> techpack-extraction pipeline landing in `alb_tpm_uat` / `alb_tpm_prd`
-> (Lakebase). BeProduct now exposes it directly, which removes an entire
-> intermediate system, its two-hop join, and the serverless-only access
-> constraint that originally forced Phase 10 onto its own task.
+> **SOURCE WALKBACK 2026-09-22 — this reverses the 2026-09-16 switch below.**
+> Owner decision. The BOM read is back on
+> `customer_teckpack_style_latest` + `customer_teckpack_style_log`, via the same
+> two-hop join v1 used. `run_bom` and the `bom_catalog` / `bom_schema` /
+> `bom_table` / `bom_log_table` / `bom_customer_name` parameters are live again.
 >
-> Validated against the retired source across all 8 styles: identical counts,
-> **7 of 8 byte-identical** on `(Fabric Group, Mill Fabric Article #,
-> Placement)`, and the 8th *better* — `KTB-00029`'s Lakebase placements were
-> blank where BeProduct gives `BODICE` / `LINING` / `HEM`. Switching the source
-> produced **zero** DTC writes, i.e. the new source agrees with what is already
-> live.
+> The table **keeps the name `bom_segments`**; only its column shape reverts
+> (`custom_fields` / `parse_error`, not `segments_json` / `error`). All three
+> consumers sniff which shape they were handed — via
+> `bom.segments_table_mode()` / `segments_from_delta_value()` — so none of them
+> changed. Switching the BOM source is a **one-notebook** redeploy in either
+> direction, and the PageBomVariation parser stays dormant but unit-tested in
+> `sync/bom.py` ("SOURCE 2"). A full snapshot of the BeProduct-sourced pipeline
+> is on branch `v2-bomvariation`.
+>
+> Two things the walkback gives up, both known and accepted:
+> - `KTB-00029`'s placements are blank in Lakebase where BeProduct gave
+>   `BODICE` / `LINING` / `HEM`. The one-way blank guard in
+>   `plan_style_enrichment()` means the values already in DTC survive — this
+>   loses future corrections, it does not revert live data.
+> - `Content` notation returns to `"Cotton 97%, Spandex 3%"`. See Stage 40's
+>   Content note — **write-once must stay on**.
+>
+> It also breaks Stage 55's material resolution outright; see that stage.
+
+> **Historical — source replaced 2026-09-16, reverted 2026-09-22.** For one
+> week BOM came straight from BeProduct's PageBomVariation API. That removed an
+> intermediate system, its two-hop join, and the serverless-only access
+> constraint that originally forced Phase 10 onto its own task (moot in v2 —
+> the whole job is serverless).
+>
+> Validated against the Lakebase source across all 8 styles at the time:
+> identical counts, **7 of 8 byte-identical** on `(Fabric Group, Mill Fabric
+> Article #, Placement)`, and the 8th *better* — `KTB-00029`. Switching
+> produced **zero** DTC writes. The equivalence evidence is kept because it
+> applies symmetrically: walking back should also produce zero writes, and
+> anything beyond the two known deltas above is a bug rather than the walkback.
+>
+> The access pattern below is retained for whoever re-switches.
 
 ```
 style.app_list(header_id)          → the "BOMVariations" page. Its pageId is
@@ -803,8 +830,39 @@ DTC row --(Fabric Group, Mill Fabric Article #)--> BOM segment
 
 That pair is unique within a style and is the same `bom.segment_key()` the
 enrichment direction uses, so both directions agree on what "the same fabric
-assignment" means. The write uses the GUID `materialId`, not `LF MATERIAL ID`, so
-reorganising material master into per-customer folders cannot break it.
+assignment" means. The write always uses the GUID `materialId`.
+
+> **DISARMED 2026-09-22 (`run_customer_code_push=false`) by the Stage 20b source
+> walkback.** This is the one stage that did *not* walk back cleanly: only the
+> PageBomVariation payload carried `materialId`, and the Lakebase BOM has no
+> such column.
+>
+> Note the failure mode, because it is quiet rather than loud: with Lakebase
+> segments every `material_id` is `None`, so `bom_push`'s
+> `is_ad_hoc or not material_id` guard funnels **every** row into
+> `ad_hoc_skipped` and the stage reports a clean `writes: 0`. That reads as
+> success. Hence the flag, rather than trusting a green run.
+>
+> **The replacement route**: Lakebase carries `**MaterialCode`, which *is* the
+> material master's `headerNumber` (e.g. `LF-BD26-000002--SH` — the suffix is
+> part of the key). `bom.extract_enrichment_fields()` now carries it as
+> `lf_material_id`, and the notebook's `resolve_material_ids()` turns codes into
+> GUIDs before planning. It **refuses rather than guesses**: `attributes_list`
+> is used directly (never `attributes_get_by_number`, which hides a second match
+> behind `next(..., None)`), the server's `Eq` result is post-filtered to an
+> exact `headerNumber`, and a code matching zero or several materials goes to
+> the `unresolved` bucket. Lookups are cached per code and only fetched for rows
+> that actually carry a value — with the DTC column blank, that is **zero API
+> calls**.
+>
+> **Cost of the route**: the GUID was chosen precisely so the planned
+> reorganisation of material master into per-customer folders could not break
+> this stage. Resolving through `headerNumber` puts that exposure back — it
+> depends on `headerNumber` staying globally unique, and the lookup is
+> deliberately folder-agnostic.
+>
+> Re-enable only after `v2_probe_material_code` returns `PROVEN` and the live
+> end-to-end proof is repeated.
 
 **Gates** (`sync/bom_push.py`, all pure and unit-tested):
 1. A **blank** DTC value is never pushed — this stage can set or change a code,
@@ -817,5 +875,12 @@ reorganising material master into per-customer folders cannot break it.
 3. An already-correct material is a no-op.
 4. An unmatched `(group, article)`, or an ad-hoc row with no linked material, is
    reported — never guessed.
+4b. An LF material code that resolves to **zero or several** materials, or is
+   blank, goes to the `unresolved` bucket — reported, never guessed. Kept
+   separate from `unmatched` and `ad_hoc_skipped` on purpose: the three need
+   different fixes ("fix the DTC fabric assignment", "this row has no material
+   by design", "fix or re-key the material master"). A run with anything
+   unresolved exits `COMPLETED_WITH_UNRESOLVED`, never `OK` — work was silently
+   not done.
 5. **Every write is read back and verified.** A 200 from a vendor API means
    accepted, not stored; this pipeline has been burned by that twice.

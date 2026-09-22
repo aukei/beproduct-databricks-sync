@@ -324,11 +324,12 @@ JOB_PARAMS = {
     "orbit_parallel_calls": "false",  # Phase 9b: call NT Orbit serially by default (safer; set true + tune max_workers for throughput)
     "orbit_timeout_seconds": "60",    # Phase 9b: per-call NT Orbit HTTP timeout (live-validated 2026-09-01: 30s was too short)
     "run_phase10": "true",            # Phase 10: BOM enrichment from techpack extraction (flipped true 2026-09-03 -- extensively live-validated: upsert semantics, Content backfill, material_no key, 0 errors across multiple runs)
-    # V1 ONLY. The v2 BOM source is the BeProduct PageBomVariation API
-    # (2026-09-16); these alb_tpm_* Lakebase parameters are referenced solely by
-    # build_main_tasks()'s paused fill_bom_data task and are kept so the v1
-    # rollback path still deploys.
+    # LIVE ON BOTH v1 AND v2 again as of the 2026-09-22 source walkback (they
+    # were marked V1-ONLY during the 2026-09-16..22 BeProduct PageBomVariation
+    # week). Read by build_main_tasks()'s paused fill_bom_data AND by v2's
+    # pull_bom.
     "bom_catalog": "alb_tpm_uat",      # Phase 10: BOM source catalog (alb_tpm_uat | alb_tpm_prd -- NOT derived from dtc_environment, suffix differs)
+    "bom_schema": "public",            # Phase 10: Lakebase schema holding both techpack tables
     "bom_customer_name": "KONTOOR",    # Phase 10: pre-filter customer_name in the shared multi-customer BOM table (scoping/perf only)
     "push_blanks": "false",
     "img_http_timeout": "30",
@@ -352,14 +353,25 @@ JOB_PARAMS = {
     "run_duty_push": "true",      # Stage 40: duty contribution only     (was run_phase9b)
     "bom_table": "customer_teckpack_style_latest",  # resolves latest_techpack_style_log_id
     "bom_log_table": "customer_teckpack_style_log",  # custom_fields -- the actual BOM source
-    "bom_segments_table": "bom_segments",  # Stage 20b output; read by wip_push + build_costing
-    # BOMVariations pageId is folder-constant; blank = auto-discover once per run.
-    "bom_page_id": "",
-    "bom_max_workers": "8",   # parallel BeProduct fetch workers in Stage 20b
+    # Stage 20b output; read by wip_push + build_costing + push_customer_code.
+    # The name is unchanged by the 2026-09-22 walkback -- only the COLUMN SHAPE
+    # reverted (custom_fields/parse_error, not segments_json/error). Consumers
+    # sniff the shape, so they needed no change.
+    "bom_segments_table": "bom_segments",
     # Stage 55: DTC "Fabric Customer # or SAP #" -> material master
     # `customer_material_code`. Blank on every DTC row as of 2026-09-17, so a
     # run today correctly does nothing.
-    "run_customer_code_push": "true",
+    #
+    # DISARMED 2026-09-22 for the BOM-source walkback. Stage 55 resolves its
+    # write target through `segment["material_id"]`, a GUID only the
+    # PageBomVariation payload carries -- the Lakebase BOM has no materialId at
+    # all. With Lakebase segments this stage does not fail loudly: every segment
+    # has `material_id=None`, so bom_push's `is_ad_hoc or not material_id` guard
+    # funnels EVERY row into `ad_hoc_skipped` and the stage reports a clean
+    # `writes: 0`. That reads as success and is not.
+    # Flip back to "true" only once the LF-Material-Code -> materialId resolver
+    # is proven live (see AGENTS.md, and the probe in v2_probe_material_code).
+    "run_customer_code_push": "false",
     # Unqualified output table name for build_costing. Routine runs write the
     # real table; override it to build a comparison copy without replacing what
     # duty_compute reads and MERGEs. (The old `costing_chart_kei` scratch table
@@ -856,16 +868,19 @@ def build_v2_tasks():
     # re-pulls; here the whole job is serverless, so it is just another input
     # gathered up front. Materializing it to Delta means neither wip_push nor
     # build_costing has to touch Lakebase.
-    # REWRITTEN 2026-09-16 to read the BeProduct PageBomVariation API directly.
-    # The alb_tpm_* Lakebase parameters (bom_catalog/bom_table/bom_log_table/
-    # bom_customer_name) are gone with the dependency -- and with them the
-    # serverless-only access constraint that originally forced Phase 10 onto
-    # its own task.
+    # SOURCE WALKBACK 2026-09-22. Between 2026-09-16 and 2026-09-22 this task
+    # read the BeProduct PageBomVariation API (bom_page_id / bom_max_workers);
+    # the owner reversed that and it is back on the alb_tpm_* Lakebase tables.
+    # All five Lakebase parameters are passed EXPLICITLY here -- v1's
+    # fill_bom_data passed only two and let bom_schema/bom_table/bom_log_table
+    # fall through to notebook defaults, which made the job definition lie about
+    # what it reads.
     tasks.append(v2_task("pull_bom", f"{NB_DTC_V2}/v2_pull_bom_segments", {
         "catalog": CAT, "schema": SCH, "folder_name": P("folder_name"),
+        "bom_catalog": P("bom_catalog"), "bom_schema": P("bom_schema"),
+        "bom_table": P("bom_table"), "bom_log_table": P("bom_log_table"),
+        "bom_customer_name": P("bom_customer_name"),
         "bom_segments_table": P("bom_segments_table"),
-        "bom_page_id": P("bom_page_id"),
-        "bom_max_workers": P("bom_max_workers"),
         "run_bom": P("run_bom"),
     }, depends=[dep("bp_style_sync")]))
 
@@ -887,7 +902,7 @@ def build_v2_tasks():
     # only correct because it re-pulls the sheet AFTER Phase 10 enriches it
     # (repull_dtc_bom). v2 has no re-pull and runs this BEFORE wip_push, so
     # Step 1a overlays the material and style-identity columns from the SAME
-    # sources wip_push will write from (tpm_bom_segments, staging), while every
+    # sources wip_push will write from (bom_segments, staging), while every
     # DTC-owned column -- Lineplan Ref #, vendor/factory slots, production
     # country, existing HTS/duty -- still comes from the snapshot, because this
     # pipeline never writes those and they are current by definition.

@@ -723,8 +723,62 @@ fields; the key is `rowFields`, not `fields`:**
   backup shows only `modifiedAt` / `modifiedBy`; all values, the row count and
   the variationName are as found.
 
+**BOM SOURCE WALKED BACK to the Lakebase techpack tables (2026-09-22, owner
+decision) -- reverses the 2026-09-16 switch recorded immediately below:**
+- `v2_pull_bom_segments` reads `alb_tpm_uat.public.customer_teckpack_style_latest`
+  + `customer_teckpack_style_log` again, via the same two-hop join v1 used. The
+  notebook was restored verbatim from `15b122b^`; only its output-table default
+  and docstring changed.
+- **The walkback was cheap because the Lakebase path had never been deleted** --
+  `sync/bom.py`'s parser, its tests, and BOTH consumers' column-sniffing were
+  all still in place. Exactly one notebook had to change. **That symmetry is the
+  point, and it is worth preserving**: the PageBomVariation parser is now kept
+  dormant under "SOURCE 2" with its tests, and `test_wip_plan.py [7l]` still
+  proves both sources yield an identical plan. Branch `v2-bomvariation`
+  snapshots the BeProduct-sourced pipeline.
+- **The table KEPT the name `bom_segments`**; only its column shape reverted
+  (`custom_fields`/`parse_error`). The sniff+decode that lets a consumer accept
+  either shape was hoisted into `bom.segments_table_mode()` /
+  `segments_table_error_col()` / `segments_from_delta_value()`, so the three
+  consumers share one tested implementation instead of three copies.
+- **Two regressions accepted, both known in advance:** `KTB-00029`'s placements
+  go blank again (the one-way blank guard means DTC keeps what it already has --
+  a lost future correction, not a revert); and `Content` notation returns to
+  `"Cotton 97%, Spandex 3%"`, so **write-once must stay on** or the two systems
+  overwrite each other every run.
+- **STAGE 55 DID NOT WALK BACK CLEANLY, and its failure mode is SILENT.** The
+  reverse push resolved its target through `segment["material_id"]`, a GUID only
+  PageBomVariation carried. With Lakebase segments every `material_id` is None,
+  so `bom_push`'s `is_ad_hoc or not material_id` guard funnels EVERY row into
+  `ad_hoc_skipped` and the stage reports a clean `writes: 0` -- which reads as
+  success. `run_customer_code_push` is therefore set to **false** until the
+  replacement resolver is proven live; a green run was not trusted as evidence.
+- **Replacement route**: Lakebase's `**MaterialCode` IS the material master's
+  `headerNumber` (`LF-BD26-000002--SH` -- **the suffix is part of the key**).
+  Three independent records in this repo already agree on that (the
+  `b95b1ae6-...` / `LF-BD26-000005--TW` anchor above, the old
+  `bom_unified.material_no` values, and `bom.py`'s own note that `**MaterialCode`
+  corresponds to `material_no`), so `v2_probe_material_code` is a CONFIRMATION
+  with a known expected answer rather than a discovery.
+- **`attributes_get_by_number()` must NOT be used for this.** It is
+  `next(attributes_list(...), None)` -- it returns the first hit and silently
+  discards a second. Stage 55 calls `attributes_list` directly, post-filters to
+  an exact `headerNumber` (strip only; never casefold -- that would be a guess),
+  and sends 0-match / multi-match / blank-code to a new `unresolved` bucket kept
+  deliberately separate from `unmatched` and `ad_hoc_skipped` because the three
+  need different fixes. A run with anything unresolved exits
+  `COMPLETED_WITH_UNRESOLVED`, never `OK`.
+- **Cost to weigh if this is ever revisited:** the GUID route was chosen
+  *precisely* because it survives the planned reorganisation of material master
+  into per-customer folders. Resolving via `headerNumber` puts that exposure
+  back -- it now depends on `headerNumber` staying globally unique, and the
+  lookup is deliberately folder-agnostic.
+- Lookups are cached per code and requested only for rows that carry a value, so
+  with the DTC column blank on all 60 rows this makes **zero API calls**.
+
 **BOM source switched to the BeProduct PageBomVariation API -- validated
-against the retired Lakebase source (2026-09-16):**
+against the retired Lakebase source (2026-09-16; REVERSED 2026-09-22, see
+above -- kept because the equivalence evidence applies symmetrically):**
 - `v2_pull_bom_segments` now reads BeProduct directly. The `alb_tpm_*` Lakebase
   dependency is GONE, and with it the serverless-only access constraint that
   originally forced Phase 10 onto its own task.

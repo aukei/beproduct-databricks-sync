@@ -133,8 +133,88 @@ check(len(pk.writes) == 1, "matching is whitespace-insensitive, like norm()")
 print("\n[7] Summary shape")
 s = pc.summary()
 check(set(s) == {"writes", "conflicts", "unmatched", "noops",
-                 "ad_hoc_skipped", "empty"}, f"summary keys: {sorted(s)}")
+                 "ad_hoc_skipped", "unresolved", "empty"},
+      f"summary keys: {sorted(s)}")
 check(s["empty"] is True and s["conflicts"] == 1, "summary reflects the plan")
+
+# ---------------------------------------------------------------------------
+# 2026-09-22 walkback: the Lakebase BOM source carries no materialId, only
+# `lf_material_id` (**MaterialCode). The caller resolves those to GUIDs and
+# hands the map in. Everything above this line exercises the PageBomVariation
+# path and must keep passing UNCHANGED -- that is the signal that adding this
+# route did not disturb the existing contract.
+print("\n[8] Lakebase segments -- resolving material_id from the LF material code")
+
+
+def lakebase_seg(group, article, code):
+    """A segment as `bom.extract_enrichment_fields()` now emits it: no GUID."""
+    return {"fabric_group": group, "mill_fabric_article": article,
+            "placement": None, "content": None,
+            "lf_material_id": code, "material_id": None, "is_ad_hoc": False}
+
+
+LB = {"KTB-1": [lakebase_seg("Main Fabric", "WV-0003", "LF-BD26-000002--SH")]}
+ROW = [dtc("KTB-1", "Blue", "Main Fabric", "WV-0003", "CUST-123")]
+
+p = bom_push.plan_customer_code_push(
+    ROW, LB, material_id_by_code={"LF-BD26-000002--SH": "mat-A"})
+check(len(p.writes) == 1 and p.writes[0].material_id == "mat-A",
+      "a resolved LF code yields the same write the GUID path would")
+check(p.writes[0].lf_material_id == "LF-BD26-000002--SH",
+      "the LF code is carried through for logging")
+
+# Without a resolver the behaviour must be EXACTLY what it was before the
+# walkback: a segment with no material_id is reported as ad-hoc, never written.
+p = bom_push.plan_customer_code_push(ROW, LB)
+check(p.is_empty() and len(p.ad_hoc_skipped) == 1 and not p.unresolved,
+      "material_id_by_code omitted -> pre-walkback behaviour, byte for byte")
+
+# Every way a code can fail to resolve is a REFUSAL, reported in `unresolved`.
+p = bom_push.plan_customer_code_push(ROW, LB, material_id_by_code={})
+check(p.is_empty() and len(p.unresolved) == 1
+      and "no single material" in p.unresolved[0]["reason"],
+      "a code absent from the map -> unresolved, never written")
+
+p = bom_push.plan_customer_code_push(
+    ROW, LB, material_id_by_code={"LF-BD26-000002--SH": None})
+check(p.is_empty() and len(p.unresolved) == 1,
+      "a code the caller REFUSED (mapped to None, e.g. 2 matches) -> unresolved")
+
+p = bom_push.plan_customer_code_push(
+    ROW, {"KTB-1": [lakebase_seg("Main Fabric", "WV-0003", None)]},
+    material_id_by_code={"LF-BD26-000002--SH": "mat-A"})
+check(p.is_empty() and len(p.unresolved) == 1
+      and "**MaterialCode" in p.unresolved[0]["reason"],
+      "a blank **MaterialCode -> unresolved, with a reason naming the column")
+
+# An ad-hoc row is checked BEFORE the code lookup, so it keeps its own bucket
+# rather than being misreported as a lookup failure.
+adhoc = {"KTB-1": [{**lakebase_seg("Main Fabric", "WV-0003", None),
+                    "is_ad_hoc": True}]}
+p = bom_push.plan_customer_code_push(ROW, adhoc, material_id_by_code={})
+check(len(p.ad_hoc_skipped) == 1 and not p.unresolved,
+      "ad-hoc beats the code lookup -- it is not a resolution failure")
+
+# A segment that HAS a GUID ignores the map entirely (both sources in one run).
+p = bom_push.plan_customer_code_push(
+    ROW, SEGS, material_id_by_code={"LF-A": "WRONG"})
+check(len(p.writes) == 1 and p.writes[0].material_id == "mat-A",
+      "an existing material_id always wins over the code map")
+
+print("\n[9] required_material_codes() -- fetch only what the work needs")
+check(bom_push.required_material_codes(ROW, LB) == ["LF-BD26-000002--SH"],
+      "returns the code a row with a value actually resolves to")
+check(bom_push.required_material_codes(
+    [dtc("KTB-1", "Blue", "Main Fabric", "WV-0003", "")], LB) == [],
+      "a BLANK DTC value needs no lookup -- today's live state, zero API calls")
+check(bom_push.required_material_codes(ROW, SEGS) == [],
+      "segments that already carry a GUID need no lookup")
+check(bom_push.required_material_codes(ROW, adhoc) == [],
+      "ad-hoc segments need no lookup")
+check(bom_push.required_material_codes(
+    ROW + [dtc("KTB-1", "Red", "Main Fabric", "WV-0003", "CUST-999")], LB)
+    == ["LF-BD26-000002--SH"],
+      "two rows sharing one material produce ONE code, not two")
 
 print("\n" + "=" * 60)
 if _failures:

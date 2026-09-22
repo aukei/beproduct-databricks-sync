@@ -70,7 +70,7 @@ brand-new style × color gets its material fan-out in the same run, and
 > which the transform cannot see, and `phase1.compute_upsert()` treats a repeated
 > `(BP Style#, Color)` as a `duplicate_bp_key` exception. Staging stays at
 > style × color; the BOM becomes its own style-keyed Delta table
-> (`tpm_bom_segments`, written by the new `pull_bom` task); the material grain is
+> (`bom_segments`, written by the new `pull_bom` task); the material grain is
 > resolved in `wip_plan`. The re-pull still disappears — planning against intent
 > is what removed it, not the staging grain.
 
@@ -79,7 +79,7 @@ brand-new style × color gets its material fan-out in the same run, and
 **Implemented as a mode on the existing notebook, not a fork.**
 `p9a_build_costing_chart.py` takes `wip_effective_mode`: `"table"` (v1, read the
 snapshot as-is) or `"intent"` (v2, overlay the material and style-identity
-columns from `tpm_bom_segments` + staging first). Everything downstream — the
+columns from `bom_segments` + staging first). Everything downstream — the
 gates, the LinePlan join, the slot transpose, the carry-forward, the cache fill
 — is shared. One costing implementation, one set of gates.
 

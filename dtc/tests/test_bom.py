@@ -26,6 +26,7 @@ from sync.bom import (
     WIP_FIELD_FABRIC_GROUP, WIP_FIELD_PLACEMENT, WIP_FIELD_MILL_FABRIC_ARTICLE,
     WIP_FIELD_CONTENT,
     build_insert_row_payload, INSERT_EXCLUDE_COLS, compute_non_writable_cols,
+    segments_table_mode, segments_table_error_col, segments_from_delta_value,
 )
 
 _failures = []
@@ -161,10 +162,15 @@ print("\n[6] parse_bom_segments() — missing ColumnHeader entry for one of our 
 partial_cols = ["**MaterialCategory", "**Placement"]  # no MaterialContent/SupplierRefNo at all
 partial_data = [["Main Fabric", "BODICE"]]
 segs_partial = parse_bom_segments(bom_table(partial_cols, partial_data))
-check(segs_partial.main_fabric == {
-    "bom_detail_name": "Main Fabric", "material_name": None,
-    "content": None, "placement": "BODICE",
-}, "missing target columns resolve to None, never crash")
+# Subset comparison, not equality: the detail dict gained `material_code`
+# (2026-09-22, for the Stage 55 reverse push) and may gain more. Asserting the
+# absent columns are None is the actual point of this case.
+check(segs_partial.main_fabric["bom_detail_name"] == "Main Fabric"
+      and segs_partial.main_fabric["placement"] == "BODICE"
+      and segs_partial.main_fabric["material_name"] is None
+      and segs_partial.main_fabric["content"] is None
+      and segs_partial.main_fabric["material_code"] is None,
+      "missing target columns resolve to None, never crash")
 
 print("\n[7] parse_bom_segments() — duplicate Main Fabric row, first wins")
 dup_data = [
@@ -182,13 +188,27 @@ check(segs_dup.main_fabric["material_name"] == "REF-FIRST",
 # ---------------------------------------------------------------------------
 print("\n[8] extract_enrichment_fields() / to_wip_fields()")
 fields = extract_enrichment_fields(segs.main_fabric)
-check(fields == {
+check(all(fields[k] == v for k, v in {
     "fabric_group": "Main Fabric",
     "placement": "BODICE",
     "mill_fabric_article": "WV-0003",
     "content": "Cotton 100%",
-}, "fabric_group<-MaterialCategory, placement<-Placement, "
-   "mill_fabric_article<-SupplierRefNo, content<-MaterialContent")
+}.items()), "fabric_group<-MaterialCategory, placement<-Placement, "
+            "mill_fabric_article<-SupplierRefNo, content<-MaterialContent")
+
+# 2026-09-22 walkback: the Lakebase segment must be SHAPE-IDENTICAL to the
+# PageBomVariation one (see [14]), because bom_push and the notebooks resolve a
+# material off these keys without knowing which source produced the segment.
+check(set(fields) == {"fabric_group", "placement", "mill_fabric_article",
+                      "content", "lf_material_id", "material_id", "is_ad_hoc"},
+      f"segment shape matches the PageBomVariation source: {sorted(fields)}")
+# THE mapping Stage 55 depends on, pinned against the owner-supplied REAL
+# KTB-00023 payload: **MaterialCode is the material master's headerNumber, and
+# the "--SH" suffix is PART OF THE KEY. Anything that strips it matches nothing.
+check(fields["lf_material_id"] == "LF-BD26-000002--SH",
+      "lf_material_id <- **MaterialCode, suffix intact (real KTB-00023 row)")
+check(fields["material_id"] is None and fields["is_ad_hoc"] is False,
+      "Lakebase offers no materialId and has no ad-hoc concept — stated, not absent")
 
 wip_fields = to_wip_fields(fields)
 check(wip_fields == {
@@ -744,6 +764,42 @@ _existing = [{"row_id": "r1", "color": "Blue",
               "placement": None, "content": None}]
 _acts = bom.plan_style_enrichment(_existing, {"xts_data": {}})
 check(_acts == [], "sanity: no BOM payload still yields no actions")
+
+# ---------------------------------------------------------------------------
+print("\n[15] Reading Stage 20b's table in EITHER shape (2026-09-22 walkback)")
+# Consumers sniff the columns rather than trusting a parameter, so the BOM
+# source can be switched by redeploying one notebook. Three notebooks depend on
+# these helpers agreeing.
+_LB_COLS = ["bp_style_number", "custom_fields", "parse_error", "extracted_at"]
+_BP_COLS = ["bp_style_number", "segments_json", "error", "extracted_at"]
+check(segments_table_mode(_LB_COLS) == "custom_fields"
+      and segments_table_mode(_BP_COLS) == "segments_json",
+      "the payload column is detected from the table's own columns")
+check(segments_table_error_col(_LB_COLS) == "parse_error"
+      and segments_table_error_col(_BP_COLS) == "error",
+      "the error column is detected alongside it")
+
+# Both shapes must decode to the SAME segment list -- that equivalence is what
+# lets wip_push, build_costing and push_customer_code ignore the source.
+_lb = segments_from_delta_value(REAL_CUSTOM_FIELDS_KTB00023, "custom_fields")
+_bp = segments_from_delta_value(json.dumps(_lb), "segments_json")
+check(_lb == _bp, "custom_fields and segments_json decode to the same segments")
+check(_lb is not None and _lb[0]["fabric_group"] == "Main Fabric",
+      "Main Fabric is first, as every consumer assumes")
+check(_lb is not None and _lb[0]["lf_material_id"] == "LF-BD26-000002--SH",
+      "the LF material code survives the Delta round trip (Stage 55 needs it)")
+
+# None is the "zero actions, never revert" signal and must survive every path.
+check(segments_from_delta_value(None, "custom_fields") is None
+      and segments_from_delta_value(None, "segments_json") is None,
+      "a NULL payload -> None, in either shape")
+check(segments_from_delta_value("[]", "segments_json") is None,
+      "an EMPTY segment list -> None, never an empty list a caller might trust")
+check(segments_from_delta_value({"xts_data": {}}, "custom_fields") is None,
+      "a payload with no Main Fabric -> None")
+check(segments_from_delta_value([{"fabric_group": "Main Fabric"}],
+                                "segments_json") == [{"fabric_group": "Main Fabric"}],
+      "an already-decoded list passes through (Spark may hand back either)")
 
 # ---------------------------------------------------------------------------
 print(f"\n{'='*60}")

@@ -251,7 +251,7 @@ dbutils.widgets.text("force_refresh_duty", "false",
 #          wip_push, so the start-of-run snapshot still holds PRE-enrichment
 #          material values. In this mode the material and style-identity
 #          columns are overlaid from the same sources wip_push will write from
-#          (tpm_bom_segments and beproduct_to_dtc_staging), while every
+#          (bom_segments and beproduct_to_dtc_staging), while every
 #          DTC-OWNED column -- Lineplan Ref #, the 4 vendor/factory slots,
 #          production country, existing HTS/duty -- still comes from the
 #          snapshot, because those are never written by this pipeline and are
@@ -262,7 +262,7 @@ dbutils.widgets.text("force_refresh_duty", "false",
 # That is the point of doing this here rather than forking the notebook: one
 # costing implementation, one set of gates.
 dbutils.widgets.text("wip_effective_mode", "table", "table (v1) | intent (v2)")
-dbutils.widgets.text("bom_segments_table", "tpm_bom_segments", "Step 1a BOM source (intent mode)")
+dbutils.widgets.text("bom_segments_table", "bom_segments", "Step 1a BOM source (intent mode)")
 dbutils.widgets.text("staging_table", "beproduct_to_dtc_staging", "Step 1a style source (intent mode)")
 dbutils.widgets.text("run_costing", "true", "false = no-op (v2 has no condition tasks)")
 # Output override. `costing_chart` has REAL downstream readers -- the
@@ -450,36 +450,30 @@ if effective_mode == "intent":
     #    ~250 styles, so the collect is trivial and the parsing stays in one
     #    place. A style with no Main Fabric segment contributes nothing and is
     #    simply not costed this run -- never an error, never a revert.
-    # Accepts BOTH table shapes during the source migration:
-    #   segments_json -- PARSED segments (BeProduct PageBomVariation, 2026-09-16)
-    #   custom_fields -- raw Lakebase payload (alb_tpm_*, retired)
+    # EITHER Stage 20b shape is accepted, so the BOM source can be switched by
+    # redeploying one notebook -- which has happened in both directions
+    # (Lakebase -> BeProduct 2026-09-16, back again 2026-09-22). The sniff and
+    # decode are shared with wip_push and push_customer_code via sync/bom.py.
     # Only the MAIN FABRIC segment matters here: it is the only one that ever
-    # reaches costing_chart (Step 1b gate 4).
+    # reaches costing_chart (Step 1b gate 4), and it is always first.
     _bom_rows = []
     _bom_no_main = 0
     try:
         _bdf = spark.table(bom_segments_table)
-        _bcols = set(_bdf.columns)
-        _bmode = "segments_json" if "segments_json" in _bcols else "custom_fields"
-        _berr = "error" if "error" in _bcols else "parse_error"
+        _bmode = _bom.segments_table_mode(_bdf.columns)
+        _berr = _bom.segments_table_error_col(_bdf.columns)
         print(f"  BOM source column: {_bmode}")
         for _r in _bdf.collect():
             if _r[_berr]:
                 continue
-            _main = None
             try:
-                if _bmode == "segments_json":
-                    _segs = json.loads(_r["segments_json"]) if _r["segments_json"] else None
-                    _main = _segs[0] if _segs else None
-                else:
-                    _parsed = _bom.parse_bom_segments(_r["custom_fields"])
-                    _main = (_bom.extract_enrichment_fields(_parsed.main_fabric)
-                             if _parsed.main_fabric else None)
+                _segs = _bom.segments_from_delta_value(_r[_bmode], _bmode)
             except Exception:  # noqa: BLE001
                 continue
-            if not _main:
+            if not _segs:
                 _bom_no_main += 1
                 continue
+            _main = _segs[0]
             _bom_rows.append((_r["bp_style_number"],
                               _main.get("mill_fabric_article"),
                               _main.get("content")))

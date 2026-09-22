@@ -108,7 +108,7 @@ dbutils.widgets.text("delta_only", "false", "Only styles modified since last_pus
 dbutils.widgets.text("staging_pending_only", "false", "Only staging rows with sync_status='pending'")
 dbutils.widgets.text("batch_size", "100", "Rows per PATCH call")
 dbutils.widgets.text("costing_chart_table", "lft.beproduct.costing_chart", "Duty source")
-dbutils.widgets.text("bom_segments_table", "tpm_bom_segments", "BOM source (Stage 20b)")
+dbutils.widgets.text("bom_segments_table", "bom_segments", "BOM source (Stage 20b)")
 dbutils.widgets.text("run_wip_push", "true", "Run this stage (false = no-op)")
 dbutils.widgets.text("run_duty_push", "true", "Include the duty contribution")
 # Material columns to plan but NEVER write (hard exclusion). Empty by default.
@@ -217,25 +217,25 @@ bom_by_style = {}
 bom_parse_errors = []
 try:
     _bom_df = spark.table(bom_table)
-    _cols = set(_bom_df.columns)
-    # Two shapes accepted on purpose, so the BeProduct-sourced table and the
-    # retired Lakebase one can both be read during the migration:
-    #   segments_json -- PARSED segments (BeProduct PageBomVariation, 2026-09-16)
-    #   custom_fields -- raw Lakebase payload (alb_tpm_*, retired)
-    # wip_plan accepts either, so nothing below cares which one it got.
-    _mode = "segments_json" if "segments_json" in _cols else "custom_fields"
-    _errcol = "error" if "error" in _cols else "parse_error"
+    # EITHER Stage 20b shape is accepted, so the BOM source can be switched by
+    # redeploying one notebook -- which has now happened in both directions
+    # (Lakebase -> BeProduct 2026-09-16, back again 2026-09-22). The sniff and
+    # the decode live in sync/bom.py so all three consumers share one tested
+    # implementation rather than three copies that can drift.
+    _mode = bom.segments_table_mode(_bom_df.columns)
+    _errcol = bom.segments_table_error_col(_bom_df.columns)
     for r in _bom_df.collect():
         if r[_errcol]:
             bom_parse_errors.append(f"{r['bp_style_number']}: {r[_errcol]}")
             continue
-        _val = r[_mode]
-        if _val is None:
+        _segs = bom.segments_from_delta_value(r[_mode], _mode)
+        if _segs is None:
             continue   # no Main Fabric segment -- zero actions, never a revert
-        bom_by_style[r["bp_style_number"]] = (
-            json.loads(_val) if _mode == "segments_json" else _val)
+        bom_by_style[r["bp_style_number"]] = _segs
     inputs["styles_with_bom"] = len(bom_by_style)
     inputs["bom_source_column"] = _mode
+    # Counts styles with a usable MAIN FABRIC segment -- the ones that can
+    # actually produce an action -- not merely styles with a payload.
     print(f"  styles with BOM data : {len(bom_by_style)}  (source column: {_mode})"
           + (f"  ⚠ {len(bom_parse_errors)} unparseable" if bom_parse_errors else ""))
 except Exception as e:  # noqa: BLE001

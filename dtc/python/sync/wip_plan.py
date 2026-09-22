@@ -634,11 +634,14 @@ def _apply_material(
         if custom_fields is None:
             continue  # no BOM for this style this run -- zero actions, never a revert
 
-        # `bom_by_style` may hold EITHER already-built segments (a list --
-        # from the BeProduct PageBomVariation source) or a raw Lakebase
-        # `custom_fields` payload (a dict/str). Supporting both is deliberate:
-        # it lets the two sources run side by side so the new one can be
-        # diffed against the old before the Lakebase dependency is dropped.
+        # `bom_by_style` may hold EITHER already-built segments (a list) or a
+        # raw Lakebase `custom_fields` payload (a dict/str). Callers normally
+        # hand in segments now -- `bom.segments_from_delta_value()` decodes
+        # both shapes upstream -- but the raw path is kept because it costs
+        # nothing and makes this function usable directly from a payload.
+        # Source-agnosticism here is what made the 2026-09-16 switch and the
+        # 2026-09-22 walkback each a one-notebook change; `test_wip_plan.py
+        # [7l]` pins it by proving both inputs produce an identical plan.
         _segments = custom_fields if isinstance(custom_fields, list) else None
         try:
             actions = bom.plan_style_enrichment(

@@ -1,6 +1,14 @@
 """
 Phase 10 — BOM enrichment from externally-processed techpack data (pure Python).
 
+**THIS MODULE HOLDS TWO BOM SOURCES. Source 1 (below) is LIVE.**
+Source 2 — the BeProduct PageBomVariation API, further down — was live from
+2026-09-16 to 2026-09-22 and is now DORMANT but deliberately kept; see its own
+header. Both produce the identical segment shape, so `plan_style_enrichment()`
+and its whole decision tree are shared, and switching between them is a
+one-notebook change (`v2_pull_bom_segments`). A full snapshot of the
+PageBomVariation-sourced pipeline is on branch `v2-bomvariation`.
+
 Fulfills a Phase 1 gap: BOM (Bill of Materials) data is not available from the
 BeProduct API and instead relies on techpack extraction, processed by a
 separate pipeline and landed in:
@@ -151,8 +159,12 @@ design this replaces):
         description this time, unlike the false-start below) — **REINSTATED**
         2026-09-09: Phase 10 writes `Content` again, now from a genuinely
         reliable dedicated column instead of overloading `material_name`.
-    (`**MaterialCode` is NOT used for anything — it corresponds to the OLD
-    `bom_unified.material_no`, deliberately unused, same as before.)
+    (`**MaterialCode` corresponds to the OLD `bom_unified.material_no`. It is
+    NOT one of the four enrichment fields and is never written to DTC — but
+    since 2026-09-22 it IS carried on each segment as `lf_material_id`,
+    because it is the material master's `headerNumber` and therefore the only
+    handle this source offers for the Stage 55 reverse push. See
+    `extract_enrichment_fields()`.)
   * A BOM segment list with neither "Main Fabric" nor "Fabric" (e.g. only
     other/blank `**MaterialCategory` values) is equivalent to "no Main
     Fabric" above — zero actions, never revert.
@@ -218,6 +230,12 @@ COL_MATERIAL_CATEGORY = "**MaterialCategory"   # -> Fabric Group
 COL_MATERIAL_CONTENT = "**MaterialContent"     # -> Content
 COL_PLACEMENT = "**Placement"                  # -> Placement
 COL_SUPPLIER_REF_NO = "**SupplierRefNo"        # -> Mill Fabric Article #
+# NOT an enrichment field -- never written to DTC. Carried as `lf_material_id`
+# for the Stage 55 reverse push only: its values are material-master
+# headerNumbers ("LF-BD26-000002--SH"), which is the sole handle this source
+# offers onto a material. The "--SH"/"--TW" suffix is PART OF THE KEY; stripping
+# it matches nothing.
+COL_MATERIAL_CODE = "**MaterialCode"           # -> lf_material_id (Stage 55)
 
 
 def _blank(v: Any) -> bool:
@@ -285,7 +303,8 @@ def _extract_bom_table_rows(custom_fields: Any) -> List[Dict[str, Optional[str]]
     (Delta-agnostic) field names:
 
         {"bom_detail_name": <**MaterialCategory>, "material_name": <**SupplierRefNo>,
-         "content": <**MaterialContent>, "placement": <**Placement>}
+         "content": <**MaterialContent>, "placement": <**Placement>,
+         "material_code": <**MaterialCode>}
 
     Path: `custom_fields -> xts_data -> TECH_PACK_EXTRACTION -> Table[] ->
     (entries where Type == "BOM") -> ColumnHeader + Data`. See the module
@@ -343,12 +362,14 @@ def _extract_bom_table_rows(custom_fields: Any) -> List[Dict[str, Optional[str]]
         i_content = _col_index(cols, COL_MATERIAL_CONTENT)
         i_place = _col_index(cols, COL_PLACEMENT)
         i_supref = _col_index(cols, COL_SUPPLIER_REF_NO)
+        i_code = _col_index(cols, COL_MATERIAL_CODE)
         for row in data:
             rows.append({
                 "bom_detail_name": _cell(row, i_cat),
                 "material_name": _cell(row, i_supref),
                 "content": _cell(row, i_content),
                 "placement": _cell(row, i_place),
+                "material_code": _cell(row, i_code),
             })
     return rows
 
@@ -389,12 +410,29 @@ def extract_enrichment_fields(detail: Dict[str, Any]) -> Dict[str, Optional[str]
     `bom_unified.material_no` before that). `content` <- `**MaterialContent`
     — REINSTATED 2026-09-09 (was removed entirely earlier the same day; see
     the module docstring's field-mapping section for the full history).
+
+    The last three keys are NOT enrichment fields and are never written to DTC
+    (`to_wip_fields()` maps only the four above; `segment_key()` uses two of
+    them). They exist so this source's segment dict is SHAPE-IDENTICAL to
+    `extract_variation_row_fields()`'s, which is what lets `bom_push` and the
+    notebooks stay indifferent to which source produced a segment:
+
+      * `lf_material_id` <- `**MaterialCode`, the material master's
+        headerNumber. The only handle this source offers onto a material.
+      * `material_id` is explicitly **None**, never absent: "this source has no
+        GUID" must be a statement a caller can test, not a KeyError waiting
+        downstream. Stage 55 resolves it from `lf_material_id`.
+      * `is_ad_hoc` is always False -- Lakebase has no ad-hoc concept, and the
+        owner has confirmed KTB does not use ad-hoc BOM rows.
     """
     return {
         "fabric_group": detail.get("bom_detail_name"),
         "placement": detail.get("placement"),
         "mill_fabric_article": detail.get("material_name"),
         "content": detail.get("content"),
+        "lf_material_id": detail.get("material_code"),
+        "material_id": None,
+        "is_ad_hoc": False,
     }
 
 
@@ -410,10 +448,25 @@ def to_wip_fields(fields: Dict[str, Optional[str]]) -> Dict[str, Optional[str]]:
 
 
 # ---------------------------------------------------------------------------
-# SOURCE 2 (2026-09-16): BeProduct PageBomVariation API
+# SOURCE 2 (2026-09-16): BeProduct PageBomVariation API -- DORMANT since
+# 2026-09-22
 # ---------------------------------------------------------------------------
-# Replaces the `alb_tpm_*` Lakebase techpack tables. Live-verified field names
-# -- the ones in the original spec were mostly wrong, see AGENTS.md:
+# This source READ the BOM straight from BeProduct and briefly replaced the
+# `alb_tpm_*` Lakebase tables above (2026-09-16 .. 2026-09-22). The owner walked
+# that back; SOURCE 1 is live again and no notebook calls anything below today.
+#
+# KEPT DELIBERATELY, exactly as the Lakebase parser was kept during the forward
+# switch. It stays unit-tested (`test_bom.py [14]`), and `test_wip_plan.py [7l]`
+# still proves both sources feed `plan_style_enrichment()` an IDENTICAL plan --
+# which is precisely what makes re-switching a one-notebook change rather than a
+# rewrite. Deleting this block would throw that away to save nothing.
+#
+# The one thing only this source can do: `extract_variation_row_fields()` yields
+# a real `material_id` GUID. SOURCE 1 has no such column, which is why Stage 55
+# now has to resolve the GUID from `lf_material_id` instead.
+#
+# Live-verified field names -- the ones in the original spec were mostly wrong,
+# see AGENTS.md:
 #
 #   spec said              ACTUAL
 #   rows[].group           a GUID. The human value is fields["Group"]
@@ -467,15 +520,18 @@ def render_material_content(raw: Any) -> Optional[str]:
          {"value": 3.0,  "code": "Spandex"}]   ->  "97% Cotton / 3% Spandex"
 
     Why this specific format matters (2026-09-16): DTC's own Content trigger
-    writes `"{value}% {code}"` joined by `" / "`, while the retired Lakebase
-    source wrote `"Cotton 97%, Spandex 3%"`. Those disagreed on every row, so
-    each system overwrote the other and `Content` could never settle -- which
-    at a 2-hourly cadence meant a write window on EVERY run. It was worked
-    around by making Content write-once.
+    writes `"{value}% {code}"` joined by `" / "`, while the Lakebase source
+    writes `"Cotton 97%, Spandex 3%"`. Those disagree on every row, so each
+    system overwrites the other and `Content` can never settle -- which at a
+    2-hourly cadence means a write window on EVERY run. It is worked around by
+    making Content write-once.
 
     Because the BeProduct source is STRUCTURED, we choose the rendering. Matching
-    DTC's notation exactly removes the disagreement at its root, so Content
-    becomes a normally-owned, stable field instead of a fill-once special case.
+    DTC's notation exactly removed the disagreement at its root, so Content
+    could have become a normally-owned field instead of a fill-once special
+    case. **That benefit was never harvested** -- `material_fill_if_blank_
+    columns` was left at "Content" throughout -- and the 2026-09-22 walkback
+    returns the source to Lakebase's notation, so write-once MUST stay on.
 
     A plain string passes through unchanged (defensive: the API may return one
     for a free-text entry).
@@ -578,6 +634,51 @@ def build_target_segments_from_variations(
     if parsed.main_fabric is None:
         return None
     return [parsed.main_fabric] + list(parsed.fabric_list)
+
+
+# ---------------------------------------------------------------------------
+# Reading Stage 20b's Delta table, whichever source wrote it
+# ---------------------------------------------------------------------------
+
+# Stage 20b (`v2_pull_bom_segments`) has written two different column shapes,
+# and consumers must accept either so the BOM source can be switched by
+# redeploying ONE notebook:
+#
+#   custom_fields / parse_error   Lakebase techpack  (live; and pre-2026-09-16)
+#   segments_json / error         PageBomVariation   (2026-09-16 .. 2026-09-22)
+#
+# Sniffing the columns rather than keying off a parameter means a consumer
+# cannot be pointed at a table it will silently misread.
+
+def segments_table_mode(columns) -> str:
+    """Which shape a Stage 20b table is in: "segments_json" or "custom_fields"."""
+    return "segments_json" if "segments_json" in set(columns) else "custom_fields"
+
+
+def segments_table_error_col(columns) -> str:
+    """The per-row error column that goes with `segments_table_mode()`."""
+    return "error" if "error" in set(columns) else "parse_error"
+
+
+def segments_from_delta_value(value: Any, mode: str) -> Optional[List[Dict[str, Any]]]:
+    """
+    One Stage 20b row's payload -> the target segment list, or None.
+
+    None means "no Main Fabric segment for this style this run", which every
+    caller MUST treat as "take zero actions" and never as licence to revert
+    already-enriched DTC rows.
+
+    `mode` comes from `segments_table_mode()`. In "segments_json" mode the
+    segments were parsed upstream and are just decoded; in "custom_fields" mode
+    the raw Lakebase payload is parsed here, through the same unit-tested
+    `build_target_segments()` the enrichment path uses.
+    """
+    if value is None:
+        return None
+    if mode == "segments_json":
+        segments = json.loads(value) if isinstance(value, str) else value
+        return segments or None
+    return build_target_segments(value)
 
 
 # ---------------------------------------------------------------------------

@@ -25,9 +25,26 @@ Resolution chain (all decisions are pure, in sync/bom_push.py):
 
 The pair is unique within a style (owner confirmation) and is the SAME
 `bom.segment_key()` the enrichment direction uses, so both directions agree on
-what "the same fabric assignment" means. The write uses the GUID `materialId`,
-so the planned reorganisation of material master into per-customer folders
-cannot break it.
+what "the same fabric assignment" means. The write always uses the GUID.
+
+How the GUID is obtained -- CHANGED by the 2026-09-22 source walkback
+--------------------------------------------------------------------
+PageBomVariation segments carried `materialId` outright. The Lakebase techpack
+source that replaced it has no such column; it offers only `**MaterialCode`,
+which IS the material master's `headerNumber` (e.g. "LF-BD26-000002--SH" --
+the "--SH" suffix is part of the key). So this notebook now resolves
+code -> GUID itself, via `resolve_material_ids()`, before planning.
+
+That resolution is the one place this stage can go wrong in a way the
+read-back verify would not save us from, so it refuses rather than guesses:
+`attributes_list` is used directly (never `attributes_get_by_number`, which
+hides a second match behind `next(..., None)`), the server's `Eq` result is
+post-filtered to an exact `headerNumber`, and a code matching zero or several
+materials is reported in the `unresolved` bucket and never written.
+
+It also re-introduces a risk the GUID route did not have: it depends on
+`headerNumber` staying globally unique once material master is reorganised
+into per-customer folders. The lookup is deliberately folder-agnostic.
 
 The hazard this stage is built around
 -------------------------------------
@@ -69,6 +86,7 @@ import datetime as _dt_mod
 if not hasattr(_dt_mod, "UTC"):
     _dt_mod.UTC = _dt_mod.timezone.utc
 
+import itertools
 import json
 from datetime import datetime, timezone
 
@@ -114,15 +132,25 @@ if (dbutils.widgets.get("run_customer_code_push") or "true").strip().lower() != 
 print("\nStep 1: loading DTC rows and BOM segments …")
 
 segments_by_style = {}
+bom_mode = None
 try:
-    for r in spark.table(bom_table).collect():
-        if r["error"] or not r["segments_json"]:
+    _df = spark.table(bom_table)
+    # Accept EITHER Stage 20b shape, like wip_push and build_costing already do.
+    # This notebook did not sniff before 2026-09-22 and read segments_json
+    # unconditionally, so the source walkback would have made it exit
+    # NO_BOM_SEGMENTS on a table that is perfectly readable.
+    bom_mode = bom.segments_table_mode(_df.columns)
+    _errcol = bom.segments_table_error_col(_df.columns)
+    for r in _df.collect():
+        if r[_errcol]:
             continue
-        segments_by_style[r["bp_style_number"]] = json.loads(r["segments_json"])
+        segs = bom.segments_from_delta_value(r[bom_mode], bom_mode)
+        if segs:
+            segments_by_style[r["bp_style_number"]] = segs
 except Exception as e:  # noqa: BLE001
     print(f"  ⚠ {bom_table} unavailable ({e}) -- nothing can be resolved; exiting.")
     dbutils.notebook.exit(json.dumps({"status": "NO_BOM_SEGMENTS", "error": str(e)[:300]}))
-print(f"  styles with BOM segments : {len(segments_by_style)}")
+print(f"  styles with BOM segments : {len(segments_by_style)}  (source column: {bom_mode})")
 
 dtc_rows = []
 for r in spark.table(wip_table).select("data_json").collect():
@@ -160,9 +188,62 @@ def material_code(material_id):
     return None
 
 
+def resolve_material_ids(codes):
+    """{code: material GUID} for codes resolving to EXACTLY ONE material, plus
+    {code: reason} for every code that did not. Never raises, never guesses.
+
+    Needed since the 2026-09-22 source walkback: Lakebase BOM rows carry only
+    `**MaterialCode` (the material's `headerNumber`), not the `materialId` GUID
+    the PageBomVariation source gave us.
+
+    `attributes_get_by_number()` is deliberately NOT used. It is
+    `next(attributes_list(...), None)` -- it returns the first hit and silently
+    DISCARDS a second, which is exactly the guess this module exists to refuse.
+    We take the full match set and require it to be unique.
+    """
+    resolved, refused = {}, {}
+    for code in codes:
+        try:
+            hits = list(itertools.islice(client.material.attributes_list(
+                filters=[{"field": "header_number", "operator": "Eq",
+                          "value": code}]), 5))
+            # `Eq` is the server's notion of equality, not ours. Post-filter on
+            # an exact headerNumber so a prefix/fuzzy match can never resolve.
+            # .strip() only: a leading-space header_number is real live data
+            # (AGENTS.md). Case is NOT folded -- that would be a guess.
+            exact = [h for h in hits
+                     if str(h.get("headerNumber") or "").strip() == code.strip()]
+            if len(exact) == 1:
+                resolved[code] = exact[0].get("id")
+            elif not exact:
+                refused[code] = (f"no material with header_number={code!r}"
+                                 + (f" ({len(hits)} fuzzy hit(s) rejected)" if hits else ""))
+            else:
+                # A shared master record must not be decided by result order.
+                refused[code] = (f"header_number={code!r} matches {len(exact)} "
+                                 f"materials -- refusing to pick")
+        except Exception as e:  # noqa: BLE001
+            # One flaky lookup must not sink a run that would write the others.
+            refused[code] = f"lookup failed: {type(e).__name__}: {str(e)[:160]}"
+    return resolved, refused
+
+
+# Only codes that a DTC row carrying a value actually needs -- so with the
+# column blank on every row (live state 2026-09-17) this makes ZERO API calls.
+# Materials are shared (60 rows -> 8 materials), so this is also the cache:
+# one lookup per distinct code per run.
+_codes = bom_push.required_material_codes(dtc_rows, segments_by_style)
+material_id_by_code, unresolved_codes = ({}, {})
+if _codes:
+    material_id_by_code, unresolved_codes = resolve_material_ids(_codes)
+print(f"\nStep 1b: resolved {len(material_id_by_code)}/{len(_codes)} LF material code(s)")
+for _c, _why in sorted(unresolved_codes.items()):
+    print(f"    ⚠ UNRESOLVED {_c}: {_why}")
+
 # A first pass with no `current` map tells us WHICH materials matter; then we
 # read only those and re-plan with the lean-write check applied.
-probe = bom_push.plan_customer_code_push(dtc_rows, segments_by_style)
+probe = bom_push.plan_customer_code_push(
+    dtc_rows, segments_by_style, material_id_by_code=material_id_by_code)
 current = {}
 for wr in probe.writes:
     try:
@@ -171,8 +252,9 @@ for wr in probe.writes:
         print(f"  ⚠ could not read material {wr.material_id}: {str(e)[:160]}")
 print(f"\nStep 2: read current code for {len(current)} material(s)")
 
-plan = bom_push.plan_customer_code_push(dtc_rows, segments_by_style,
-                                        current_by_material=current)
+plan = bom_push.plan_customer_code_push(
+    dtc_rows, segments_by_style, current_by_material=current,
+    material_id_by_code=material_id_by_code)
 
 # COMMAND ----------
 
@@ -190,6 +272,9 @@ for u in plan.unmatched[:20]:
           f"({u['fabric_group']}, {u['mill_fabric_article']}) value={u['value']!r}")
 for a in plan.ad_hoc_skipped[:20]:
     print(f"    ⚠ AD-HOC ROW skipped {a['bp_style_number']}/{a['color']}")
+for u in plan.unresolved[:20]:
+    print(f"    ⚠ UNRESOLVED {u['bp_style_number']}/{u['color']} "
+          f"code={u['material_code']!r} value={u['value']!r} -- {u['reason']}")
 
 log_rows, written, failed = [], 0, 0
 if plan.is_empty():
@@ -228,6 +313,16 @@ for c in plan.conflicts:
                      c["lf_material_id"], "warn", "conflicting_values",
                      json.dumps(c["values"])))
 
+# An LF code that resolved to zero or several materials. No material_id by
+# definition -- the code itself is the only handle, so it goes in the
+# lf_material_id slot where an operator will look for it.
+for u in plan.unresolved:
+    log_rows.append((now, run_id, "customer_code_push", None,
+                     u["material_code"], "warn", "unresolved_material_code",
+                     json.dumps({"bp_style_number": u["bp_style_number"],
+                                 "color": u["color"], "value": u["value"],
+                                 "reason": u["reason"]})))
+
 if log_rows:
     SCHEMA = StructType([
         StructField("log_time", TimestampType()), StructField("run_id", StringType()),
@@ -248,6 +343,9 @@ summary = {
         "dtc_rows": len(dtc_rows),
         "dtc_rows_with_value": with_value,
         "styles_with_bom_segments": len(segments_by_style),
+        "bom_source_column": bom_mode,
+        "material_codes_needed": len(_codes),
+        "material_codes_resolved": len(material_id_by_code),
     },
     "plan": plan.summary(),
     "written": written,
@@ -255,8 +353,17 @@ summary = {
     "conflicts": plan.conflicts[:20],
     "unmatched": plan.unmatched[:20],
     "ad_hoc_skipped": plan.ad_hoc_skipped[:20],
+    "unresolved": plan.unresolved[:20],
+    "unresolved_codes": dict(sorted(unresolved_codes.items())[:20]),
 }
+# Worst outcome wins. An unresolved code means work was silently NOT done, so
+# it must not be reported as OK -- but it ranks below a conflict, which means
+# two rows actively disagree about a shared master record.
+if plan.unresolved:
+    summary["status"] = "COMPLETED_WITH_UNRESOLVED"
 if plan.conflicts:
     summary["status"] = "COMPLETED_WITH_CONFLICTS"
+if failed:
+    summary["status"] = "COMPLETED_WITH_ERRORS"
 print("\n" + json.dumps(summary, indent=2)[:4000])
 dbutils.notebook.exit(json.dumps(summary))

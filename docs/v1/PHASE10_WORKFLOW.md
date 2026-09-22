@@ -6,11 +6,15 @@
 > **The entire BOM source described below is retired on `v2`.** This file is the
 > v1 historical record and is accurate for `master`.
 >
-> 1. **Source.** v1 read externally-processed techpack data from Lakebase
->    (`alb_tpm_uat.customer_teckpack_style_latest` / `_log`, `custom_fields`).
->    v2 reads the **BeProduct `PageBomVariation` API** directly
->    (`v2_pull_bom_segments` → `bom_segments`); the `alb_tpm_*` dependency is
->    gone. `PageCBOM` is NOT used — BomVariation for both read and write.
+> 1. **Source — UNCHANGED after all (corrected 2026-09-22).** An earlier version
+>    of this banner said v2 had moved to the BeProduct `PageBomVariation` API.
+>    It had, from 2026-09-16 to 2026-09-22, and the owner then **walked that
+>    back**. v2 reads the same Lakebase techpack source described below
+>    (`alb_tpm_uat.customer_teckpack_style_latest` / `_log`, `custom_fields`),
+>    through `v2_pull_bom_segments` → `bom_segments`. So everything about the
+>    SOURCE in this document is accurate for `v2` as well as `master`; only the
+>    task/DAG shape (point 2) differs. The PageBomVariation parser is kept
+>    dormant in `sync/bom.py`; branch `v2-bomvariation` snapshots that pipeline.
 > 2. **Task and DAG.** `fill_bom_data` and both `repull_dtc*` tasks no longer
 >    exist. The enrichment decision tree moved into `sync/wip_plan.py` and is
 >    applied in the single Stage 40 write window; there is no re-pull, because
@@ -19,6 +23,10 @@
 > 4. **New reverse direction** (no v1 equivalent): Stage 55 pushes DTC
 >    `"Fabric Customer # or SAP #"` → the BeProduct **material master**'s
 >    `customer_material_code`. The BOM row only displays that code.
+>    **Disarmed 2026-09-22** (`run_customer_code_push=false`): it resolved its
+>    target through the `materialId` only PageBomVariation supplied, and now has
+>    to resolve one from `**MaterialCode` (the material's `headerNumber`)
+>    instead. Pending the `v2_probe_material_code` verdict.
 >
 > Current behaviour: [../PIPELINE.md](../PIPELINE.md) (Stages 20b / 40 / 55).
 
