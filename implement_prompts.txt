@@ -831,4 +831,26 @@ We are not using adhoc BOM rows, so write to material master is the way.
 There is a "LF Material ID" on each BomVariation line, this serves as the unique key to Material master.
 The project team is planned to reorganised material master into folders that segregate by customer, but that should not affect the material master lookup. The Material master, like style, has a list of 'header' fieds, one of which is "customer material code". BomVariation now lookup this code (via LF Material No) and display inline.
 
-## costing chart validation
+Question from user: Given Duty rate of a particular product to country is changed, when will costing chart rate get updated?
+- given costing chart already contains (outdated) rate fully populated
+- setting all "lft.beproduct.nt_orbit_duty_cache.looked_up_at" to 1 year ago, trigger Duty job, doesn't get any new rows in the cache table.
+- setting all duty_rate / tariff_rate / hs_code to null on costing_chart, run Duty job, the job run 5+ min, but also nothing filled (and nothing cached)
+- need to truncate costing chart?
+
+Expectation:
+- in normal runs, once filled in tariff / duty / hts_code stays in master chart row, no longer update
+- in order to update, user manually clear these fields (all are null) from DTC WIP
+    - update means  job should fill master chart again with what latest value from API cache
+    - imply costing chart should 'overwrite' everytime, so when user clear WIP fields, costing chart get corresponding 'fresh' rows
+- the retrieve checks  OrbitDuty API cached results honoring TTL.
+
+- use a job parameter to trigger a special case: recompute ALL tariff / duty / hts_code regardless of WIP null or not, and retrieve latest API return regardless of TTL.
+    - so force_refresh_duty=true means complete refresh
+
+
+# validate
+validate current (new) KTB SS28 Collections request:there are multiple "main fabric" per style, 
+and extra "fabric" lines that doesn't have 1. photo 2. header fields.
+
+# claification 22/9/26
+WALKBACK from using BomVariation API to extracted JSON by Techpack: alb_tpm_uat.public.customer_techpack_style_latest + customer_techpack_style_log 
