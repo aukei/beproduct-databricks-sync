@@ -744,7 +744,27 @@ fields; the key is `rowFields`, not `fields`:**
 - **Proposed from the MATCHED branch too**, not only at first-time enrichment.
   A row enriched before the column existed matches its segment, so the matched
   branch is the ONLY one it ever reaches again; without that it would stay blank
-  forever. Write-once then makes it a one-time backfill rather than churn.
+  forever.
+- **NOT write-once, and NO "NO TPM BOM" filler** (owner decision, revised within
+  the same day after the owner challenged the first cut). The reasoning is worth
+  keeping because the wrong answer looked obviously right:
+  - The analogy to `Content` is FALSE. `Content` is write-once because **DTC's
+    own trigger** rewrites it in a different notation, so the two systems fight
+    every run. **Nothing competes for `LF Fabric ID`** -- this pipeline is its
+    only writer -- so write-once bought nothing.
+  - And it cost the thing that matters here. The BOM source is EXTERNALLY
+    PREPARED and can only land AFTER a style reaches DTC, so it arrives late and
+    PROGRESSIVELY: a first extraction may carry a blank `**MaterialCode` and a
+    later one fill or correct it. Write-once froze whichever value landed first
+    -- live-reproduced: `LF-AAA -> LF-BBB` was dropped as "target already
+    non-blank". Deferred/partial extraction is the NORMAL path, not an edge case.
+  - A **filler would have been worse than useless**: `material_fill_if_blank_cols`
+    does NOT know `"NO TPM BOM"` is a placeholder (only `is_unenriched()` does),
+    so a sentinel in this column would read as "already has a value" and block
+    the real one permanently. `Fabric Group`'s sentinel already signals
+    "awaiting BOM extraction" for the whole row.
+  - A blank is still never written, in either branch, so a not-yet-extracted
+    code never blanks a value DTC already holds.
 - **A blank is never written**, unconditionally -- stricter than the
   Placement/Content guard, which only holds a blank back when the row already
   has a real value. There is no useful blank material key, and a

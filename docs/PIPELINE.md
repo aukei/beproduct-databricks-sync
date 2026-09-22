@@ -571,8 +571,11 @@ limit, so it has to be re-established explicitly in the composition layer.
    - **`LF Fabric ID`** (added 2026-09-22) is proposed on an exact key match as
      well as at first-time enrichment — a row enriched before the column existed
      only ever reaches the matched branch again, so it would otherwise stay blank
-     forever. It is **write-once** and a **blank is never written**, which makes
-     this a one-time backfill rather than a per-run diff.
+     forever. A **blank is never written**, but it is a **normal upsert, not
+     write-once**: the techpack extraction can only run *after* a style reaches
+     DTC, so it arrives late and progressively, and a corrected
+     `LF_Material_ID` must be able to propagate. Safe because this pipeline is
+     its only writer — unlike `Content`, which DTC's own trigger contests.
 4. **Fan-out**: for each "Fabric" segment whose key is not already represented —
    by exact match or blank-article backfill — duplicate every existing row of that
    colorway once per such segment.

@@ -655,27 +655,42 @@ _row_blank_lf = dtc_row("r1", 1, **{FG: "Main Fabric", MA: "WV-0003",
                                     PL: "HEM", CT: "Cotton 100%", LF: None})
 p_lf = wip_plan.compute_request_plan(
     SCOPE, [_row_blank_lf], [bp_row()], bom_by_style=_boms_lf,
-    material_fill_if_blank_cols=frozenset({CT, LF}), allowed_cols=ALLOWED)
+    material_fill_if_blank_cols=frozenset({CT}), allowed_cols=ALLOWED)
 check("[7m-2] a pre-existing enriched row gets LF Fabric ID backfilled",
       p_lf.summary()["columns_changed"].get(LF) == 1, p_lf.explain())
 check("[7m-3] no contract violation -- it is a declared material column",
       not p_lf.violations, p_lf.violations)
 
-_row_filled_lf = dtc_row("r1", 1, **{FG: "Main Fabric", MA: "WV-0003", PL: "HEM",
-                                     CT: "Cotton 100%", LF: "SOMETHING-ALREADY-THERE"})
-p_lf_once = wip_plan.compute_request_plan(
-    SCOPE, [_row_filled_lf], [bp_row()], bom_by_style=_boms_lf,
-    material_fill_if_blank_cols=frozenset({CT, LF}), allowed_cols=ALLOWED)
-check("[7m-4] write-once: a value already in the cell is never overwritten",
-      p_lf_once.is_empty(), p_lf_once.explain())
+# NOT write-once, unlike Content. The BOM source is externally prepared and
+# lands only AFTER a style reaches DTC, so it arrives late and PROGRESSIVELY --
+# a first extraction may carry a blank code and a later one fill or correct it.
+# Write-once would freeze whichever value landed first. Safe because this
+# pipeline is the only writer of this column; Content has DTC's own trigger
+# competing with it, which is the whole reason Content stays write-once.
+_row_stale_lf = dtc_row("r1", 1, **{FG: "Main Fabric", MA: "WV-0003", PL: "HEM",
+                                    CT: "Cotton 100%", LF: "LF-OLD-VALUE"})
+p_lf_fix = wip_plan.compute_request_plan(
+    SCOPE, [_row_stale_lf], [bp_row()], bom_by_style=_boms_lf,
+    material_fill_if_blank_cols=frozenset({CT}), allowed_cols=ALLOWED)
+check("[7m-4] a CORRECTION at the source propagates (not write-once)",
+      p_lf_fix.summary()["columns_changed"].get(LF) == 1, p_lf_fix.explain())
 
 _row_correct_lf = dtc_row("r1", 1, **{FG: "Main Fabric", MA: "WV-0003", PL: "HEM",
                                       CT: "Cotton 100%", LF: "LF-BD26-000002--SH"})
 p_lf_settled = wip_plan.compute_request_plan(
     SCOPE, [_row_correct_lf], [bp_row()], bom_by_style=_boms_lf,
-    material_fill_if_blank_cols=frozenset({CT, LF}), allowed_cols=ALLOWED)
-check("[7m-5] once filled, it never writes again -- no write window per run",
+    material_fill_if_blank_cols=frozenset({CT}), allowed_cols=ALLOWED)
+check("[7m-5] once it agrees with the source, it never writes again -- no churn",
       p_lf_settled.is_empty(), p_lf_settled.explain())
+
+# The sequencing case the owner flagged: the techpack extraction can only run
+# AFTER the style reaches DTC, so a new row is blank here for one or more runs.
+_seg_no_code = [dict(_seg_lf[0], lf_material_id=None)]
+p_lf_pending = wip_plan.compute_request_plan(
+    SCOPE, [_row_blank_lf], [bp_row()], bom_by_style={"KTB-1": _seg_no_code},
+    material_fill_if_blank_cols=frozenset({CT}), allowed_cols=ALLOWED)
+check("[7m-6] a source that has not extracted a code yet never blanks DTC",
+      p_lf_pending.is_empty(), p_lf_pending.explain())
 
 
 # ---------------------------------------------------------------------------

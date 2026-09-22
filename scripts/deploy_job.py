@@ -387,12 +387,17 @@ JOB_PARAMS = {
     # is all that Phase 9a's completeness gate needs; re-writing a non-blank one
     # would diff on EVERY run and open a write window every time.
     #
-    # "LF Fabric ID" is WRITE-ONCE too (owner decision 2026-09-22). It is the
-    # cross-system material key, so it is written when the cell is blank and
-    # then left alone -- a value already there is either correct or a
-    # deliberate human correction, and neither is worth a write window. Live
-    # -verified writable in WIP_ITS_USE (string, no formula) the same day.
-    "material_fill_if_blank_columns": "Content,LF Fabric ID",
+    # "LF Fabric ID" is deliberately NOT here (owner decision 2026-09-22,
+    # revised same day). It was briefly write-once by analogy with Content --
+    # but the analogy is false. Content is write-once because DTC's OWN trigger
+    # rewrites it in a different notation, so the two systems fight forever.
+    # Nothing else writes LF Fabric ID; this pipeline is its only writer. So
+    # write-once bought nothing and cost the one thing that matters for a
+    # cross-system key: a CORRECTION at the source could never reach DTC
+    # (LF-AAA -> LF-BBB was dropped as "target already non-blank"). It is a
+    # normal upsert now -- still never writes a blank, still never churns once
+    # the values agree.
+    "material_fill_if_blank_columns": "Content",
 }
 
 

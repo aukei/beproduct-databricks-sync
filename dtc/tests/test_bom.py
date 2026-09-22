@@ -798,11 +798,23 @@ check(len(_acts) == 1
       "an already-enriched row gets LF Fabric ID backfilled, and ONLY that "
       "(lean PATCH -- everything else already matches)")
 
-# ...and once filled it goes quiet. Without this the backfill would re-fire
-# every run, opening a DTC write window at every 2-hourly tick.
+# ...and once it agrees with the source it goes quiet. Without this the write
+# would re-fire every run, opening a DTC write window at every 2-hourly tick.
 _filled = [dict(_pre_existing[0], lf_material_id="LF-BD26-000002--SH")]
 check(plan_style_enrichment(_filled, SINGLE_MAIN_ONLY) == [],
-      "once filled, it never writes again -- a one-time backfill, not a churn")
+      "once it agrees with the source, it never writes again -- no churn")
+
+# NOT write-once (owner decision 2026-09-22). The BOM source is externally
+# prepared and can only land AFTER a style reaches DTC, so it arrives late and
+# PROGRESSIVELY -- a first extraction may carry a blank code and a later one
+# fill or correct it. Freezing the first value landed would be wrong. This is
+# safe only because nothing else writes this column; Content keeps write-once
+# because DTC's own trigger competes with it.
+_stale = [dict(_pre_existing[0], lf_material_id="LF-OLD-VALUE")]
+_acts = plan_style_enrichment(_stale, SINGLE_MAIN_ONLY)
+check(len(_acts) == 1
+      and _acts[0].wip_fields == {WIP_FIELD_LF_MATERIAL: "LF-BD26-000002--SH"},
+      "a CORRECTION at the source propagates -- LF Fabric ID is not write-once")
 
 # First-time enrichment carries it in the full field set.
 _virgin = [{"row_id": "r1", "fabric_group": DUMMY_FABRIC_GROUP,
@@ -819,6 +831,25 @@ _no_code = bom_table(
 _acts = plan_style_enrichment(_virgin, _no_code)
 check(WIP_FIELD_LF_MATERIAL not in _acts[0].wip_fields,
       "a source with no **MaterialCode never PATCHes a blank LF Fabric ID")
+# ...and the same on an already-enriched row: a not-yet-extracted code must
+# never blank a value DTC already holds.
+check(plan_style_enrichment(_filled, _no_code) == [],
+      "nor does it blank an LF Fabric ID the row already has")
+
+# THE SEQUENCING CASE the owner flagged: the techpack extraction can only run
+# AFTER the style has reached DTC, so the very first runs legitimately have NO
+# `teckpack_style_log` record at all. The row sits on Phase 1's "NO TPM BOM"
+# sentinels until it appears, then takes first-time enrichment in full.
+_awaiting = [{"row_id": "r1", "fabric_group": DUMMY_FABRIC_GROUP,
+              "mill_fabric_article": DUMMY_FABRIC_GROUP, "placement": None,
+              "content": None, "lf_material_id": None}]
+check(plan_style_enrichment(_awaiting, None) == [],
+      "no BOM record yet -> zero actions; the sentinels stand, nothing reverts")
+_acts = plan_style_enrichment(_awaiting, SINGLE_MAIN_ONLY)
+check(len(_acts) == 1 and _acts[0].wip_fields.get(WIP_FIELD_LF_MATERIAL) == "LF-BD26-000002--SH"
+      and _acts[0].wip_fields.get(WIP_FIELD_FABRIC_GROUP) == "Main Fabric",
+      "when the extraction finally lands, the sentinel row is enriched in full, "
+      "LF Fabric ID included -- deferred extraction is the NORMAL path, not an edge case")
 
 # It must NOT have become part of the match key: re-keying would make every
 # pre-existing row look unmatched and trigger mass re-enrichment.

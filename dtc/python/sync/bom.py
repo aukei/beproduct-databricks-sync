@@ -236,6 +236,15 @@ WIP_FIELD_CONTENT = "Content"
 # Sourced from `**MaterialCode` (Lakebase) or `LF MATERIAL ID` (PageBomVariation)
 # -- both parsers already emit it as `lf_material_id`, so this works whichever
 # BOM source is live.
+#
+# NOT write-once, and NOT given a "NO TPM BOM" filler at INSERT (owner
+# decisions, 2026-09-22). The BOM source is externally prepared and can only
+# land AFTER a style has reached DTC, so this column is blank on a new row and
+# fills in whenever the extraction eventually runs -- `Fabric Group`'s sentinel
+# already signals "awaiting BOM" for the whole row, and a second sentinel here
+# would actively harm: `material_fill_if_blank_cols` does not know the sentinel
+# is a placeholder (only `is_unenriched()` does), so a filler would read as
+# "already has a value" and block the real one forever.
 WIP_FIELD_LF_MATERIAL = "LF Fabric ID"
 
 # ColumnHeader names in customer_teckpack_style_log.custom_fields's BOM Table
@@ -980,10 +989,18 @@ def plan_style_enrichment(
                 # MATCHED row too, not only at first-time enrichment. Without
                 # this, every row enriched before the column existed would keep
                 # a blank LF Fabric ID forever -- the matched branch is the only
-                # one they ever reach again. Same one-way guard as the others: a
-                # blank target never overwrites a real value. The caller makes
-                # it write-once via `material_fill_if_blank_columns`, so a real
-                # value already in the cell is preserved even if it differs.
+                # one they ever reach again.
+                #
+                # It is a NORMAL upsert, deliberately NOT write-once. The BOM
+                # source is externally prepared and lands only AFTER a style has
+                # reached DTC, so it arrives late and progressively: a first
+                # extraction may carry a blank `**MaterialCode` and a later one
+                # fill it, or correct it. Write-once would freeze whichever
+                # value landed first. Safe because this pipeline is the ONLY
+                # writer of this column -- unlike Content, which DTC's own
+                # trigger rewrites in a different notation and which therefore
+                # must stay write-once. The blank guard below still applies, so
+                # a source that has not extracted a code yet never blanks DTC.
                 _new_lf = matched_target.get("lf_material_id")
                 if not _blank(_new_lf) and _values_differ(row.get(lf_material_key), _new_lf):
                     upsert_fields[WIP_FIELD_LF_MATERIAL] = _new_lf

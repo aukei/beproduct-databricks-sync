@@ -134,11 +134,26 @@ columns of the `Type == "BOM"` table.
 > pre-existing row (blank in this column) looking unmatched and trigger mass
 > re-enrichment.
 >
-> It is **write-once** (`material_fill_if_blank_columns`) and a **blank is never
-> written** — stricter than the Placement/Content guard, which only holds a blank
-> back when the row already has a real value. There is no useful blank material
-> key. Rows enriched before the column existed are backfilled from the matched
-> branch, once, and then stay quiet.
+> A **blank is never written** — stricter than the Placement/Content guard, which
+> only holds a blank back when the row already has a real value. There is no
+> useful blank material key. Rows enriched before the column existed are
+> backfilled from the matched branch.
+>
+> It is a **normal upsert, deliberately NOT write-once** (revised 2026-09-22 the
+> same day it was added). The tempting analogy to `Content` is false: `Content`
+> is write-once because *DTC's own trigger* rewrites it in a different notation,
+> so the two systems would fight every run. **Nothing competes for `LF Fabric
+> ID`** — this pipeline is its only writer. Meanwhile the BOM source is
+> externally prepared and can only land *after* a style reaches DTC, so it
+> arrives late and progressively: a first extraction may carry a blank
+> `**MaterialCode` and a later one fill or correct it. Write-once would freeze
+> whichever value landed first and a source correction could never reach DTC.
+>
+> It gets **no `"NO TPM BOM"` filler** at INSERT either. `Fabric Group`'s
+> sentinel already signals "awaiting BOM extraction" for the whole row, and a
+> second one here would actively harm: `material_fill_if_blank_cols` does not
+> know the sentinel is a placeholder (only `is_unenriched()` does), so a filler
+> would read as "already has a value".
 >
 > `MATERIAL_OWNED_COLS` in `sync/wip_plan.py` must list it. Ground rule #6 strips
 > any column outside the canonical allow-list in `_finalize()` **and** logs a
