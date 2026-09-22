@@ -103,6 +103,10 @@ MATERIAL_OWNED_COLS: frozenset = frozenset({
     bom.WIP_FIELD_PLACEMENT,
     bom.WIP_FIELD_MILL_FABRIC_ARTICLE,
     bom.WIP_FIELD_CONTENT,
+    # Added 2026-09-22. Without this entry the column is silently stripped by
+    # the ground-rule #6 allow-list in `_finalize()` and logged as a contract
+    # VIOLATION -- the plan looks correct right up until the last pass.
+    bom.WIP_FIELD_LF_MATERIAL,
 })
 
 
@@ -370,7 +374,7 @@ def _projected_row(pr: PlannedRow) -> Dict[str, Any]:
     """
     Render a PlannedRow in the shape `bom.plan_style_enrichment()` expects.
 
-    It reads four material columns plus an opaque row-id and a colour key. The
+    It reads five material columns plus an opaque row-id and a colour key. The
     values must reflect INTENT -- what the row will hold after this run's
     already-planned writes -- not just what DTC currently holds, so that a
     style contribution INSERT (carrying "NO TPM BOM") is correctly seen as
@@ -389,6 +393,7 @@ def _projected_row(pr: PlannedRow) -> Dict[str, Any]:
         "mill_fabric_article": cur(bom.WIP_FIELD_MILL_FABRIC_ARTICLE),
         "placement": cur(bom.WIP_FIELD_PLACEMENT),
         "content": cur(bom.WIP_FIELD_CONTENT),
+        "lf_material_id": cur(bom.WIP_FIELD_LF_MATERIAL),
         # Carried for build_insert_row_payload(): the full row a fan-out
         # duplicate is copied from. Like every other value here it must reflect
         # INTENT -- `pr.fields` (this run's planned writes) layered OVER what

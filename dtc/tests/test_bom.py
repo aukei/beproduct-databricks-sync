@@ -24,7 +24,7 @@ from sync.bom import (
     to_wip_fields, segment_key, is_unenriched, build_target_segments,
     plan_style_enrichment, DUMMY_FABRIC_GROUP, RowAction,
     WIP_FIELD_FABRIC_GROUP, WIP_FIELD_PLACEMENT, WIP_FIELD_MILL_FABRIC_ARTICLE,
-    WIP_FIELD_CONTENT,
+    WIP_FIELD_CONTENT, WIP_FIELD_LF_MATERIAL,
     build_insert_row_payload, INSERT_EXCLUDE_COLS, compute_non_writable_cols,
     segments_table_mode, segments_table_error_col, segments_from_delta_value,
 )
@@ -216,12 +216,17 @@ check(wip_fields == {
     WIP_FIELD_PLACEMENT: "BODICE",
     WIP_FIELD_MILL_FABRIC_ARTICLE: "WV-0003",
     WIP_FIELD_CONTENT: "Cotton 100%",
+    WIP_FIELD_LF_MATERIAL: "LF-BD26-000002--SH",
 }, "maps to the exact live-confirmed raw DTC field names, INCLUDING Content "
-   "(reinstated 2026-09-09)")
+   "(reinstated 2026-09-09) and LF Fabric ID (added 2026-09-22)")
+# Live-verified against WIP_ITS_USE (205 dynamicFields) on 2026-09-22. Note the
+# WIP column is "LF **Fabric** ID"; "LF Material ID" is NOT in this view, even
+# though that is the label used on the BeProduct material master.
 check(WIP_FIELD_FABRIC_GROUP == "Fabric Group"
       and WIP_FIELD_PLACEMENT == "Placement"
       and WIP_FIELD_MILL_FABRIC_ARTICLE == "Mill Fabric Article #"
-      and WIP_FIELD_CONTENT == "Content",
+      and WIP_FIELD_CONTENT == "Content"
+      and WIP_FIELD_LF_MATERIAL == "LF Fabric ID",
       "raw field name constants match the live WIP view definition")
 
 # ---------------------------------------------------------------------------
@@ -348,7 +353,8 @@ print("  [11g] upsert: row already matches by (Fabric Group, Mill Fabric Article
       "Placement AND Content fixed independently")
 row_matches_main = {"row_id": "r1", "fabric_group": "Main Fabric",
                      "mill_fabric_article": "WV-0003", "placement": "WRONG PLACEMENT",
-                     "content": "Wrong Content"}
+                     "content": "Wrong Content",
+                     "lf_material_id": "LF-BD26-000002--SH"}
 actions = plan_style_enrichment([row_matches_main], SINGLE_MAIN_ONLY)
 check(len(actions) == 1 and actions[0].kind == "update", "exactly one update")
 check(actions[0].wip_fields == {WIP_FIELD_PLACEMENT: "BODICE", WIP_FIELD_CONTENT: "Cotton 100%"},
@@ -358,7 +364,8 @@ check(actions[0].wip_fields == {WIP_FIELD_PLACEMENT: "BODICE", WIP_FIELD_CONTENT
 print("  [11h] upsert: only Content drifted (Placement already correct) -> Content-only update")
 row_content_only_wrong = {"row_id": "r1", "fabric_group": "Main Fabric",
                            "mill_fabric_article": "WV-0003", "placement": "BODICE",
-                           "content": "Stale Content"}
+                           "content": "Stale Content",
+                           "lf_material_id": "LF-BD26-000002--SH"}
 actions = plan_style_enrichment([row_content_only_wrong], SINGLE_MAIN_ONLY)
 check(len(actions) == 1 and actions[0].wip_fields == {WIP_FIELD_CONTENT: "Cotton 100%"},
       "ONLY Content is included in the PATCH when only Content changed (lean PATCH body)")
@@ -366,7 +373,8 @@ check(len(actions) == 1 and actions[0].wip_fields == {WIP_FIELD_CONTENT: "Cotton
 print("  [11i] upsert: row already matches AND both fields already correct -> no-op (idempotent)")
 row_fully_correct = {"row_id": "r1", "fabric_group": "Main Fabric",
                       "mill_fabric_article": "WV-0003", "placement": "BODICE",
-                      "content": "Cotton 100%"}
+                      "content": "Cotton 100%",
+                      "lf_material_id": "LF-BD26-000002--SH"}
 check(plan_style_enrichment([row_fully_correct], SINGLE_MAIN_ONLY) == [],
       "already fully matching -> no PATCH issued at all")
 
@@ -380,11 +388,14 @@ check(plan_style_enrichment([row_vanished_segment], SINGLE_MAIN_ONLY) == [],
 print("  [11k] never-insert-duplicate: a Fabric segment already represented -> no re-insert")
 existing_with_fabric_segments = [
     {"row_id": "r1", "fabric_group": "Main Fabric", "mill_fabric_article": "WV-0003",
-     "placement": "BODICE", "content": "Cotton 100%"},
+     "placement": "BODICE", "content": "Cotton 100%",
+     "lf_material_id": "LF-BD26-000002--SH"},
     {"row_id": "r2", "fabric_group": "Fabric", "mill_fabric_article": "WV-0061",
-     "placement": "HEM", "content": "Cotton 100%"},
+     "placement": "HEM", "content": "Cotton 100%",
+     "lf_material_id": "LF-BD26-000004--PN"},
     {"row_id": "r3", "fabric_group": "Fabric", "mill_fabric_article": "WG24-01706",
-     "placement": "LINING", "content": "Cotton 65%, Modal 28%, Spandex 7%"},
+     "placement": "LINING", "content": "Cotton 65%, Modal 28%, Spandex 7%",
+     "lf_material_id": "LF-CN26-001537--JE"},
 ]
 check(plan_style_enrichment(existing_with_fabric_segments, REAL_CUSTOM_FIELDS_KTB00023) == [],
       "all three segments already correctly represented -> zero actions, no duplicate insert")
@@ -723,9 +734,13 @@ check({k: _ef[k] for k in ("fabric_group", "placement", "mill_fabric_article", "
       "extract_variation_row_fields matches the Lakebase output shape on the 4 enrichment fields")
 check(set(_ef) >= {"material_id", "lf_material_id", "is_ad_hoc"},
       "and additionally carries material_id / lf_material_id / is_ad_hoc for the reverse push")
+# `lf_material_id` DOES reach DTC, as "LF Fabric ID" (2026-09-22). `material_id`
+# (the BeProduct-internal GUID) and `is_ad_hoc` must NOT -- they are plumbing for
+# the reverse push, meaningless to DTC.
 check(bom.to_wip_fields(_ef).keys() == {bom.WIP_FIELD_FABRIC_GROUP, bom.WIP_FIELD_PLACEMENT,
-                                        bom.WIP_FIELD_MILL_FABRIC_ARTICLE, bom.WIP_FIELD_CONTENT},
-      "the extra keys never leak into a DTC PATCH body")
+                                        bom.WIP_FIELD_MILL_FABRIC_ARTICLE, bom.WIP_FIELD_CONTENT,
+                                        bom.WIP_FIELD_LF_MATERIAL},
+      "LF Fabric ID reaches DTC; the GUID and is_ad_hoc never do")
 check(bom._bv_field(_r, "MILL/SUPPLIER NAME") == "AKIJ",
       "a dict-envelope field value is unwrapped")
 check(bom._bv_field(_r, "NO SUCH FIELD") is None, "unknown field -> None")
@@ -766,6 +781,53 @@ _acts = bom.plan_style_enrichment(_existing, {"xts_data": {}})
 check(_acts == [], "sanity: no BOM payload still yields no actions")
 
 # ---------------------------------------------------------------------------
+print("\n[16] LF Fabric ID -- the cross-system material key reaches DTC (2026-09-22)")
+# Live-verified in WIP_ITS_USE the same day: {"fieldName": "LF Fabric ID",
+# "type": "string", formula: false} -> writable via sheetData.
+
+# THE case this was added for: a row enriched BEFORE the column existed. It
+# matches its segment on (Fabric Group, Mill Fabric Article #), so the matched
+# branch is the only one it will ever reach again -- if that branch did not
+# propose LF Fabric ID, the row would stay blank forever.
+_pre_existing = [{"row_id": "r1", "fabric_group": "Main Fabric",
+                  "mill_fabric_article": "WV-0003", "placement": "BODICE",
+                  "content": "Cotton 100%", "lf_material_id": None}]
+_acts = plan_style_enrichment(_pre_existing, SINGLE_MAIN_ONLY)
+check(len(_acts) == 1
+      and _acts[0].wip_fields == {WIP_FIELD_LF_MATERIAL: "LF-BD26-000002--SH"},
+      "an already-enriched row gets LF Fabric ID backfilled, and ONLY that "
+      "(lean PATCH -- everything else already matches)")
+
+# ...and once filled it goes quiet. Without this the backfill would re-fire
+# every run, opening a DTC write window at every 2-hourly tick.
+_filled = [dict(_pre_existing[0], lf_material_id="LF-BD26-000002--SH")]
+check(plan_style_enrichment(_filled, SINGLE_MAIN_ONLY) == [],
+      "once filled, it never writes again -- a one-time backfill, not a churn")
+
+# First-time enrichment carries it in the full field set.
+_virgin = [{"row_id": "r1", "fabric_group": DUMMY_FABRIC_GROUP,
+            "mill_fabric_article": None, "placement": None, "content": None}]
+_acts = plan_style_enrichment(_virgin, SINGLE_MAIN_ONLY)
+check(_acts[0].wip_fields.get(WIP_FIELD_LF_MATERIAL) == "LF-BD26-000002--SH",
+      "first-time enrichment writes LF Fabric ID alongside the other four")
+
+# A blank material key is never written -- unlike Placement/Content, whose
+# guard only holds a blank back when the row already has a real value.
+_no_code = bom_table(
+    ["**MaterialCategory", "**SupplierRefNo", "**MaterialContent", "**Placement"],
+    [["Main Fabric", "WV-0003", "Cotton 100%", "BODICE"]])   # no **MaterialCode column
+_acts = plan_style_enrichment(_virgin, _no_code)
+check(WIP_FIELD_LF_MATERIAL not in _acts[0].wip_fields,
+      "a source with no **MaterialCode never PATCHes a blank LF Fabric ID")
+
+# It must NOT have become part of the match key: re-keying would make every
+# pre-existing row look unmatched and trigger mass re-enrichment.
+check(segment_key({"fabric_group": "Main Fabric", "mill_fabric_article": "WV-0003",
+                   "lf_material_id": "ANYTHING"})
+      == ("Main Fabric", "WV-0003"),
+      "segment_key is still (Fabric Group, Mill Fabric Article #) -- LF Fabric "
+      "ID is written, never matched on")
+
 print("\n[15] Reading Stage 20b's table in EITHER shape (2026-09-22 walkback)")
 # Consumers sniff the columns rather than trusting a parameter, so the BOM
 # source can be switched by redeploying one notebook. Three notebooks depend on

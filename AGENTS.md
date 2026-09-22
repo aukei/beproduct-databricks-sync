@@ -723,6 +723,38 @@ fields; the key is `rowFields`, not `fields`:**
   backup shows only `modifiedAt` / `modifiedBy`; all values, the row count and
   the variationName are as found.
 
+**`LF Fabric ID` now written to DTC (2026-09-22, owner spec):**
+- `LF_Material_ID` is THE material key across systems -- BeProduct, the techpack
+  extraction and DTC all identify a material by it -- so DTC carries it
+  explicitly now, not only the mill's own article code.
+- **Live-verified the same day** against `WIP_ITS_USE` (now **205**
+  dynamicFields, up from the 204 recorded elsewhere in this file):
+  `{"fieldName": "LF Fabric ID", "type": "string", "formula": false}` -> writable
+  via sheetData. **The WIP column is "LF _Fabric_ ID".** `LF Material ID` is NOT
+  in that view, even though that IS the label on the BeProduct material master
+  and in the retired Phase 8a fabric pull -- an easy and expensive confusion.
+- Sourced from `**MaterialCode` (Lakebase) or `LF MATERIAL ID`
+  (PageBomVariation). **Both parsers already emitted it as `lf_material_id`** for
+  the Stage 55 resolver, so this cost one line in `to_wip_fields()` plus the
+  guards below, and works whichever BOM source is live.
+- **Written, never matched on.** `segment_key()` stays
+  `(Fabric Group, Mill Fabric Article #)`. Making LF the key would leave every
+  pre-existing row -- blank in this column -- looking unmatched, triggering mass
+  re-enrichment and fan-out inserts.
+- **Proposed from the MATCHED branch too**, not only at first-time enrichment.
+  A row enriched before the column existed matches its segment, so the matched
+  branch is the ONLY one it ever reaches again; without that it would stay blank
+  forever. Write-once then makes it a one-time backfill rather than churn.
+- **A blank is never written**, unconditionally -- stricter than the
+  Placement/Content guard, which only holds a blank back when the row already
+  has a real value. There is no useful blank material key, and a
+  `{"LF Fabric ID": None}` PATCH is pure noise.
+- **GROUND RULE #6 TRAP, worth the entry on its own:** a column missing from
+  `wip_plan.MATERIAL_OWNED_COLS` is stripped in `_finalize()` **and** logged as a
+  contract violation. The pure layer, `_apply_material`, and the projected row
+  all looked correct; the field vanished in the final pass with an empty plan and
+  no obvious cause. Any new material column needs that entry.
+
 **BOM SOURCE WALKED BACK to the Lakebase techpack tables (2026-09-22, owner
 decision) -- reverses the 2026-09-16 switch recorded immediately below:**
 - `v2_pull_bom_segments` reads `alb_tpm_uat.public.customer_teckpack_style_latest`

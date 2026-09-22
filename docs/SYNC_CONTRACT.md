@@ -118,6 +118,31 @@ columns of the `Type == "BOM"` table.
 | Placement | `**Placement` | `placement` |
 | Mill Fabric Article # | `**SupplierRefNo` | `mill_fabric_article` |
 | Content | `**MaterialContent` | `content` |
+| LF Fabric ID | `**MaterialCode` | `lf_material_id` |
+
+> **`LF Fabric ID` added 2026-09-22 (owner spec).** `LF_Material_ID` is the
+> material key *across* systems — BeProduct, the techpack extraction and DTC all
+> identify a material by it — so DTC now carries it explicitly rather than only
+> carrying the mill's own article code. Live-verified in `WIP_ITS_USE` the same
+> day: `{"fieldName": "LF Fabric ID", "type": "string", formula: false}`.
+> **The WIP column is "LF *Fabric* ID"**; `LF Material ID` does not exist in that
+> view, though it is the label on the BeProduct material master and in the
+> retired Phase 8a fabric pull.
+>
+> It is **written, never matched on** — the BOM segment key stays
+> `(Fabric Group, Mill Fabric Article #)`. Making it a key would leave every
+> pre-existing row (blank in this column) looking unmatched and trigger mass
+> re-enrichment.
+>
+> It is **write-once** (`material_fill_if_blank_columns`) and a **blank is never
+> written** — stricter than the Placement/Content guard, which only holds a blank
+> back when the row already has a real value. There is no useful blank material
+> key. Rows enriched before the column existed are backfilled from the matched
+> branch, once, and then stay quiet.
+>
+> `MATERIAL_OWNED_COLS` in `sync/wip_plan.py` must list it. Ground rule #6 strips
+> any column outside the canonical allow-list in `_finalize()` **and** logs a
+> violation, so an omission looks correct right up to the final pass.
 
 **Ownership boundary.** The style contribution sets `DUMMY_FABRIC_GROUP` /
 `DUMMY_FABRIC_ARTICLE` ("NO TPM BOM") and a blank Placement on **INSERT only**;

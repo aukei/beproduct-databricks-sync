@@ -386,7 +386,13 @@ JOB_PARAMS = {
     # semantically identical for Phase 9's NT Orbit call. Filling a blank cell
     # is all that Phase 9a's completeness gate needs; re-writing a non-blank one
     # would diff on EVERY run and open a write window every time.
-    "material_fill_if_blank_columns": "Content",
+    #
+    # "LF Fabric ID" is WRITE-ONCE too (owner decision 2026-09-22). It is the
+    # cross-system material key, so it is written when the cell is blank and
+    # then left alone -- a value already there is either correct or a
+    # deliberate human correction, and neither is worth a write window. Live
+    # -verified writable in WIP_ITS_USE (string, no formula) the same day.
+    "material_fill_if_blank_columns": "Content,LF Fabric ID",
 }
 
 

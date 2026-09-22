@@ -568,6 +568,11 @@ limit, so it has to be re-established explicitly in the composition layer.
      → full first-time enrichment from the Main Fabric segment.
    - **Any other real value** → left completely untouched. Never reverted, never
      blanked, whatever this run's BOM snapshot says.
+   - **`LF Fabric ID`** (added 2026-09-22) is proposed on an exact key match as
+     well as at first-time enrichment — a row enriched before the column existed
+     only ever reaches the matched branch again, so it would otherwise stay blank
+     forever. It is **write-once** and a **blank is never written**, which makes
+     this a one-time backfill rather than a per-run diff.
 4. **Fan-out**: for each "Fabric" segment whose key is not already represented —
    by exact match or blank-article backfill — duplicate every existing row of that
    colorway once per such segment.

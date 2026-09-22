@@ -32,6 +32,7 @@ FG = bom.WIP_FIELD_FABRIC_GROUP           # "Fabric Group"
 PL = bom.WIP_FIELD_PLACEMENT              # "Placement"
 MA = bom.WIP_FIELD_MILL_FABRIC_ARTICLE    # "Mill Fabric Article #"
 CT = bom.WIP_FIELD_CONTENT                # "Content"
+LF = bom.WIP_FIELD_LF_MATERIAL            # "LF Fabric ID"
 STYLE_COL, COLOR_COL = phase1.MATCH_KEY_COLS
 
 SCOPE = {"season_code": "FW26", "brand": "Wrangler"}
@@ -630,6 +631,51 @@ check("[7k-4] a new INSERT still receives Content",
 check("[7k-5] Placement is unaffected by the write-once rule",
       p_fill.summary()["columns_changed"].get(PL) is None
       or p_fill.summary()["columns_changed"].get(PL) == 1)
+
+# ---------------------------------------------------------------------------
+print("\n[7m] LF Fabric ID -- the cross-system material key reaches DTC (2026-09-22)")
+# ---------------------------------------------------------------------------
+# Ground rule #6 bites here: a column absent from MATERIAL_OWNED_COLS is
+# stripped in _finalize() AND logged as a contract violation, so the plan looks
+# right until the very last pass. That is what [7m-1] actually guards.
+check("[7m-1] LF Fabric ID is on the canonical PATCH allow-list",
+      LF in wip_plan.allowed_patch_columns())
+
+# Segments carry `lf_material_id` from BOTH sources -- **MaterialCode
+# (Lakebase) and LF MATERIAL ID (PageBomVariation) -- so this works either way.
+_seg_lf = [{"fabric_group": "Main Fabric", "mill_fabric_article": "WV-0003",
+            "placement": "HEM", "content": "Cotton 100%",
+            "lf_material_id": "LF-BD26-000002--SH",
+            "material_id": None, "is_ad_hoc": False}]
+_boms_lf = {"KTB-1": _seg_lf}
+
+# THE case this exists for: a row enriched before the column existed. It matches
+# its segment, so the matched branch is the only one it ever reaches again.
+_row_blank_lf = dtc_row("r1", 1, **{FG: "Main Fabric", MA: "WV-0003",
+                                    PL: "HEM", CT: "Cotton 100%", LF: None})
+p_lf = wip_plan.compute_request_plan(
+    SCOPE, [_row_blank_lf], [bp_row()], bom_by_style=_boms_lf,
+    material_fill_if_blank_cols=frozenset({CT, LF}), allowed_cols=ALLOWED)
+check("[7m-2] a pre-existing enriched row gets LF Fabric ID backfilled",
+      p_lf.summary()["columns_changed"].get(LF) == 1, p_lf.explain())
+check("[7m-3] no contract violation -- it is a declared material column",
+      not p_lf.violations, p_lf.violations)
+
+_row_filled_lf = dtc_row("r1", 1, **{FG: "Main Fabric", MA: "WV-0003", PL: "HEM",
+                                     CT: "Cotton 100%", LF: "SOMETHING-ALREADY-THERE"})
+p_lf_once = wip_plan.compute_request_plan(
+    SCOPE, [_row_filled_lf], [bp_row()], bom_by_style=_boms_lf,
+    material_fill_if_blank_cols=frozenset({CT, LF}), allowed_cols=ALLOWED)
+check("[7m-4] write-once: a value already in the cell is never overwritten",
+      p_lf_once.is_empty(), p_lf_once.explain())
+
+_row_correct_lf = dtc_row("r1", 1, **{FG: "Main Fabric", MA: "WV-0003", PL: "HEM",
+                                      CT: "Cotton 100%", LF: "LF-BD26-000002--SH"})
+p_lf_settled = wip_plan.compute_request_plan(
+    SCOPE, [_row_correct_lf], [bp_row()], bom_by_style=_boms_lf,
+    material_fill_if_blank_cols=frozenset({CT, LF}), allowed_cols=ALLOWED)
+check("[7m-5] once filled, it never writes again -- no write window per run",
+      p_lf_settled.is_empty(), p_lf_settled.explain())
 
 
 # ---------------------------------------------------------------------------

@@ -222,6 +222,21 @@ WIP_FIELD_MILL_FABRIC_ARTICLE = "Mill Fabric Article #"
 # for some styles -- see AGENTS.md decisions log for that history). This is
 # a genuine field again, not a removed one.
 WIP_FIELD_CONTENT = "Content"
+# ADDED 2026-09-22 (owner spec). `LF_Material_ID` is THE material key across
+# systems -- BeProduct, the techpack extraction and DTC all identify a material
+# by it -- so DTC should carry it explicitly rather than only carrying the mill's
+# own article code. Live-verified present and writable in WIP_ITS_USE the same
+# day: {"fieldName": "LF Fabric ID", "type": "string", formula: false} -- note
+# the column is "LF **Fabric** ID", NOT "LF Material ID" (which does not exist
+# in this view, though it IS the label on the BeProduct material master and in
+# the retired Phase 8a fabric pull).
+#
+# Deliberately NOT part of `segment_key()`: the match key stays
+# (Fabric Group, Mill Fabric Article #) so no existing DTC row is re-keyed.
+# Sourced from `**MaterialCode` (Lakebase) or `LF MATERIAL ID` (PageBomVariation)
+# -- both parsers already emit it as `lf_material_id`, so this works whichever
+# BOM source is live.
+WIP_FIELD_LF_MATERIAL = "LF Fabric ID"
 
 # ColumnHeader names in customer_teckpack_style_log.custom_fields's BOM Table
 # entry (raw strings, prefixed "**" in the live schema -- see module
@@ -444,6 +459,7 @@ def to_wip_fields(fields: Dict[str, Optional[str]]) -> Dict[str, Optional[str]]:
         WIP_FIELD_PLACEMENT: fields.get("placement"),
         WIP_FIELD_MILL_FABRIC_ARTICLE: fields.get("mill_fabric_article"),
         WIP_FIELD_CONTENT: fields.get("content"),
+        WIP_FIELD_LF_MATERIAL: fields.get("lf_material_id"),
     }
 
 
@@ -755,6 +771,7 @@ def plan_style_enrichment(
     row_id_key: str = "row_id",
     color_key: str = "color",
     target_segments: Optional[List[Dict[str, Optional[str]]]] = None,
+    lf_material_key: str = "lf_material_id",
 ) -> List[RowAction]:
     """
     Plan every action needed to upsert ONE style's existing WIP rows from
@@ -959,6 +976,17 @@ def plan_style_enrichment(
                     upsert_fields[WIP_FIELD_PLACEMENT] = _new_placement
                 if not _blank(_new_content) and _values_differ(row.get(content_key), _new_content):
                     upsert_fields[WIP_FIELD_CONTENT] = _new_content
+                # LF Fabric ID (added 2026-09-22) is proposed on an ALREADY-
+                # MATCHED row too, not only at first-time enrichment. Without
+                # this, every row enriched before the column existed would keep
+                # a blank LF Fabric ID forever -- the matched branch is the only
+                # one they ever reach again. Same one-way guard as the others: a
+                # blank target never overwrites a real value. The caller makes
+                # it write-once via `material_fill_if_blank_columns`, so a real
+                # value already in the cell is preserved even if it differs.
+                _new_lf = matched_target.get("lf_material_id")
+                if not _blank(_new_lf) and _values_differ(row.get(lf_material_key), _new_lf):
+                    upsert_fields[WIP_FIELD_LF_MATERIAL] = _new_lf
                 if backfill_article is not None:
                     upsert_fields[WIP_FIELD_MILL_FABRIC_ARTICLE] = backfill_article
                 if upsert_fields:
@@ -983,6 +1011,13 @@ def plan_style_enrichment(
                     _wip_fields.pop(WIP_FIELD_CONTENT, None)
                 if _blank(main_target.get("placement")) and not _blank(row.get(placement_key)):
                     _wip_fields.pop(WIP_FIELD_PLACEMENT, None)
+                # LF Fabric ID: a BLANK target is never written, unconditionally
+                # -- stricter than the Placement/Content guard above, which only
+                # holds back a blank when the row already has a real value.
+                # There is no such thing as a useful blank material key, so
+                # sending one would be pure PATCH noise.
+                if _blank(main_target.get("lf_material_id")):
+                    _wip_fields.pop(WIP_FIELD_LF_MATERIAL, None)
                 actions.append(RowAction(
                     kind="update",
                     row_id=row.get(row_id_key),
@@ -1014,10 +1049,15 @@ def plan_style_enrichment(
             # onto the new row, and every row in this group shares those by
             # construction (they are grouped by `color_key`), so the first is
             # as good as any -- there was never a reason to iterate.
+            _insert_fields = to_wip_fields(target)
+            if _blank(target.get("lf_material_id")):
+                # Same rule as first-time enrichment: never write a blank
+                # material key onto a new row either.
+                _insert_fields.pop(WIP_FIELD_LF_MATERIAL, None)
             actions.append(RowAction(
                 kind="insert",
                 base_row=rows_for_color[0],
-                wip_fields=to_wip_fields(target),
+                wip_fields=_insert_fields,
             ))
 
     return actions
