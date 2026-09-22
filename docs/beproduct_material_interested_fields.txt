@@ -11,6 +11,58 @@ below ONLY as a historical record of the field mapping that was designed
 do not use it to guide new work. See AGENTS.md's decisions log for detail.
 ========================================
 
+*** BUT THERE *IS* A LIVE MATERIAL-MASTER WRITE PATH (added 2026-09-22) ***
+=========================================================================
+Do not read "RETIRED" above as "nothing writes to BeProduct Material Master".
+Phase 8's BULK adoption-gated upsert is dead; a NARROW, single-field write is
+live:
+
+  v2 Stage 55 `push_customer_code` (dtc/notebooks/v2_push_customer_code.py,
+  decisions in dtc/python/sync/bom_push.py)
+
+    DTC WIP "Fabric Customer # or SAP #"
+      -> material master headerData.fields[id="customer_material_code"]
+         (display name "CUSTOMER MATERIAL CODE", type Text)
+    via client.material.attributes_update(material_id, fields={...})
+
+  * That is the ONLY field this pipeline writes to a material, and the only
+    DTC -> material direction that exists.
+  * The BOM row's own `CUSTOMER MATERIAL CODE` is NOT writable -- the row only
+    DISPLAYS it, read through from the linked material (400: "Field
+    [customer_material_code] is not editable on a material-linked row").
+  * Materials are SHARED across styles (60 live DTC rows -> 8 materials), so a
+    material whose candidate values disagree is NEVER written; the conflict is
+    reported instead.
+  * Currently DISARMED (`run_customer_code_push=false`) pending the
+    LF-Material-Code -> materialId resolver; see AGENTS.md 2026-09-22.
+
+HOW A MATERIAL IS ADDRESSED -- and the naming trap
+--------------------------------------------------
+`attributes_update` takes the material's internal GUID (`materialId` /
+`header_id`) and nothing else, so the GUID is the WRITE HANDLE only. It is
+resolved fresh each run and never stored or exchanged. The key that travels
+between systems is LF_Material_ID, which IS the material's `headerNumber`
+(e.g. "LF-BD26-000002--SH" -- the "--SH" suffix is PART OF THE KEY).
+
+  DTC row --(Fabric Group, Mill Fabric Article #)--> BOM segment
+          --LF_Material_ID--> lookup --> materialId --> write
+
+THREE DIFFERENT LABELS FOR THE SAME CONCEPT, in three places. Getting these
+confused is easy and expensive:
+
+  "LF Material ID"  DTC **KTB FABRIC** document (this file, line ~51). Phase 8,
+                    retired. NOT present in the KTB WIP view.
+  "LF Fabric ID"    DTC **KTB WIP** document, WIP_ITS_USE. THE LIVE ONE --
+                    written by Phase 10 since 2026-09-22. See
+                    beproduct_style_interested_fields.txt.
+  "LF MATERIAL ID"  BeProduct MATERIAL MASTER header field == `headerNumber`.
+                    The lookup target.
+
+Resolve by header_number with `client.material.attributes_list(filters=[...])`
+and require EXACTLY ONE match. Do NOT use `attributes_get_by_number()`: it is
+`next(attributes_list(...), None)` and silently discards a second match.
+=========================================================================
+
 DTC FABRIC → BeProduct Material Master field mapping (Phase 8) — HISTORICAL
 ==============================================================
 Confirmed live against the DTC "KTB FABRIC" document WIP_ITS_USE view

@@ -4,7 +4,7 @@ Confirmed live against DTC UAT 2026-07-17.
 
 This is the field-level SSOT only. For DAG placement, the 3-job split,
 NT Orbit auth, cache mechanics, and every current gating condition, see
-docs/PHASE9_WORKFLOW.md and docs/PIPELINE_GATES.md.
+docs/v1/PHASE9_WORKFLOW.md and docs/v1/PIPELINE_GATES.md.
 
 Purpose
 -------
@@ -70,12 +70,29 @@ fabric_content         | WIP JSON     | "Content"  (corrected 2026-09-03 -- was 
                        |              | log.custom_fields -- NOT bom_unified.material_name, an earlier,
                        |              | briefly-tried mapping that caused live data corruption for some
                        |              | styles and was reverted the same day) -- see WIP_FIELD_CONTENT /
-                       |              | the module docstring in sync/bom.py and docs/PHASE10_WORKFLOW.md)
+                       |              | the module docstring in sync/bom.py and docs/v1/PHASE10_WORKFLOW.md.
+                       |              | STILL ACCURATE after a round trip: the BOM source moved to the
+                       |              | BeProduct PageBomVariation API 2026-09-16 (which would have made
+                       |              | this line wrong, and it was never updated) and was WALKED BACK to
+                       |              | the Lakebase techpack tables 2026-09-22. `**MaterialContent` is
+                       |              | the live source again. Content remains WRITE-ONCE -- Lakebase's
+                       |              | "Cotton 97%, Spandex 3%" disagrees with DTC's own trigger
+                       |              | ("97% Cotton / 3% Spandex"), so without that the two would
+                       |              | overwrite each other and open a DTC write window every run.
 fabric_type            | WIP JSON     | "Fabric Type" (new 2026-09-03, same DTC-trigger-populated column;
                        |              | traceability ONLY -- NOT part of the filter or costing-chart key,
                        |              | still solely DTC-trigger-populated and may be blank in practice)
 material_no            | WIP JSON     | "Mill Fabric Article #" (new 2026-09-03 -- Phase 10's own field;
                        |              | THE completeness filter AND costing-chart key column, see below)
+                       |              | NOTE 2026-09-22: DTC now ALSO carries "LF Fabric ID"
+                       |              | (LF_Material_ID, the key that identifies a material ACROSS
+                       |              | BeProduct / techpack / DTC -- see
+                       |              | beproduct_style_interested_fields.txt). costing_chart does NOT
+                       |              | carry it and its key is UNCHANGED: `material_no` stays the
+                       |              | material discriminator here. Adding LF_Material_ID would be a
+                       |              | costing_chart SCHEMA + key change affecting p9b1's COSTING_KEY
+                       |              | merge and the duty cache -- deliberately not done; raise it as
+                       |              | its own decision if the cross-system key should win here too.
 gender                 | WIP JSON     | "Gender"                      (may be blank)
 class_name             | WIP JSON     | "Class"
 sub_class              | WIP JSON     | "Sub Class"
@@ -162,7 +179,7 @@ scheduled. Phase 9b runs as two independently-scheduled pieces:
     pushes fields that actually differ -- lean-PATCH, Ground Rule #6).
 See `AGENTS.md`'s 2026-09-03 decisions log entry ("Pipeline split into 3
 independent Databricks jobs") for the full rationale (DTC's concurrent-edit
-limitation) and `docs/PIPELINE_GATES.md`'s "Phase 9b" section for the exact
+limitation) and `docs/v1/PIPELINE_GATES.md`'s "Phase 9b" section for the exact
 current lookup/cache/push gating logic.
 
 For costing rows where hts_code IS NULL or duty_rate_* IS NULL or tariff_rate IS NULL:
@@ -228,7 +245,7 @@ lft.beproduct.nt_orbit_duty_cache / 180 days.
 Pure decision logic (no Spark/HTTP) lives in dtc/python/sync/duty.py, unit
 tested in dtc/tests/test_duty.py.
 
-Completeness filter (Step 1b) — see docs/PIPELINE_GATES.md "Phase 9a" for
+Completeness filter (Step 1b) — see docs/v1/PIPELINE_GATES.md "Phase 9a" for
 the full, current, exact gating logic (material_no non-blank, bp_style_no
 non-blank, fabric_content non-blank, fabric_group=="Main Fabric" -- all
 ANDed, each with its own drop-count reported). Content REINSTATED as a

@@ -73,7 +73,7 @@ repeats (e.g. a duplicate row within one sheet); `sync.xts_master.dedupe_by_key`
 handles that case deterministically (prefer a row with a real code, then
 row_index) and reports every such collision so nothing is silently dropped.
 
-Downstream push (unchanged — see docs/PHASE5_WORKFLOW.md)
+Downstream push (unchanged — see docs/v1/PHASE5_WORKFLOW.md)
 -----------------------------------------------------------
 `p5utl_beproduct_master_data_sync.py` mode=PUSH_DIRECTORY pushes any row
 where `id IS NULL OR extracted_at IS NULL OR modified_at > extracted_at`:
