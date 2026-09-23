@@ -82,12 +82,23 @@ bp_rows = [{"bp_style_number": "S1", "color": "Blue", "front_image_url": "https:
 plan = compute_image_uploads(dtc_rows, bp_rows)
 check(plan.uploads == [] and plan.skips == [], "unmatched DTC row ignored")
 
-print("\n[7] blank DTC, valid url, but missing rowIndex -> recorded skip")
+print("\n[7] the locator gate is rowId, not rowIndex (changed 2026-09-23)")
+# Uploads are addressed by rowId now: a stale rowIndex does not error, it
+# returns 201 and CREATES a row. So rowIndex is no longer required at all --
+# a row that has a rowId but no rowIndex is perfectly uploadable.
 dtc_rows = [{"BP Style#": "S1", "Color / Wash": "Blue", "rowId": "r1"}]  # no rowIndex
 bp_rows = [{"bp_style_number": "S1", "color": "Blue", "front_image_url": "https://cdn/s1.jpg"}]
 plan = compute_image_uploads(dtc_rows, bp_rows)
+check(len(plan.uploads) == 1 and len(plan.skips) == 0,
+      "no rowIndex is fine -- rowId is what addresses the cell")
+check(plan.uploads[0].row_id == "r1" and plan.uploads[0].row_index is None,
+      "op carries the rowId; row_index stays None (logging only)")
+
+# ...but no rowId means the row cannot be targeted safely at all.
+dtc_rows = [{"BP Style#": "S1", "Color / Wash": "Blue", "rowIndex": 1}]  # no rowId
+plan = compute_image_uploads(dtc_rows, bp_rows)
 check(len(plan.uploads) == 0 and len(plan.skips) == 1
-      and plan.skips[0].reason == "missing_row_index", "missing rowIndex -> skip")
+      and plan.skips[0].reason == "missing_row_id", "missing rowId -> skip")
 
 print("\n[8] rowIndex == 0 is valid (not treated as missing)")
 dtc_rows = [{"BP Style#": "S1", "Color / Wash": "Blue", "rowId": "r1", "rowIndex": 0}]
@@ -184,7 +195,7 @@ check(len(plan.uploads) == 1 and plan.uploads[0].match_key == ("S4", "Blue")
       and plan.uploads[0].source == "beproduct_extract",
       "S3's image is NOT copied onto S4 -- sibling match is scoped to the SAME BP Style#")
 
-print("  [15d] sibling image exists but rowIndex missing on the blank row -> still recorded as a skip")
+print("  [15d] sibling copy needs a rowId, not a rowIndex (changed 2026-09-23)")
 dtc_rows = [
     {"BP Style#": "S5", "Color / Wash": "Blue", "rowId": "r7", "rowIndex": 7,
      "Style Image": "https://dtc-api.example.net/api/v1/images/s5.png"},
@@ -192,9 +203,15 @@ dtc_rows = [
 ]
 bp_rows = []
 plan = compute_image_uploads(dtc_rows, bp_rows)
+check(len(plan.uploads) == 1 and plan.uploads[0].row_id == "r8"
+      and plan.uploads[0].source == "sibling_copy",
+      "a sibling copy no longer needs a rowIndex -- rowId is enough")
+
+dtc_rows[1] = {"BP Style#": "S5", "Color / Wash": "Red", "rowIndex": 8}  # no rowId
+plan = compute_image_uploads(dtc_rows, bp_rows)
 check(len(plan.uploads) == 0 and len(plan.skips) == 1
-      and plan.skips[0].reason == "missing_row_index",
-      "missing rowIndex still blocks a sibling-copy upload, same as a normal one")
+      and plan.skips[0].reason == "missing_row_id",
+      "missing rowId blocks a sibling-copy upload, same as a normal one")
 
 print("  [15e] live-discovered bug (2026-09-04): TWO rows sharing the SAME (BP Style#, Color) "
       "key -- e.g. Phase 10's Main Fabric + Fabric-segment duplicate rows -- must each be "

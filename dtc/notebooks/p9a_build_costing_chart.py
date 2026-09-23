@@ -627,6 +627,13 @@ print(f"  LinePlan rows: {lp_raw.count()}")
 # winner on a conflict, detect and loudly warn on any ref whose plan values
 # actually disagree across rows/requests, so a human can catch and fix it.
 conflict_check = (lp_raw
+    # Blank refs are EXCLUDED (2026-09-23). They are dropped by the INNER
+    # JOIN below anyway, but they all collapse into one `lineplan_ref=NULL`
+    # group -- live: 1188 of 1224 rows are blank, showing 56 distinct
+    # quantities -- so the warning fired on every run and BURIED the real
+    # conflicts underneath it.
+    .filter(F.col("lineplan_ref").isNotNull()
+            & (F.trim(F.col("lineplan_ref")) != ""))
     .groupBy("lineplan_ref")
     .agg(
         F.collect_set("request_reference").alias("requests"),

@@ -366,6 +366,58 @@ this stays true by construction; verify it stays true after any change).
 
 ## Verified discoveries log (append-dated; do not delete)
 
+**LinePlan join re-verified after the column/naming revision -- and the
+conflict guard was crying wolf (2026-09-23):**
+- The revised LinePlan column list and new naming convention do NOT affect
+  `costing_chart`. The join is still `WIP "Lineplan Ref #" = LinePlan
+  "Lineplan Ref #"`, read by DISPLAY NAME (`jcol(... "Lineplan Ref #" ...)`),
+  and only that column plus projected_volume / target_ldp / target_fob are
+  consumed. The pull deliberately has NO name-pattern filter, which is what
+  makes it immune to a naming change.
+- **The cross-request uniqueness invariant HOLDS.** Live: 1224 rows, 34
+  distinct refs, 3 requests -- and ZERO refs appear in more than one request.
+  The three request names share no convention
+  (`KTB SS28 Collaborations - LinePlan`, `FA HO 27 (BACKUP) MENS WESTERN TOPS
+  LINEPLAN - FA27`, `FW28 LINEPLAN`), confirming why no filter can be used.
+- **But uniqueness can be violated WITHIN one request**, which the guard's
+  wording ("across rows/requests") covers and a "unique across requests"
+  reading does not. Live: `WC-S8010` and `WC-S8010_1` each carry two rows
+  disagreeing on all three plan values (1500/13.05/12 vs 4000/13.09/16), both
+  inside a single request. `F.first(ignorenulls=True)` then picks
+  arbitrarily -- `WC-S8010` reached costing_chart as 1500/13.05, and a
+  different pull order could have made it 4000/13.09. (Owner: this pair is a
+  deliberate test of duplicate-# behaviour, and it correctly found the effect.)
+- **FIXED: blank refs are now excluded from `conflict_check`.** 1188 of 1224
+  rows have a blank ref and all collapsed into one `lineplan_ref=NULL` group
+  reporting 56 distinct quantities, so the warning fired EVERY run and buried
+  the real conflicts. Blank refs are dropped by the INNER JOIN anyway. The
+  guard now reports exactly 2 refs instead of 3.
+
+**Phase 3 images now address rows by rowId, not rowIndex (2026-09-23):**
+- Direct consequence of the image-endpoint finding above: a stale `rowindex`
+  returns 201 and CREATES a row, so a 201 was never proof the image landed on
+  the intended row. `rowId` fails loudly instead.
+- `ImageUploadOp.row_id` is the PRIMARY locator and is now required;
+  `row_index` is retained for logging only and may be None.
+- **The gate inverted, and it is a net gain:** a row with a rowId but NO
+  rowIndex now uploads fine (it used to be skipped `missing_row_index`); a row
+  with no rowId is skipped `missing_row_id`, because addressing it by an
+  unverified index risks creating a row rather than failing.
+- Phase 3 still re-reads the sheet live each run -- that read also supplies the
+  blank-vs-populated Style Image state, so it is not purely a rowIndex crutch.
+
+**Remaining rowIndex uses in the v2 job, after the audit (2026-09-23) -- all
+read-side, all deliberate:**
+- `bom.INSERT_EXCLUDE_COLS` -- strips rowId/rowIndex from a copied base row.
+  MUST stay; with `append_rows` its failure mode is a 400, not a wrong row.
+- `p9a_build_costing_chart` and `xts_master` -- `row_index` as a deterministic
+  TIE-BREAK for which row wins. Unstable under renumbering, but it only breaks
+  ties between otherwise-equal candidates. Left alone deliberately: switching
+  to rowId would change which row wins, and therefore costing output.
+- `p1_pull_masters_to_delta` -- stores `row_index` in the snapshot, which is
+  what feeds those tie-breaks.
+- `phase1` + the v1 notebooks -- v1's insert path, intentionally untouched.
+
 **DTC can APPEND rows with server-assigned locators -- client-side rowIndex
 arithmetic is retired on v2 (2026-09-23, live-verified end to end):**
 

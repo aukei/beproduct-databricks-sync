@@ -162,9 +162,14 @@ def classify_image_type(content_type: Any, url: Optional[str] = None) -> ImageEn
 class ImageUploadOp:
     """A resolved image upload for one row."""
     match_key: Tuple[Optional[str], Optional[str]]
-    row_index: int
+    # PRIMARY LOCATOR since 2026-09-23. The image endpoint accepts either, and
+    # rowId is the safe one: a stale rowIndex does NOT error, it returns 201 and
+    # CREATES a row (live-verified). rowIndex also shifts whenever anyone
+    # inserts, deletes or re-orders; rowId never does.
+    row_id: str
     image_url: str
-    row_id: Optional[str] = None  # informational; the image API keys off rowIndex
+    # Retained for logging/traceability ONLY -- never used to address the cell.
+    row_index: Optional[int] = None
     source: str = "beproduct_extract"  # "beproduct_extract" | "sibling_copy" -- see compute_image_uploads
 
 
@@ -277,20 +282,24 @@ def compute_image_uploads(
         if is_image_populated(r):
             continue  # already has an image -> nothing to do (idempotent)
 
-        row_index = r.get("rowIndex")
-        if row_index is None:
+        # Gate on rowId: it is what the upload now addresses. A row without one
+        # cannot be targeted safely at all -- uploading by a rowIndex we cannot
+        # verify risks CREATING a row rather than filling one.
+        row_id = r.get("rowId")
+        if not row_id:
             plan.skips.append(ImageSkip(
-                "missing_row_index", key, "DTC row has no rowIndex"))
+                "missing_row_id", key, "DTC row has no rowId"))
             continue
+        row_index = r.get("rowIndex")
 
         style_no = norm(r.get(lf_col))
         sibling_url = sibling_image_by_style.get(style_no) if style_no else None
         if sibling_url is not None:
             plan.uploads.append(ImageUploadOp(
                 match_key=key,
-                row_index=int(row_index),
+                row_id=row_id,
                 image_url=sibling_url,
-                row_id=r.get("rowId"),
+                row_index=(int(row_index) if row_index is not None else None),
                 source="sibling_copy",
             ))
             continue
@@ -307,9 +316,9 @@ def compute_image_uploads(
 
         plan.uploads.append(ImageUploadOp(
             match_key=key,
-            row_index=int(row_index),
+            row_id=row_id,
             image_url=norm(url),
-            row_id=r.get("rowId"),
+            row_index=(int(row_index) if row_index is not None else None),
             source="beproduct_extract",
         ))
 

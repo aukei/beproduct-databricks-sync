@@ -22,7 +22,7 @@ v1 wrote each request at up to 5 moments scattered across the whole DAG
 push_duty_rates updates). At the target cadence -- a run every ~2 hours -- that
 is 36 write moments a day and ~6-8 h/day of user-visible exposure. v2 writes
 each request at exactly ONE point, in <=2 back-to-back calls (2 is the floor:
-DTCConnector.patch_rows rejects a body mixing rowId and rowIndex).
+updates PATCH by rowId, inserts POST via append_rows, back to back).
 
 See docs/PIPELINE.md (Stage 40) and docs/MIGRATION_V1_V2.md.
 

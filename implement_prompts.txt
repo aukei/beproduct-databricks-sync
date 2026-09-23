@@ -860,3 +860,49 @@ When updating BeProduct Material Master (since we have no use of BomVariation UP
 
 this "write once & blank is never written" maybe problematic afterall. Now BOM is read from externally prepared table, this must come after the record is first push to DTC i.e. must be later than style first appear in BeProduct. so Material / Fabric ID / content / placement are most likely null at first run - corresponding teckpack_style_log record does not exist. That's what the filler strings were for, indicating it's new and awaiting first BOM extraction by external system.
 
+# New DTC API for add rows 23/9/26
+DTC new add row API remove the need to compute rowIndex while inserting new rows.
+Believe will make insert less error prone. Especially in phase 3/9.
+
+POST /v1/sheets/{sheetId}/views/{viewId}/rows - append new rows to a sheet
+- the server assigns rowId and rowIndex — the caller supplies field data only, keyed by column display name
+- rows are appended after the highest existing rowIndex; rows that were emptied but kept their rowId are not reused
+- rowId, rowIndex and rowStatus must NOT be supplied — the request is rejected if any is present
+- every mandatory field of the view must be supplied. This is stricter than PATCH, which only checks the fields sent, because a new row has no stored values to fall back on (waived when the request status is in the view’s deferStatus)
+- the view must allow row insertion (allowInsertRow)
+- image and attachment fields cannot be set here — append the row first, then call Add Sheet Image / Add Sheet Attachment with the returned rowId
+- the document type’s maximum row limit applies; the whole request is rejected if the rows would exceed it, and nothing is saved
+
+e.g. POST https://dtc-api.lfuat.net/v1/sheets/67468bc66d9bb8104c1bc6a6/views/67b2baf3b246932af071118d/rows
+
+payload
+{
+    "sheetData": [
+      {
+        "Mill Article#": "111",
+        "Is Fabric Exclusive for Customer": "Yes",
+        "Coloration Process": "Cross Dyed"
+      },
+      {
+        "Mill Article#": "222"
+      }
+    ]
+}
+ 
+Response code: 201 — the assigned locators, in the order the rows were sent. Reuse rowId to address a row afterwards.
+{
+    "rows": [
+      {
+        "rowId": "dd6eb643-e000-4482-a279-c0c55cafb36a",
+        "rowIndex": 12
+      },
+      {
+        "rowId": "8f2b17ac-5d41-4a90-9e77-2b0c4d6ee311",
+        "rowIndex": 13
+      }
+    ]
+}
+
+* LinePlan request have a revised col list. And naming convention changed. However naming should not affect current 
+costing_chart mechanism - join is still via Lineplan Ref# and this number must be unique among ALL lineplan requests.
+ 

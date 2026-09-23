@@ -336,22 +336,30 @@ for name, m in mapping.items():
         # Upload to DTC.
         try:
             if not dry_run:
+                # Addressed by rowId, NOT rowIndex (2026-09-23). A stale
+                # rowIndex does not error -- it returns 201 and CREATES a
+                # row (live-verified: rowindex=999999 on a 39-row sheet).
+                # So a 201 was never proof the image hit the right row.
                 connector.upload_row_image(
-                    sheet_id, view_id, op.row_index, img_bytes,
+                    sheet_id, view_id, image_bytes=img_bytes,
+                    row_id=op.row_id,
                     column_name=phase1.STYLE_IMAGE_COL,
                     filename=fname, content_type=out_ctype,
                 )
             log(log_rows, name, request_id, "IMAGE_UPLOAD", op.match_key, "ok",
                 "dry_run" if dry_run else ("converted" if converted else ""),
-                f"rowIndex={op.row_index} bytes={len(img_bytes)} type={out_ctype}"
+                f"rowId={op.row_id} rowIndex={op.row_index} "
+                f"bytes={len(img_bytes)} type={out_ctype}"
                 + (f" ({note})" if converted else ""),
-                {"url": op.image_url, "rowIndex": op.row_index})
+                {"url": op.image_url, "rowId": op.row_id,
+                 "rowIndex": op.row_index})
             uploaded_count += 1
             totals["uploads_ok"] += 1
         except Exception as e:
             log(log_rows, name, request_id, "IMAGE_UPLOAD", op.match_key, "error",
                 "upload_failed", str(e)[:300],
-                {"url": op.image_url, "rowIndex": op.row_index})
+                {"url": op.image_url, "rowId": op.row_id,
+                 "rowIndex": op.row_index})
             totals["uploads_failed"] += 1
 
 connector.close()

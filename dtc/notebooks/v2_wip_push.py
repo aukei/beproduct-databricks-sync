@@ -17,7 +17,7 @@ user-visible exposure. This notebook writes each request at exactly ONE point,
 in <=2 back-to-back calls.
 
 Why <=2 and not 1: `DTCConnector.patch_rows` rejects a body mixing `rowId`
-(update) and `rowIndex` (insert), so one call each is the floor.
+(update); inserts go to `append_rows` (POST), so one call each is the floor.
 
 Shape of the work
 -----------------
@@ -25,7 +25,7 @@ Shape of the work
         1 live get_sheet()                         <- freshest possible state
         wip_plan.compute_request_plan(...)         <- pure, unit-tested
         if plan.is_empty():  issue NOTHING          <- THE invariant
-        else: PATCH updates (rowId), PATCH inserts (rowIndex)
+        else: PATCH updates (rowId), POST inserts (server assigns the locators)
 
 ALL decision logic is pure and lives in `sync/wip_plan.py`, which composes
 `phase1` + `bom` + `duty` + orphan marks. This notebook is a thin Spark/IO
