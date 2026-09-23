@@ -366,6 +366,62 @@ this stays true by construction; verify it stays true after any change).
 
 ## Verified discoveries log (append-dated; do not delete)
 
+**A DTC `lookup` / `formula` field is only materialized if it is on the ACTIVE
+VIEW AT SAVE TIME (2026-09-23, owner RCA; live-reproduced end to end):**
+
+> **THE RULE: DTC lookup / formula fields must be on the active view at SAVE
+> time for their value to be materialized in storage.**
+
+- A save computes only the fields VISIBLE in the view being saved through.
+  Users work in the **"Full"** view, where the `Factory Production Country
+  for ...` lookups are HIDDEN -- so their value is never computed, and the
+  stored cell stays NULL while the factory cell next to it is populated.
+- The value appears later, whenever some OTHER operation touches that row
+  through a view where the column IS visible (e.g. `WIP_ITS_USE`). That is why
+  the observed latency was erratic -- **0.6 min to ~10 min, with no schedule**
+  -- rather than a fixed delay.
+- **FIX (owner, 2026-09-23): expose the lookup columns on the Full view too**,
+  so they compute and persist on save. DTC view configuration; no repo change.
+- **This generalises.** It is NOT about production country. ANY `lookup` or
+  `formula` column can be silently NULL in storage while looking correct in a
+  UI that computes it for display. Before trusting such a column, check it is
+  on the view the user actually saves through.
+
+*How it presented, so it is recognised faster next time:* two KTB-00029 rows
+had `Factory 1 = SUPPLIER ASPGAR` with `Factory Production Country for
+Factory 1` NULL, which flowed into `costing_chart` as a NULL
+`production_country` -- and `duty.py` skips a market when that is blank, so the
+slot silently got no HTS / duty / tariff either. The pipeline was faithful
+throughout: live DTC, the Delta snapshot and `costing_chart` all agreed, and
+`allowed_patch_columns()` contains NO vendor / factory / country column, so
+this pipeline can neither write nor clear them.
+
+*Three wrong diagnoses, recorded so they are not re-derived:*
+1. **"Master data gap."** WRONG -- `XTS Factory Master` already had
+   `SUPPLIER ASPGAR -> BD`. Check the master before blaming it.
+2. **"A ~30-minute sweep at :17/:47."** WRONG -- over-fitted to two coarse
+   observations, one of which had 15-minute snapshot granularity. Falsified by
+   a fill inside 8 minutes that landed nowhere near a boundary.
+3. **"A per-value cache -- cold value defers, warm value is inline."** WRONG --
+   the SAME two factory values gave 0.6 min and 2.5 min on consecutive saves
+   three minutes apart.
+Also ruled out by measurement, not argument: it is NOT slot-dependent (Main and
+Factory 1 saved together behave identically), NOT a string/whitespace mismatch
+(both exactly `b'SUPPLIER ASPGAR'`, len 15), and NOT caused by this sync job --
+`BeProduct_DTC_sync_v2` was not running during three of the four timed fills
+(50-minute gap, 08:24 -> 09:14).
+
+*The asymmetry that cracked it:* **clearing a factory nulls its country
+INSTANTLY, in the same save; only populating is deferred.** Clearing needs no
+lookup, so the save path can do it inline. That localised the deferred work to
+the master lookup itself rather than to the save.
+
+*Consequence while the view fix is outstanding:* a factory assignment can be
+snapshot by `pull_master_dtc` before DTC has materialized the country, and the
+NULL is then baked into `costing_chart` until a later rebuild. It only ever
+UNDER-fills (steady-state factory and country counts match exactly), so this is
+latency, never loss -- a rebuild after the value lands corrects it.
+
 **Emptying or deleting a WIP request DESTROYS the DTC-owned costing inputs
 (2026-09-18):**
 - `Lineplan Ref #`, `Main Vendor (Sampling)` / `Vendor 1-3`,

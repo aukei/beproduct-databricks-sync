@@ -854,3 +854,9 @@ and extra "fabric" lines that doesn't have 1. photo 2. header fields.
 
 # claification 22/9/26
 WALKBACK from using BomVariation API to extracted JSON by Techpack: alb_tpm_uat.public.customer_techpack_style_latest + customer_techpack_style_log 
+by GUID are you referring to BeProduct Material Master's internal GUID? since throughout the data exchange, we use LF_Material_ID as the key for material across systems. *This value should also be filled to DTC "LF Fabric ID"* 
+Only when populating DTC, we write BePeoduct "Mill fabric code/supplier item code" to DTC "Mill Fabric Article" in addition.
+When updating BeProduct Material Master (since we have no use of BomVariation UPDATE API), take LF_Material_ID
+
+this "write once & blank is never written" maybe problematic afterall. Now BOM is read from externally prepared table, this must come after the record is first push to DTC i.e. must be later than style first appear in BeProduct. so Material / Fabric ID / content / placement are most likely null at first run - corresponding teckpack_style_log record does not exist. That's what the filler strings were for, indicating it's new and awaiting first BOM extraction by external system.
+

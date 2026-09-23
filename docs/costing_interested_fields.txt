@@ -101,6 +101,19 @@ supplier_type          | derived      | "Main" | "1" | "2" | "3"  (which vendor/
 supplier               | WIP JSON     | vendor column for the slot
 factory                | WIP JSON     | factory column for the slot
 production_country     | WIP JSON     | "Factory Production Country for [Main Factory | Factory 1-3]"
+                       |              | These are DTC `lookup` fields (resolved from XTS Factory Master on
+                       |              | Factory Name -> Production Country), NOT plain cells. A lookup is
+                       |              | only materialized if it is ON THE ACTIVE VIEW AT SAVE TIME -- users
+                       |              | save through the "Full" view, where they were HIDDEN, so the stored
+                       |              | cell could stay NULL while the factory beside it was populated, and
+                       |              | only fill later when something touched the row through a view that
+                       |              | shows them (erratic, 0.6-10 min). Fixed 2026-09-23 by exposing them
+                       |              | on the Full view; see AGENTS.md for the full RCA and the three wrong
+                       |              | diagnoses. Why it matters HERE: a blank production_country makes
+                       |              | duty.py skip the market, so that slot silently gets no HTS / duty /
+                       |              | tariff either. This pipeline never writes these columns -- they are
+                       |              | absent from allowed_patch_columns() -- so a NULL here is always
+                       |              | upstream, never ours.
 order_quantity         | LinePlan     | "PROJECTED VOLUME (season)"   (aggregated first per ref)
 target_ldp             | LinePlan     | "TARGET SAP w/ Tariff impact" (lowercase 'i')
 target_fob             | LinePlan     | "TARGET FOB"
