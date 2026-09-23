@@ -193,7 +193,9 @@ class PlannedRow:
     kind: str                                    # "update" | "insert"
     match_key: Tuple[Optional[str], Optional[str]]   # (BP Style#, Color / Wash)
     row_id: Optional[str] = None                 # updates only
-    row_index: Optional[int] = None              # inserts only
+    # NO row_index. Since 2026-09-23 INSERTs go to DTCConnector.append_rows()
+    # and the SERVER assigns rowId+rowIndex, so there is no client-side index
+    # to carry -- and UPDATEs never used one, they key on row_id alone.
     fields: Dict[str, Any] = field(default_factory=dict)
     sources: Dict[str, str] = field(default_factory=dict)   # column -> contribution
     overrides: List[str] = field(default_factory=list)      # "col: style -> material"
@@ -253,8 +255,12 @@ class RequestPlan:
         return [{**r.fields, "rowId": r.row_id} for r in self.updates]
 
     def insert_sheet_data(self) -> List[Dict[str, Any]]:
-        """INSERT bodies, keyed by rowIndex. Never mixed with updates in one call."""
-        return [{**r.fields, "rowIndex": r.row_index} for r in self.inserts]
+        """INSERT bodies: field data ONLY, no locator.
+
+        `append_rows()` assigns rowId/rowIndex itself and REJECTS a body that
+        carries either, so nothing here may add one. Sent via POST, separate
+        from the UPDATE PATCH -- still one write window, two calls."""
+        return [dict(r.fields) for r in self.inserts]
 
     def columns_changed(self) -> Dict[str, int]:
         """{column: number of rows writing it}, updates and inserts together."""
@@ -343,7 +349,8 @@ class RequestPlan:
         if self.violations:
             out.append(f"  ⚠ ALLOW-LIST VIOLATIONS (dropped): {self.violations}")
         for r in (self.updates + self.inserts)[:limit]:
-            ident = f"rowId={r.row_id}" if r.kind == "update" else f"rowIndex={r.row_index}"
+            ident = (f"rowId={r.row_id}" if r.kind == "update"
+                     else "new row (rowId assigned by DTC on append)")
             out.append(f"    [{r.kind:6}] {r.match_key} {ident} "
                        f"article={r.material_article()!r}")
             for col in sorted(r.fields):
@@ -438,7 +445,6 @@ def _style_rows_from_upsert(
             handle=_handle_insert(i),
             kind="insert",
             match_key=op.match_key,
-            row_index=op.row_index,
         )
         for col, val in op.fields.items():
             pr.set_field(col, val, SOURCE_STYLE)
@@ -627,11 +633,8 @@ def _apply_material(
     for pr in updates + inserts:
         projected_by_style.setdefault(pr.match_key[0], []).append(pr)
 
-    # rowIndex for fan-out inserts continues past everything already assigned,
-    # so a duplicate can never collide with a style INSERT or an existing row.
-    next_index = max(
-        [phase1.max_row_index(dtc_rows)] + [i.row_index or 0 for i in inserts]
-    )
+    # No rowIndex arithmetic: append_rows() has the server assign it. Only the
+    # internal handle sequence remains, and that never leaves this process.
     fanout_seq = len(inserts)
 
     for style, rows in sorted(projected_by_style.items(), key=lambda kv: (kv[0] or "")):
@@ -683,13 +686,11 @@ def _apply_material(
 
             elif act.kind == "insert":
                 base = dict((act.base_row or {}).get("_base_fields") or {})
-                next_index += 1
                 fanout_seq += 1
                 pr = PlannedRow(
                     handle=_handle_insert(fanout_seq),
                     kind="insert",
                     match_key=(style, (act.base_row or {}).get("_color")),
-                    row_index=next_index,
                     base_row=base,
                 )
                 payload = bom.build_insert_row_payload(

@@ -513,6 +513,84 @@ class DTCConnector:
         resp.setdefault("rows", len(sheet_data))
         return resp
 
+    def append_rows(
+        self, sheet_id: str, view_id: str, sheet_data: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """
+        Append new rows; the SERVER assigns rowId and rowIndex (2026-09-23).
+
+            POST /v1/sheets/{sheetId}/views/{viewId}/rows
+            body: {"sheetData": [{<column display name>: <value>, ...}, ...]}
+            -> 201 {"rows": [{"rowId": ..., "rowIndex": ...}, ...]}
+
+        Use this instead of `patch_rows()` for INSERTs. The caller supplies
+        field data only, so there is no client-side rowIndex arithmetic and
+        therefore no window in which a concurrent insert, delete or row
+        re-order invalidates an index computed from a stale read. Rows are
+        appended after the highest existing rowIndex; a rowId freed by an
+        emptied row is never reused.
+
+        Returns the assigned locators **in the order the rows were sent**, so
+        `zip(sheet_data, result)` pairs each new row with its rowId. Reuse that
+        rowId to address the row afterwards (e.g. `upload_row_image`) without
+        re-reading the sheet.
+
+        Constraints (live-verified against WIP_ITS_USE 2026-09-23):
+          * `rowId` / `rowIndex` / `rowStatus` must NOT be supplied -- the
+            request is rejected outright if any is present. This is why
+            `bom.INSERT_EXCLUDE_COLS` is load-bearing: a fan-out INSERT copies
+            a live row forward as its base, and that row carries both.
+          * Every MANDATORY field of the view must be supplied -- stricter than
+            PATCH, which only validates what it is sent, because a new row has
+            no stored values to fall back on. WIP_ITS_USE currently declares
+            ZERO mandatory fields, so this costs this pipeline nothing; re-check
+            if the view changes.
+          * The view must have `allowInsertRow` (WIP_ITS_USE: "Y").
+          * Image/attachment cells cannot be set here -- append first, then
+            upload against the returned rowId.
+          * The document's row limit applies to the WHOLE request: if it would
+            be exceeded nothing is saved. The limit is 3000 rows/request, which
+            this workflow is nowhere near.
+
+        Args:
+            sheet_id: DTC sheet ID
+            view_id: DTC view ID
+            sheet_data: one dict per new row, keyed by column display name.
+
+        Returns:
+            [{"rowId": str, "rowIndex": int}, ...] in send order; [] if
+            `sheet_data` was empty (no call is made).
+
+        Raises:
+            ValueError: if any row carries rowId / rowIndex / rowStatus.
+        """
+        FORBIDDEN = ("rowId", "rowIndex", "rowStatus")
+        for i, row in enumerate(sheet_data):
+            present = [k for k in FORBIDDEN if k in row]
+            if present:
+                raise ValueError(
+                    f"sheet_data[{i}] must not carry {present} -- the append "
+                    f"endpoint assigns them and rejects the request otherwise"
+                )
+        if not sheet_data:
+            return []
+        logger.info(
+            f"POST append {len(sheet_data)} row(s) to sheet {sheet_id} view {view_id}"
+        )
+        resp = self.client.post(
+            f"/v1/sheets/{sheet_id}/views/{view_id}/rows",
+            data={"sheetData": sheet_data},
+        )
+        rows = (resp or {}).get("rows") if isinstance(resp, dict) else None
+        if rows is None:
+            # Never silently return [] on a successful call -- a caller that
+            # needs the rowIds would then think nothing was created.
+            raise ValueError(
+                f"append_rows: unexpected response shape, "
+                f"no 'rows' key: {str(resp)[:300]}"
+            )
+        return rows
+
     def delete_rows(
         self, sheet_id: str, view_id: str, row_indexes: List[int]
     ) -> Dict[str, Any]:
@@ -533,6 +611,14 @@ class DTCConnector:
         so a single pass of [1..64] left 53 rows behind, and the indexes in a
         stale list no longer point at the rows they did when it was built.
         HTTP 204 is returned either way, so the shortfall is silent.
+
+        **REFINED 2026-09-23: that ~11 is a CAP on how many rows one call
+        processes, NOT "11 arbitrary rows get removed".** A single-row delete
+        removes exactly that row: live-verified deleting `[999999]` from a
+        40-row sheet -> 39 rows, the intended row gone, ZERO collateral and
+        ZERO renumbering (the survivors' 1..39 were already contiguous). So a
+        small, targeted delete is safe; it is the BULK case that under-deletes
+        and renumbers, and only there is the re-read loop below required.
 
         Callers that need a sheet actually emptied must LOOP: re-read the sheet,
         delete the rowIndexes it currently reports, repeat until it comes back
@@ -585,34 +671,67 @@ class DTCConnector:
         self,
         sheet_id: str,
         view_id: str,
-        row_index: int,
-        image_bytes: bytes,
+        row_index: Optional[int] = None,
+        image_bytes: bytes = b"",
         column_name: str = "Style Image",
         filename: str = "image.jpg",
         content_type: str = "image/jpeg",
         file_field: str = "file",
+        row_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Upload a binary image into a single sheet cell (Phase 3).
 
+        **PREFER `row_id`.** The endpoint accepts either locator
+        (live-verified 2026-09-23 -- DTC's own error text is
+        "Either rowIndex or rowId is required."), and rowId is the safe one:
+
+          * **A non-existent `rowindex` does NOT error -- it CREATES a row.**
+            Live-verified: `rowindex=999999` on a 39-row sheet returned
+            **201** and left a new row 999999 holding the uploaded image.
+            So a 201 is NOT evidence the image landed on the row you meant,
+            and a stale index silently fabricates a row instead of failing.
+          * A non-existent `rowid` fails loudly: 400 "Row cannot be found by
+            rowid".
+          * rowIndex shifts when anyone inserts, deletes or re-orders rows;
+            rowId never does. `append_rows()` returns rowIds precisely so a
+            freshly-created row can be addressed without re-reading the sheet.
+
+        **The query parameter is lowercase `rowid`** -- camelCase `rowId` is
+        silently IGNORED and the request fails with the generic "Either
+        rowIndex or rowId is required.", i.e. it looks like you sent no
+        locator at all. Same lowercase convention as `rowindex`.
+
         Args:
             sheet_id: DTC sheet ID
             view_id: DTC view ID (WIP_ITS_USE)
-            row_index: target row's rowIndex (the image endpoint keys off rowindex)
+            row_index: target row's rowIndex. Legacy locator -- see the hazard
+                above. Ignored when `row_id` is given.
             image_bytes: raw image content (already downloaded from BeProduct CDN)
             column_name: DTC column display name (default "Style Image")
             filename: filename for the multipart part
             content_type: MIME type of the image (e.g. image/jpeg, image/png)
             file_field: multipart field name (UNVALIDATED; default "file")
+            row_id: target row's rowId. PREFERRED.
 
         Returns:
             Parsed response (or {"status_code": <code>}).
+
+        Raises:
+            ValueError: if neither locator is supplied.
         """
+        if row_id is None and row_index is None:
+            raise ValueError(
+                "upload_row_image() needs row_id (preferred) or row_index"
+            )
         files = {file_field: (filename, image_bytes, content_type)}
-        params = {"rowindex": row_index, "columnname": column_name}
+        # lowercase 'rowid' -- camelCase is ignored by the API (see docstring)
+        locator = ({"rowid": row_id} if row_id is not None
+                   else {"rowindex": row_index})
+        params = {**locator, "columnname": column_name}
         logger.info(
             f"Upload image: sheet {sheet_id} view {view_id} "
-            f"rowindex={row_index} column={column_name!r} ({len(image_bytes)} bytes)"
+            f"{locator} column={column_name!r} ({len(image_bytes)} bytes)"
         )
         return self.client.post_multipart(
             f"/v1/sheets/{sheet_id}/views/{view_id}/images",

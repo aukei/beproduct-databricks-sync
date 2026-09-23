@@ -26,7 +26,7 @@ Safety
 `dry_run` is NOT defaulted here -- each notebook's own widget default applies,
 and every v2 notebook defaults it to "true". Pass `dry_run=false` explicitly to
 write to live DTC, and only against a request you are willing to touch (the
-sacrificial one is `KTB FW26 Wrangler`, UAT `6a26581854e92e7acd8fa71b`).
+sacrificial one is `KTB FW26 Wrangler`, UAT `6ab113b708ef2276cf34c0d2`).
 
 Requires DATABRICKS_HOST + DATABRICKS_PAT (.env).
 """

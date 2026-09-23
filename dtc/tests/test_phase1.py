@@ -311,6 +311,20 @@ try:
 except ValueError:
     check(True, "patch_rows rejects mixed rowId/rowIndex batch")
 
+# append_rows() -- the v2 INSERT path (2026-09-23). The server assigns the
+# locators, so a body carrying one is rejected OUTRIGHT by DTC; catching it
+# locally turns a 400 into a message that names the offending key. This is
+# what makes bom.INSERT_EXCLUDE_COLS load-bearing: a fan-out INSERT copies a
+# live row forward and that row carries both rowId and rowIndex.
+for _bad in ("rowId", "rowIndex", "rowStatus"):
+    try:
+        _c.append_rows("s", "v", [{"X": "1"}, {_bad: "z", "X": "2"}])
+        check(False, f"append_rows should reject {_bad}")
+    except ValueError as _e:
+        check(_bad in str(_e), f"append_rows rejects {_bad}, and names it")
+check(_c.append_rows("s", "v", []) == [],
+      "append_rows([]) returns [] and issues NO call")
+
 print("\n[11] compute_orphan_marks() - moved-key rows flagged '(removed)'")
 # Phase 6: DTC rows now use "BP Style#" as the match-key column.
 dtc_rows_o = [

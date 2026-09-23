@@ -17,7 +17,7 @@ guaranteed by "these are separate tasks" now have to be guaranteed here:
   [3]  a failing contribution degrades, never aborts
   [4]  material owns its 4 columns; style only default-fills them
   [5]  duty lands on the RIGHT physical row (style x color x material)
-  [6]  rowIndex is unique across style inserts AND material fan-out
+  [6]  INSERT bodies carry NO locator -- DTC assigns rowId/rowIndex on append
   [7]  provenance is recorded for every planned field
 """
 
@@ -405,23 +405,29 @@ check("[5f] unmatched duty row creates nothing", p_orphan_duty.is_empty())
 
 
 # ---------------------------------------------------------------------------
-print("\n[6] rowIndex uniqueness across style inserts and material fan-out")
+print("\n[6] INSERT bodies carry NO locator -- the server assigns it")
 # ---------------------------------------------------------------------------
+# 2026-09-23: INSERTs go to DTCConnector.append_rows(), which assigns rowId and
+# rowIndex itself and REJECTS a body carrying either. The old [6b]/[6c] cases
+# asserted uniqueness of a client-computed rowIndex; that arithmetic -- and the
+# stale-read race it carried -- no longer exists, so they are retired rather
+# than rewritten. [6h] replaces them with the property that actually matters
+# now: the plan must not depend on existing rowIndex values at all.
 
 # Two brand-new colours, each needing a Main Fabric + one Fabric segment.
-# Style contributes 2 inserts; material fans out 2 more. All 4 rowIndexes must
-# be distinct and clear of the existing rows.
+# Style contributes 2 inserts; material fans out 2 more.
 p_fan = wip_plan.compute_request_plan(
     SCOPE,
     [dtc_row("r9", 7, style="KTB-9", color="Existing")],
     [bp_row(color="Blue"), bp_row(color="Red")],
     bom_by_style={"KTB-1": MAIN_PLUS_ONE}, allowed_cols=ALLOWED)
-idxs = [r.row_index for r in p_fan.inserts]
 check("[6a] style inserts + material fan-out produce 4 rows",
       len(p_fan.inserts) == 4, p_fan.explain())
-check("[6b] every rowIndex is unique", len(idxs) == len(set(idxs)), idxs)
-check("[6c] no rowIndex collides with an existing row",
-      all(i > 7 for i in idxs), idxs)
+check("[6b] PlannedRow no longer carries a client-side row_index",
+      not any(hasattr(r, "row_index") for r in p_fan.inserts))
+check("[6c] no insert body carries rowId/rowIndex/rowStatus (append_rows rejects them)",
+      all(not ({"rowId", "rowIndex", "rowStatus"} & set(o))
+          for o in p_fan.insert_sheet_data()), p_fan.insert_sheet_data())
 check("[6d] per-colorway coverage: each colour gets both segments",
       sorted(r.match_key[1] for r in p_fan.inserts) == ["Blue", "Blue", "Red", "Red"],
       [r.match_key for r in p_fan.inserts])
@@ -429,8 +435,9 @@ check("[6d] per-colorway coverage: each colour gets both segments",
 # Updates and inserts must never be mixed in one call.
 check("[6e] update bodies are keyed by rowId only",
       all("rowId" in o and "rowIndex" not in o for o in p_fan.update_sheet_data()))
-check("[6f] insert bodies are keyed by rowIndex only",
-      all("rowIndex" in o and "rowId" not in o for o in p_fan.insert_sheet_data()))
+check("[6f] insert bodies are field data ONLY -- same keys the planner set",
+      all(set(o) == set(r.fields)
+          for o, r in zip(p_fan.insert_sheet_data(), p_fan.inserts)))
 check("[6g] at most 2 PATCH calls per request",
       p_fan.summary()["patch_calls"] <= 2, p_fan.summary())
 
@@ -740,8 +747,11 @@ check("[8a] run 1 does real work", not run1.is_empty(), run1.explain())
 applied = [dict(live[0])]
 for r in run1.updates:
     applied[0].update(r.fields)
-for r in run1.inserts:  # none expected here, but keep the simulation honest
-    applied.append({**r.fields, "rowId": f"new-{r.row_index}", "rowIndex": r.row_index})
+# none expected here, but keep the simulation honest. DTC assigns the locators
+# on append, so mimic that rather than inventing a client-side rowIndex.
+for _i, r in enumerate(run1.inserts, start=1):
+    applied.append({**r.fields, "rowId": f"new-{_i}",
+                    "rowIndex": phase1.max_row_index(live) + _i})
 
 run2 = wip_plan.compute_request_plan(SCOPE, applied, staging, bom_by_style=boms,
                                      duty_rows=duties, allowed_cols=ALLOWED)

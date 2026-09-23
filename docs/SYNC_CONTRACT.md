@@ -301,4 +301,4 @@ Requests not matching this convention, and any request whose name contains a
 Stage 10.
 
 There is a sacrificial in-scope request for reversible live write tests:
-**`KTB FW26 Wrangler`**, UAT request `6a26581854e92e7acd8fa71b`.
+**`KTB FW26 Wrangler`**, UAT request `6ab113b708ef2276cf34c0d2`.

@@ -21,7 +21,7 @@ from connectors.dtc import DTCConnector
 from sync import phase1
 
 API_KEY = "49A127E0942071B4BD440DD00386C6B3"
-REQUEST_ID = "6a26581854e92e7acd8fa71b"   # KTB FW26 Wrangler (sacrificial)
+REQUEST_ID = "6ab113b708ef2276cf34c0d2"   # KTB FW26 Wrangler (sacrificial)
 SENTINEL_BP = "ZZ_PHASE1_LIVE_TEST"  # Phase 6: was SENTINEL_LF
 
 failures = []

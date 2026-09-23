@@ -482,8 +482,15 @@ for name, m in mapping.items():
 
     totals["requests_written"] += 1
 
-    # UPDATEs (rowId) then INSERTs (rowIndex), back to back. Never mixed: the
-    # API rejects a body containing both.
+    # UPDATEs then INSERTs, back to back -- still ONE write window.
+    # UPDATE : PATCH, keyed by rowId.
+    # INSERT : POST /rows (since 2026-09-23). The SERVER assigns
+    #          rowId+rowIndex, so no index is computed here and none may
+    #          be sent -- append_rows() rejects a body carrying one. This
+    #          removes the window where a concurrent insert/delete/re-order
+    #          invalidated an index computed from the start-of-run read.
+    #          The 201 returns the locators IN SEND ORDER, so each new row
+    #          is logged with the rowId DTC actually gave it.
     for label, rows_sd, ops in (
         ("UPDATE", plan.update_sheet_data(), plan.updates),
         ("INSERT", plan.insert_sheet_data(), plan.inserts),
@@ -493,13 +500,21 @@ for name, m in mapping.items():
         for chunk_sd, chunk_ops in zip(phase1.chunked(rows_sd, batch_size),
                                        phase1.chunked(ops, batch_size)):
             try:
+                assigned = []
                 if not dry_run:
-                    connector.patch_rows(sheet_id, view_id, chunk_sd)
+                    if label == "INSERT":
+                        assigned = connector.append_rows(sheet_id, view_id, chunk_sd)
+                    else:
+                        connector.patch_rows(sheet_id, view_id, chunk_sd)
                 totals["patch_calls"] += 1
-                for op in chunk_ops:
+                for op, loc in zip(chunk_ops,
+                                   assigned or [None] * len(chunk_ops)):
+                    if loc:
+                        op.row_id = loc.get("rowId")
                     log(name, request_id, label, op.match_key, "ok",
                         "dry_run" if dry_run else "",
-                        f"sources={sorted(set(op.sources.values()))}", op.fields)
+                        f"sources={sorted(set(op.sources.values()))}"
+                        + (f" rowId={op.row_id}" if loc else ""), op.fields)
                 print(f"  ✅ {label}: {len(chunk_sd)} row(s)"
                       + ("  [dry_run]" if dry_run else ""))
             except Exception as e:  # noqa: BLE001

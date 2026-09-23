@@ -301,7 +301,7 @@ this stays true by construction; verify it stays true after any change).
    secret VALUES must only ever live in the untracked local `.env` and the
    Databricks secret scope — never in `.env.example` or any other tracked
    file. There is a sacrificial in-scope DTC request for reversible write
-   tests: `KTB FW26 Wrangler` (UAT request `6a26581854e92e7acd8fa71b`).
+   tests: `KTB FW26 Wrangler` (UAT request `6ab113b708ef2276cf34c0d2`).
    Because this is now a dedicated app registration, its redirect URI IS
    ours to register, so `python scripts/nt_orbit_oauth_setup.py --flow authcode
    --redirect-uri http://localhost:8765/callback` (register that same URI on
@@ -365,6 +365,60 @@ this stays true by construction; verify it stays true after any change).
    `"Factory 3 - Tariff"` (no `rate` suffix; ` - ` for numbered slots).
 
 ## Verified discoveries log (append-dated; do not delete)
+
+**DTC can APPEND rows with server-assigned locators -- client-side rowIndex
+arithmetic is retired on v2 (2026-09-23, live-verified end to end):**
+
+    POST /v1/sheets/{sheetId}/views/{viewId}/rows
+    body {"sheetData":[{<column display name>: <value>, ...}, ...]}
+    -> 201 {"rows":[{"rowId":...,"rowIndex":...}, ...]}   IN SEND ORDER
+
+- `DTCConnector.append_rows()`. v2's INSERTs (phase 1 new style x colour, and
+  the BOM material fan-out) no longer compute an index at all, so the window in
+  which a concurrent insert / delete / re-order invalidated an index computed
+  from the start-of-run read is GONE. `wip_plan.PlannedRow.row_index` is
+  DELETED -- UPDATEs never used it, they key on `row_id` alone.
+- **The 201 returns the locators in SEND ORDER**, so `zip(sent, returned)`
+  pairs each new row with its real rowId. v2 now logs the DTC-assigned rowId
+  for every inserted row, which previously was unknowable until the next pull.
+- Still ONE write window: PATCH (updates) then POST (inserts), back to back.
+- Constraints, all live-checked against `WIP_ITS_USE`: `allowInsertRow="Y"`;
+  **ZERO mandatory fields** so the endpoint's stricter "every mandatory field
+  must be supplied" rule costs us nothing (re-check if the view changes);
+  row limit 3000/request, nowhere near.
+- **`bom.INSERT_EXCLUDE_COLS` is now LOAD-BEARING.** A fan-out INSERT copies a
+  live row forward as its base and that row carries `rowId`/`rowIndex`;
+  supplying either to this endpoint gets the whole request REJECTED. Its
+  consequence changed from "wrong row" to "400".
+- Live proof on `KTB FW26 Wrangler`: 2 rows appended with no locator, returned
+  ids/indexes matched the sheet exactly, field data landed in send order, then
+  both were deleted leaving the baseline intact.
+
+**The image endpoint accepts `rowid` -- and a stale `rowindex` SILENTLY CREATES
+A ROW (2026-09-23):**
+- `POST .../images?rowid={uuid}&columnname=...` works. DTC's own error text is
+  "Either rowIndex or rowId is required."; a well-formed but unknown id fails
+  loudly with "Row cannot be found by rowid".
+- **The parameter is lowercase `rowid`.** CamelCase `rowId` is silently IGNORED
+  and the call fails with the generic "Either rowIndex or rowId is required",
+  i.e. it looks like no locator was sent at all.
+- **THE HAZARD, found the hard way:** `rowindex=999999` on a 39-row sheet
+  returned **201** and CREATED row 999999 holding the uploaded image. A
+  non-existent rowIndex does NOT error. So a 201 from this endpoint is NOT
+  evidence the image landed on the intended row, and a stale index fabricates a
+  row instead of failing. (The stray row also made the DTC UI try to render
+  999999 rows and exhaust browser memory; it was removed via the API.)
+- `upload_row_image()` takes `row_id=` and prefers it. Phase 3 still addresses
+  rows by rowIndex and re-reads the sheet live each run specifically because
+  indexes shift -- migrating it to rowId is the obvious follow-on.
+
+**`delete_rows` REFINED: the ~11-row limit is a CAP, not "11 arbitrary rows"
+(2026-09-23):**
+- A single-row delete removes exactly that row. Live: deleting `[999999]` from
+  a 40-row sheet -> 39 rows, zero collateral, zero renumbering.
+- The 2026-09-18 "removed exactly 11 rows and renumbered" finding stands for
+  BULK deletes; only there is the re-read loop needed. The old wording read as
+  "any call removes 11 rows", which is what made a one-row cleanup look unsafe.
 
 **A DTC `lookup` / `formula` field is only materialized if it is on the ACTIVE
 VIEW AT SAVE TIME (2026-09-23, owner RCA; live-reproduced end to end):**
@@ -1366,7 +1420,7 @@ should not have been predicted (2026-09-15):**
   ambiguity -- `dtc_request_mapping` and `p1p7_beproduct_to_dtc_push` already
   do; ad-hoc tooling must too.
 - **The documented sacrificial request `KTB FW26 Wrangler`
-  (`6a26581854e92e7acd8fa71b`) NO LONGER EXISTS as an active in-scope request**
+  (`6ab113b708ef2276cf34c0d2`) NO LONGER EXISTS as an active in-scope request**
   -- every FW26 request is now `(BACKUP)`-named and inactive. Only 1 of 85
   registry rows is active + in scope. Ground rule #1's reversible-write-test
   target needs re-establishing.

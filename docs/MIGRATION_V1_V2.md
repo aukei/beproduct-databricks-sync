@@ -385,7 +385,7 @@ must be re-enabled separately; v2 replaces only the main DAG.
    `dry_run=true`. Confirm the plan it computes matches what v1 actually pushed
    for the same input state.
 2. Run against the sacrificial request `KTB FW26 Wrangler`
-   (UAT `6a26581854e92e7acd8fa71b`) with `dry_run=false`.
+   (UAT `6ab113b708ef2276cf34c0d2`) with `dry_run=false`.
 3. Confirm the zero-diff invariant directly: run twice back to back and assert the
    second run issues **zero** PATCH calls.
 4. Compare `costing_chart` built from staging against v1's re-pull-based output for
@@ -553,11 +553,11 @@ before doing it:
   that changes maybe twice a day. The v2 plan builder should carry a delta filter
   across all three contributions.
 - **Serverless cost.** Measure one real run before retiring the instance pool.
-- **The sacrificial request is gone.** `KTB FW26 Wrangler`
-  (`6a26581854e92e7acd8fa71b`) is no longer active or in scope — every FW26
-  request is now `(BACKUP)`-named, and only 1 of 85 registry rows is active and
-  in scope. AGENTS.md ground rule #1 needs a new reversible-write-test target
-  before the next live experiment.
+- **The sacrificial request was RE-CREATED (2026-09-23).** The old
+  `KTB FW26 Wrangler` (`6a26581854e92e7acd8fa71b`) is dead; a live request of
+  the same name now exists at `6ab113b708ef2276cf34c0d2` and was used for the
+  append_rows validation. Every other FW26 request is `(BACKUP)`-named. The
+  id is recorded in several places — grep before assuming.
 - **Duplicate request references.** `dtc_request_registry` can hold several rows
   with the same `request_reference` (one active, one inactive sibling).
   Resolving by name alone silently picks the wrong sheet — always filter

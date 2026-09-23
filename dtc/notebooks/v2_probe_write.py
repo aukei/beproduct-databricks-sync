@@ -21,7 +21,7 @@ This probe settles it by writing, re-reading, and restoring.
 Safety
 ------
 * Targets ONE row of ONE request. Default is the sacrificial request
-  `KTB FW26 Wrangler` (UAT `6a26581854e92e7acd8fa71b`), which exists for
+  `KTB FW26 Wrangler` (UAT `6ab113b708ef2276cf34c0d2`), which exists for
   exactly this purpose.
 * `dry_run=true` by default -- it will find and report a candidate without
   writing anything.

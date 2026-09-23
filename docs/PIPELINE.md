@@ -63,9 +63,16 @@ development) viable at all:
    per-field diffing — an asserted, unit-tested invariant of the plan builder. At
    12 runs/day this is the difference between safe and intolerable.
 3. **One write *window* per request — not a fixed call count.** The floor is 2
-   calls, not 1: `DTCConnector.patch_rows` rejects a body mixing `rowId`
-   (update) and `rowIndex` (insert), so it is one updates call plus one inserts
-   call, back to back.
+   calls, not 1: updates go out as a `patch_rows` PATCH keyed by `rowId`, and
+   inserts as an `append_rows` POST to `.../rows`, back to back.
+   > **Changed 2026-09-23.** Inserts used to be a second PATCH keyed by a
+   > CLIENT-COMPUTED `rowIndex`, and the 2-call floor existed because
+   > `patch_rows` rejects a body mixing `rowId` and `rowIndex`. They now use the
+   > append endpoint, where the SERVER assigns `rowId`+`rowIndex` and a body
+   > carrying either is rejected — so no index is computed anywhere, and the
+   > stale-read race it carried is gone. Still two calls, still one window; the
+   > 201 returns the new rowIds in send order, so inserted rows are logged with
+   > the id DTC actually gave them.
    > **This becomes more than 2 calls at scale.** `batch_size` (default 100)
    > chunks each side, so a request with 250 changed rows issues 3 update
    > calls, not 1. They are still consecutive, so it remains **one write
