@@ -6,6 +6,7 @@ previously duplicated across `PHASE1/2/7/10_WORKFLOW.md` and AGENTS.md's
 "Current direction partition" / Ground rule #6.
 
 Stage ordering and the gates a row must pass — see [PIPELINE.md](PIPELINE.md).
+Symptom-first runbooks — see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
 ---
 
@@ -14,9 +15,12 @@ Stage ordering and the gates a row must pass — see [PIPELINE.md](PIPELINE.md).
 **`docs/beproduct_style_interested_fields.txt`** is the SSOT: DTC column ⇄
 BeProduct field, fieldId, JSONPath, sync direction. **Update it first**, then the
 code constants below, then the tests. Companion SSOTs:
-`costing_interested_fields.txt` (costing/duty columns),
+`costing_interested_fields.txt` (costing_chart columns),
 `beproduct_directory_xts_interested_fields.txt` (Stage 00),
-`beproduct_material_interested_fields.txt`.
+`beproduct_material_interested_fields.txt` (Stage 55 material-master target and
+the "LF Material ID" / "LF Fabric ID" naming trap; its Phase 8 section is
+retired). The `.txt` files hold fieldIds / JSONPaths / raw column names; this
+file owns direction, keys and the allow-list.
 
 ### Where a mapping lives in code — edit all that apply, together
 
@@ -101,7 +105,7 @@ or `]` at all), with multiple submits stacked on newline-separated lines.
 | `pp_sample` | `PP Sample Submission Approval Status` |
 | `top_sample` | `TOP Sample Approval Status` |
 
-All 6 confirmed present in the 204-field view. Fit and PP destinations changed on
+All 6 confirmed present in the view (204 fields then; 205 since 2026-09-22). Fit and PP destinations changed on
 2026-08-28 after a DTC WIP restructure (were `1st Fit …` and `2nd Fit …`); the PP
 destination originally requested, `PP Sample Approval Status`, does not exist live
 — `PP Sample Submission Approval Status` was the only plausible match and has since
@@ -117,8 +121,18 @@ columns of the `Type == "BOM"` table.
 | Fabric Group | `**MaterialCategory` | `fabric_group` |
 | Placement | `**Placement` | `placement` |
 | Mill Fabric Article # | `**SupplierRefNo` | `mill_fabric_article` |
-| Content | `**MaterialContent` | `content` |
-| LF Fabric ID | `**MaterialCode` | `lf_material_id` |
+| Content | `**MaterialContent` | `content` — **write-once** (fills a blank cell only) |
+| LF Fabric ID | `**MaterialCode` | `lf_material_id` — normal upsert, a blank never written |
+
+Write rules shared by all five: a blank source value is **never** written over a
+real one; a row holding some other real (Fabric Group, Mill Fabric Article #)
+pair is left alone; nothing is ever reverted. Full per-row decision tree:
+PIPELINE.md → Stage 40, "Gates — material fields".
+
+**`Content` is write-once** (`material_fill_if_blank_columns="Content"`). DTC's
+own trigger rewrites it in another notation, so an owning writer would diff on
+every row every run. The value only has to be non-blank for costing (Stage 30
+gate 3). A hand-typed Content in DTC is therefore kept.
 
 > **`LF Fabric ID` added 2026-09-22 (owner spec).** `LF_Material_ID` is the
 > material key *across* systems — BeProduct, the techpack extraction and DTC all
@@ -175,14 +189,27 @@ ordering.
 
 Per vendor slot (`Main` / `1` / `2` / `3`):
 
-| Slot | HTS column | Duty columns |
-|---|---|---|
-| Main | `Main Factory HTS Code` | `Main Factory Duty Rate (US/CA/MX)` |
-| 1 / 2 / 3 | `<slot> Factory HTS Code` | `<slot> Factory Duty Rate (US/CA/MX)` |
+| Slot | HTS | Duty rate (one column per market) | Tariff |
+|---|---|---|---|
+| Main | `Main Factory HTS Code` | `Main Factory Duty Rate (US)` / `(CA)` / `(MX)` | `Main Factory Tariff` |
+| 1 | `Factory 1 - HTS code` | `Factory 1 - Duty Rate (US)` / `(CA)` / `(MX)` | `Factory 1 - Tariff` |
+| 2 | `Factory 2 - HTS code` | `Factory 2 - Duty Rate (US)` / `(CA)` / `(MX)` | `Factory 2 - Tariff` |
+| 3 | `Factory 3 - HTS code` | `Factory 3 - Duty Rate (US)` / `(CA)` / `(MX)` | `Factory 3 - Tariff` |
 
-Tariff has its own, **non-symmetric** column names — `Main Factory Tariff`,
-`Factory 1 - Tariff`, `Factory 2 - Tariff`, `Factory 3 - Tariff` (no `rate`
-suffix; ` - ` for numbered slots). All four were verified live against the view
+Transcribe these **exactly** (executable definition: `duty.WIP_HTS_COL` /
+`WIP_DUTY_COL` / `WIP_TARIFF_COL`). They are not symmetric — `HTS Code` vs
+`HTS code`, no `rate` suffix on tariff, ` - ` for numbered slots — and a name
+absent from the view is dropped by the allow-list, so the value silently never
+lands (`wip_push` reports it under `columns_not_seen_in_view`).
+
+Source of each value: `hts_code` is the **US** answer (CA/MX return different
+codes and may only fill a blank); `duty_rate_xx` is that market's "General
+Duty" line; `tariff_rate` comes only from the US call. Only the **Main Fabric**
+row of a style × colour carries duty — "Fabric" segment rows never do.
+Values are fill-blank-only unless `force_refresh_duty` is run
+(PIPELINE.md → duty_compute).
+
+Tariff columns: All four were verified live against the view
 definition on 2026-09-17 and are written unconditionally, overwriting whatever
 DTC holds; the former `WIP_TARIFF_COLS_LIVE` switch is gone. DTC types these
 `string` where the duty rates are `number` — immaterial, because
@@ -197,6 +224,16 @@ DTC holds; the former `WIP_TARIFF_COLS_LIVE` switch is gone. DTC types these
 | Main Factory Customer ID | `customer_factory_code` | header |
 | Factory Production Country for Main Factory | `country_of_origin` ("COO") | header |
 | Lot# | `drawing_number_walmart` | colorway |
+| Fabric Customer # or SAP # | material master `customer_material_code` | material (Stage 55 — **disabled**) |
+
+All read from the start-of-run `dtc_wip_ktb` snapshot; a blank DTC value never
+clears BeProduct (`push_blanks=false`). Header fields are style-level, so every
+DTC row of a style must agree (or be blank) — see PIPELINE.md → Stage 50.
+
+`Main Factory Customer ID` and `Factory Production Country for Main Factory` are
+DTC **lookup** fields on the factory. DTC stores a lookup only if the column is
+on the view the user **saved through** ("Full"); otherwise the stored value is
+NULL although the UI shows one, and nothing reaches BeProduct.
 
 COO is the only field requiring a value transform — DTC's 2-char country code →
 BeProduct's country name, via `phase2.resolve_coo_country_name()` +
@@ -209,8 +246,9 @@ a DTC column.
 ### BeProduct → DTC, image only
 
 `front_image_url` → DTC `Style Image`. Binary, so it never rides a `sheetData`
-PATCH — uploaded through the multipart `/images` endpoint by the separate images
-job, only when the DTC cell is blank and BeProduct has a valid URL. One-directional:
+PATCH — uploaded through the multipart `/images` endpoint by Stage 45
+(`phase3_images`, addressing the row by `rowid`), only when the DTC cell is
+blank and a source exists (a sibling row's image, else BeProduct's URL). One-directional:
 never read back, never in `phase2.REVERSE_*`.
 
 ---
@@ -256,13 +294,14 @@ Color / Wash            Garment Finish          Tech Pack Stage
 BP Style#               LF Style#               Legacy Code
 Gender                  Supplier                Fabric Group
 Placement               Mill Fabric Article #   Content
+LF Fabric ID
 Proto Sample - Sample Status                    Pre-line Sample - Status
 SMS - Sample Status                             2nd Fit Sample Approval Status
 PP Sample Submission Approval Status            TOP Sample Approval Status
 ```
 
 **Costing/duty fields** (`duty.WIP_HTS_COL` / `WIP_DUTY_COL` / `WIP_TARIFF_COL`):
-the per-slot HTS and Duty Rate columns tabulated above.
+the per-slot HTS, Duty Rate and Tariff columns tabulated above (20 columns).
 
 **`Style Image` is explicitly excluded** from every `sheetData` PATCH. Image cells
 can only be set through the multipart `/images` endpoint; DTC rejects any
@@ -296,9 +335,13 @@ unconditionally (the tariff gate was removed 2026-09-17).
 | In-scope request name | `"${customer} ${DTC seasoncode} ${brands}"`, e.g. `KTB FW26 Wrangler` |
 
 One brand per request, agreeing with the request name (project guarantee).
-Requests not matching this convention, and any request whose name contains a
-`(BACKUP` marker in any position or variant, are out of scope — see PIPELINE.md,
-Stage 10.
+Out of scope: any request not matching this convention, any whose name contains
+the word **cancel / backup / archive / delete** (any case, any suffix — e.g.
+`(BACKUP 2)`, `Cancelled`, `DELETED`), and any DTC-generated `…-SUPPLIER …`
+request — see PIPELINE.md, Stage 10. Renaming a live request to include one of
+those words silently stops its rows from syncing. LinePlan requests are **not**
+filtered at all.
 
 There is a sacrificial in-scope request for reversible live write tests:
-**`KTB FW26 Wrangler`**, UAT request `6ab113b708ef2276cf34c0d2`.
+**`KTB FW26 Wrangler`**, UAT request `6ab113b708ef2276cf34c0d2` (re-created
+2026-09-23; grep for the id before relying on it).

@@ -6,18 +6,30 @@ Guide for connecting to DTC (Data Collaboration Tool) and reading worksheet data
 > the snapshot / change-detection / `dtc_master_chart_uat` change-log examples
 > describe a **removed** pipeline. The current model pulls the `WIP_ITS_USE` view
 > of registry-discovered requests into `lft.beproduct.dtc_wip_<customer>` and syncs
-> via Phase 1 (BeProduct→DTC, incl. request **create** + **share**), Phase 2
-> (DTC→BeProduct), and Phase 3 (image upload). Authoritative docs:
-> `docs/DTC_GUIDE.md`, `docs/ARCHITECTURE.md`, `docs/PIPELINE.md`,
-> `docs/SYNC_CONTRACT.md`, and `AGENTS.md` — not the
-> change-tracking snippets in this file.
+> through the v2 stages (job `BeProduct_DTC_sync_v2`): `request_manager` (create +
+> share), `wip_push` (the single `sheetData` write window), `phase3_images`
+> (Style Image) and `phase2_push` (DTC→BeProduct). Authoritative docs — they win
+> over this file: `docs/PIPELINE.md`, `docs/SYNC_CONTRACT.md`,
+> `docs/TROUBLESHOOTING.md`, then `docs/DTC_GUIDE.md` and `AGENTS.md`.
 >
-> **Current DTC write contracts** (validated, see `AGENTS.md`): upsert
-> `PATCH /v1/sheets/{sheetId}/views/{viewId}` (204); create `POST /v1/sheets`
-> (201; `requestReference` + non-empty `requestDescription` + array fields);
-> share `POST /v1/requests/{id}/shares/{userEmail}` and `.../shares/usergroups/{group}`
-> (201); image `POST /v1/sheets/{sheetId}/views/{viewId}/images?rowindex=..&columnname=Style Image`
-> (multipart, file part `file`; webp rejected → transcode to PNG).
+> **Current DTC write contracts** (validated live, see `AGENTS.md`):
+> - **Update** `PATCH /v1/sheets/{sheetId}/views/{viewId}` body
+>   `{"sheetData":[{..., "rowId": ...}]}` → 204 (`patch_rows`).
+> - **Insert** `POST /v1/sheets/{sheetId}/views/{viewId}/rows` body
+>   `{"sheetData":[{...}]}` → 201 with `{"rows":[{"rowId","rowIndex"}]}` in send
+>   order (`append_rows`). DTC assigns the locators; a row carrying
+>   `rowId`/`rowIndex` gets the whole request rejected. Do not compute rowIndexes.
+> - **Image** `POST /v1/sheets/{sheetId}/views/{viewId}/images?rowid={rowId}&columnname=Style Image`
+>   (multipart, file part `file`; webp rejected → transcode to PNG). The param is
+>   lowercase **`rowid`** (camelCase `rowId` is silently ignored). Never address by
+>   `rowindex`: a stale/non-existent index returns 201 and **silently creates a
+>   row** instead of failing.
+> - **Delete** `DELETE /v1/sheets/{sheetId}/views/{viewId}/rows` body
+>   `{"rowIndexes":[...]}` → 204, but removes **at most ~11 rows per call** and
+>   renumbers the rest — loop: re-read, delete, repeat until empty.
+> - **Create request** `POST /v1/sheets` (201; `requestReference` + non-empty
+>   `requestDescription` + array fields); **share**
+>   `POST /v1/requests/{id}/shares/{userEmail}` and `.../shares/usergroups/{group}` (201).
 
 ## When to Use This Skill
 
@@ -383,6 +395,8 @@ spark.sql(f"""
 
 ## Change Tracking
 
+> **REMOVED / legacy (2026-06-17).** The `dtc_master_chart_uat` snapshot and change-log tables below no longer exist; kept only as a Spark pattern example. The same applies to the `_change_log` reads in "Batch Update Multiple Rows" and "Pattern 2".
+
 ### Tracking Modified Fields
 
 ```python
@@ -728,7 +742,10 @@ class DTCConnector:
 - `GET /v1/requests/{request_id}` - Get request details
 - `GET /v1/requests/{request_id}/views` - List views
 - `GET /v1/sheets/{sheet_id}/views/{view_id}` - Get sheet data
-- `PATCH /v1/sheets/{sheet_id}/rows/{row_id}` - Update row
+- `PATCH /v1/sheets/{sheet_id}/views/{view_id}` - Update rows (body `sheetData[]` keyed by `rowId`)
+- `POST /v1/sheets/{sheet_id}/views/{view_id}/rows` - Append rows (server assigns `rowId`/`rowIndex`)
+- `POST /v1/sheets/{sheet_id}/views/{view_id}/images?rowid=..&columnname=..` - Upload a cell image
+- `DELETE /v1/sheets/{sheet_id}/views/{view_id}/rows` - Delete rows (~11 per call max)
 
 ### Environment URLs
 

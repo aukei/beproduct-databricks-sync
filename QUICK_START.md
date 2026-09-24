@@ -2,13 +2,10 @@
 
 Setup, how to use, and which notebook to run for the BeProduct ⇄ DTC sync.
 
-> Concepts & data model: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+> Something missing or wrong: [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 > What runs and in what order: [docs/PIPELINE.md](docs/PIPELINE.md).
 > Field directions and keys: [docs/SYNC_CONTRACT.md](docs/SYNC_CONTRACT.md).
->
-> **Branch `v2`.** Some notebooks named below are v1 artifacts being
-> superseded — see [docs/MIGRATION_V1_V2.md](docs/MIGRATION_V1_V2.md) for the
-> old → new map and the rollout order.
+> Concepts & data model: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ---
 
@@ -37,6 +34,13 @@ databricks secrets put-secret beproduct company_domain
 # DTC API keys
 databricks secrets put-secret beproduct dtc_api_key_uat
 databricks secrets put-secret beproduct dtc_api_key_prod
+
+# NT Orbit (duty_compute) -- Entra delegated OAuth; refresh token seeded by
+# scripts/nt_orbit_oauth_setup.py (see docs/TROUBLESHOOTING.md 4.3)
+databricks secrets put-secret beproduct nt_orbit_tenant_id
+databricks secrets put-secret beproduct nt_orbit_client_id
+databricks secrets put-secret beproduct nt_orbit_client_secret
+databricks secrets put-secret beproduct nt_orbit_refresh_token
 ```
 
 ### 1b. Deploy notebooks + modules
@@ -48,19 +52,24 @@ cp .env.example .env
 #   DATABRICKS_HOST=https://adb-XXXXXXXX.azuredatabricks.net
 #   DATABRICKS_PAT=dapi...
 
-python scripts/upload_notebooks.py            # notebooks (beproduct/, dtc/notebooks/) + modules (dtc/python/)
-python scripts/upload_notebooks.py --dry-run  # preview only
+R=/Workspace/Repos/beproduct-sync-v2
+python scripts/upload_notebooks.py --root $R --dry-run   # preview only
+python scripts/upload_notebooks.py --root $R             # notebooks + modules
+python scripts/upload_notebooks.py --root $R --modules-only
 ```
 
-Notebooks deploy under `/Workspace/Repos/beproduct-sync/…`; Python modules deploy
-to `/Workspace/Repos/beproduct-sync/DTC/python` (imported by the notebooks).
+v2 notebooks deploy under `/Workspace/Repos/beproduct-sync-v2/…` and import
+modules from `/Workspace/Repos/beproduct-sync-v2/DTC/python` (the job parameter
+`module_path`). The script's default root is the **v1** root
+(`/Workspace/Repos/beproduct-sync`) — always pass `--root` for v2.
 
 ### 1c. One-time: seed the season-code mapping
 
 ```
-Notebook: /Workspace/Repos/beproduct-sync/DTC/notebooks/00_init_season_mapping
+Notebook: /Workspace/Repos/beproduct-sync-v2/DTC/notebooks/00_init_season_mapping
 ```
-Then insert prefixes (year is algorithmic — last 2 digits of the BeProduct year):
+Then insert prefixes (year is algorithmic — last 2 digits of the BeProduct year).
+A BeProduct season with no row here makes `transform` fail:
 ```sql
 INSERT INTO lft.beproduct.dtc_seasoncode_mapping (CUSTOMER, BPSEASON, DTCCODE) VALUES
   ('KTB','SPRING','SS'), ('KTB','FALL','FW');
@@ -68,94 +77,66 @@ INSERT INTO lft.beproduct.dtc_seasoncode_mapping (CUSTOMER, BPSEASON, DTCCODE) V
 
 ---
 
-## 2. How to use — run the full sync (recommended)
+## 2. How to use — the scheduled jobs
 
-The entire pipeline is one schedulable job:
+Production is two jobs (full detail: [docs/PIPELINE.md](docs/PIPELINE.md)):
 
-```
-Notebook: /Workspace/Repos/beproduct-sync/beproduct/orchestrate_sync
-```
+| Job | ID | Schedule (HKT) |
+|---|---|---|
+| `BeProduct_DTC_sync_v2` | 367710575109755 | every 2 h at :05 on odd hours |
+| `BeProduct_DTC_sync_duty_compute` | 1026599988408090 | 10:00 and 15:00 |
+
+Key job parameters (defaults in `scripts/deploy_job.py` → `JOB_PARAMS`):
 
 | Parameter | Default | Notes |
 |-----------|---------|-------|
 | `dtc_environment` | `uat` | `uat` or `prod` |
-| `dry_run` | `false` | `true` = compute + log, **no writes** (preview); set `false` to apply |
-| `run_phase1` / `run_phase2` / `run_phase3` | `true` | toggle each direction |
-| `customer` / `dtc_workspace` | `KTB` | scope |
-| `dtc_document` | `KTB WIP` | document for created requests |
-| `refresh_mode` | `FULL` | BeProduct pull mode (`FULL`/`INCREMENTAL`) |
+| `dry_run` | `false` | `true` = compute + log, **no writes** |
+| `folder_name` | `TEST KTB` | BeProduct folder; switch to `KTB` at go-live |
+| `run_phase0`, `run_bom`, `run_costing`, `run_wip_push`, `run_duty_push`, `run_phase3`, `run_phase2` | `true` | per-stage switches, read inside each notebook (a disabled stage still shows SUCCESS) |
+| `run_customer_code_push` | `false` | Stage 55, disabled until its resolver is proven |
+| `force_refresh_duty` | `false` | re-query NT Orbit and overwrite; see TROUBLESHOOTING runbook 5 |
+| `refresh_mode` | `FULL` | keep FULL: sample-app edits don't bump `style.modifiedAt` |
 
-It runs, in order: BeProduct style sync → transform → DTC pull → resolve/create/
-share requests → **Phase 1** push → **Phase 2** pushback → dtc_wip refresh →
-**Phase 3** image upload. Each step is dependency-guarded and reported in a final
-summary; a failed step fails the job.
+**Ad-hoc runs** (from a machine with `.env`):
 
-**First time:** run with `dry_run=true` to preview the plan, then `dry_run=false`.
-
-Review results:
-```sql
-SELECT * FROM lft.beproduct.beproduct_to_dtc_sync_log WHERE stage IN ('resolve','create','share','push','images') ORDER BY log_time DESC LIMIT 100;
-SELECT * FROM lft.beproduct.dtc_to_beproduct_sync_log ORDER BY log_time DESC LIMIT 100;
+```bash
+# Whole job, one-off override, collecting every task's exit JSON
+python scripts/run_v2_job.py --job-id 367710575109755 dry_run=true
+# One notebook as a one-off serverless run (dry_run defaults to the notebook's own default: true)
+python scripts/run_v2_task.py v2_wip_push dry_run=true
 ```
+
+Serverless runs return **no stdout** through the API — only each notebook's exit
+value, which these scripts print. In the Databricks UI, a task's cell output is
+still visible.
+
+**Deploying job changes:**
+
+```bash
+python scripts/deploy_job.py --job v2 --dry-run                           # preview the graph
+python scripts/deploy_job.py --job v2 --reset-existing 367710575109755
+python scripts/deploy_job.py --job duty_compute --reset-existing 1026599988408090
+```
+
+**Rollback** (see [docs/MIGRATION_V1_V2.md](docs/MIGRATION_V1_V2.md)): pause
+`BeProduct_DTC_sync_v2`, unpause `BeProduct_DTC_sync_dag` and
+`BeProduct_DTC_sync_images`.
 
 ---
 
-## 3. How to use — run notebooks individually
+## 3. On-demand notebooks (not in any job)
 
-Run these in order if you prefer step-by-step control (params shown are the key ones).
-
-**WIP sync chain (Phases 1 / 2 / 3 / 7):**
-
-| # | DAG task | Notebook | Purpose | Output |
-|---|----------|----------|---------|--------|
-| 1 | `bp_style_sync` | `beproduct/p1p7_beproduct_style_sync` | Pull styles, excl. Finalized, enrich 6 sample apps | `ktb_styles` |
-| 2 | `transform` | `beproduct/p1p7_beproduct_to_dtc_transform` | Denormalize style × color; format Phase 7 sample statuses | `beproduct_to_dtc_staging` |
-| 3 | `pull_master_dtc` | `dtc/notebooks/p1_pull_masters_to_delta` | Pull KTB WIP `WIP_ITS_USE` rows + refresh registry | `dtc_wip_ktb` |
-| 4 | `request_manager` | `beproduct/p1_dtc_request_manager` | Resolve / create / share requests | `dtc_request_mapping` |
-| 5 | `phase1_push` | `beproduct/p1p7_beproduct_to_dtc_push` | **Phase 1+7** upsert (`dry_run`, `delta_only`) | DTC WIP sheets |
-| 6 | `phase2_push` | `dtc/notebooks/p2_push_dtc_to_beproduct` | **Phase 2** pushback (`push_blanks=false`) | BeProduct |
-| 7 | `repull_dtc` | `dtc/notebooks/p1_pull_masters_to_delta` | Targeted re-pull after Phase 1 inserts | `dtc_wip_ktb` |
-| 8 | `phase3_images` | `beproduct/p3_beproduct_to_dtc_images` | **Phase 3** image upload (`dry_run`, `max_uploads`) | DTC "Style Image" |
-
-> ⚠️ **Phase 8a/8b (FABRIC → Delta → BeProduct Material Master) are RETIRED
-> (2026-09-01)** — confirmed by the project team to be replaced by a separate
-> "MaterialLib" application, and removed from the DAG entirely (`gate_phase8a`
-> / `pull_fabric_dtc` no longer exist as job tasks). `dtc/notebooks/
-> p8a_pull_fabric_to_delta.py` remains in the repo as a historical/manual-
-> fallback artifact only; the `dtc_fabric_ktb` / `dtc_fabric_registry` tables
-> were DROPPED from Delta the same day (owner-confirmed, zero downstream readers).
-
-**BOM enrichment (Phase 10 — runs BEFORE `build_costing_chart`, default off):**
-
-| DAG task | Notebook | Purpose | Output |
-|----------|----------|---------|--------|
-| `fill_bom_data` | `dtc/notebooks/p10_pull_bom_and_enrich` | Enrich WIP `Fabric Group`/`Placement`/`Mill Fabric Article #` from `alb_tpm_<env>.public.customer_teckpack_style_log` (**runs on serverless compute** — Lakebase source). `run_phase10=false` default, checked **inside the notebook** (not a DAG gate — a gate here previously caused an `EXCLUDED`-cascade bug that broke Phase 9a/9b; fixed 2026-09-02). | live DTC push only (no Delta write) |
-| `repull_dtc_bom` | `dtc/notebooks/p1_pull_masters_to_delta` | Re-pull WIP so `build_costing_chart` sees the enrichment; runs unconditionally (`run_if=ALL_DONE`) | `dtc_wip_ktb` |
-
-**LinePlan + Costing chain (Phase 9a — parallel, independent):**
-
-| DAG task | Notebook | Purpose | Output |
-|----------|----------|---------|--------|
-| `pull_lineplan_dtc` | `dtc/notebooks/p9a_pull_lineplan_to_delta` | Pull KTB LinePlan (Full view) | `dtc_lineplan_ktb` |
-| `p9a_build_costing_chart` | `dtc/notebooks/p9a_build_costing_chart` | INNER JOIN WIP × LinePlan on "Lineplan Ref #" (unmatched WIP rows dropped); transpose 4 vendor/factory slots into `supplier_type` "Main"\|"1"\|"2"\|"3". Depends on `repull_dtc_bom`, not `pull_master_dtc` directly. | `costing_chart` |
-
-**Duty/Tariff chain (Phase 9b, split into 2 jobs 2026-09-03 — after `build_costing_chart`):**
-
-| DAG task | Notebook | Purpose | Output |
-|----------|----------|---------|--------|
-| `compute_duty_rates` (own job `BeProduct_DTC_sync_duty_compute`) | `dtc/notebooks/p9b1_compute_duty_rates` | NT Orbit Duty Tools HTS/Duty/Tariff lookups, persistent cross-run cache. Calls are SERIAL by default (`orbit_parallel_calls=false`), 60s/call timeout. Zero DTC dependency. | `costing_chart`, `nt_orbit_duty_cache` |
-| `push_duty_rates` (main job) | `dtc/notebooks/p9b2_push_duty_to_wip` | Re-reads `costing_chart`, diffs against the live WIP row, PATCHes only fields that actually changed (`run_phase9b=true` live) | DTC WIP (per-slot HTS/Duty columns) |
-
-The original single notebook `dtc/notebooks/p9b_fill_duty_rates.py` is superseded (kept as a manual-fallback artifact only).
-
-**Other notebooks (on-demand, not in DAG):**
-
-- `dtc/notebooks/00_init_request_registry` — standalone WIP registry build/refresh (first run or targeted `request_ids`).
-- `beproduct/p5utl_beproduct_master_data_sync` — **admin-only.** Pull and/or push-back BeProduct MasterData + Directory.
-  Modes: `PULL_ONLY`, `PUSH_MASTER_DATA`, `PUSH_DIRECTORY`, `PUSH_ONLY`. Use `dry_run=true` first.
-  Writes `beproduct_master_*`, `beproduct_directory`, `beproduct_directory_contacts`.
+- `dtc/notebooks/00_init_season_mapping` — seed `dtc_seasoncode_mapping`.
+- `dtc/notebooks/00_init_request_registry` — standalone WIP registry build/refresh.
+- `beproduct/00_init_style_app_registry` — re-cache folder sample-app IDs (after BeProduct app setup changes).
+- `beproduct/p5utl_beproduct_master_data_sync` — **admin-only.** Modes
+  `PULL_ONLY` (refresh `beproduct_master_*`, incl. `beproduct_master_coo` used by
+  Stage 50), `PUSH_MASTER_DATA`, `PUSH_DIRECTORY`, `PUSH_ONLY`. Use `dry_run=true` first.
 - `beproduct/p1utl_dtc_share_requests` — idempotently (re-)share existing requests.
-- `scripts/check_dtc_view.py` — DTC WIP_ITS_USE column readiness check (Phase 6 pending columns).
+- `dtc/notebooks/v2_inspect_requests` — read-only: every DTC request and whether it is in scope.
+- `dtc/notebooks/v2_set_dtc_cell` — set one DTC cell safely (matched + read back).
+- `scripts/check_dtc_view.py` — DTC `WIP_ITS_USE` column check.
 
 ---
 
@@ -171,37 +152,24 @@ SELECT sync_status, COUNT(*) FROM lft.beproduct.beproduct_to_dtc_staging GROUP B
 -- Pulled DTC WIP rows
 SELECT request_reference, COUNT(*) FROM lft.beproduct.dtc_wip_ktb GROUP BY request_reference;
 
--- Costing chart summary (costing_chart has real downstream readers — for
--- Phase 9b testing: override costing_chart_table with any unused name.
--- (costing_chart_kei was retired and DROPPED 2026-09-15.) Never write
--- test data into costing_chart directly)
-SELECT supplier_type, COUNT(*) rows, COUNT(hts_code) with_hts FROM lft.beproduct.costing_chart GROUP BY supplier_type;
+-- Costing chart summary (fully rebuilt every main run; recover with RESTORE ... VERSION AS OF)
+SELECT supplier_type, COUNT(*) rows, COUNT(hts_code) with_hts, COUNT(tariff_rate) with_tariff
+FROM lft.beproduct.costing_chart GROUP BY supplier_type;
 
--- Duty/tariff persistent cache size (Phase 9b — avoids re-paying the ~30s/call
--- NT Orbit cost every daily run; costing_chart itself is fully overwritten
--- by Phase 9a each run, this cache table is not)
-SELECT COUNT(*) FROM lft.beproduct.nt_orbit_duty_cache;
+-- NT Orbit cache (never wiped; watch looked_up_at, not the row count)
+SELECT COUNT(*), MAX(looked_up_at) FROM lft.beproduct.nt_orbit_duty_cache;
 
--- (Phase 8a/8b RETIRED 2026-09-01 — dtc_fabric_ktb / dtc_fabric_registry were
--- DROPPED from Delta the same day; superseded by "MaterialLib".)
-
--- Sync log (WIP push)
-SELECT stage, operation, status, COUNT(*) FROM lft.beproduct.beproduct_to_dtc_sync_log
-WHERE log_time > current_timestamp() - INTERVAL 1 HOUR GROUP BY 1,2,3;
+-- Sync logs, last 2 hours
+SELECT stage, operation, status, reason, COUNT(*) FROM lft.beproduct.beproduct_to_dtc_sync_log
+WHERE log_time > current_timestamp() - INTERVAL 2 HOURS GROUP BY ALL ORDER BY 5 DESC;
+SELECT operation, status, reason, COUNT(*) FROM lft.beproduct.dtc_to_beproduct_sync_log
+WHERE log_time > current_timestamp() - INTERVAL 2 HOURS GROUP BY ALL ORDER BY 4 DESC;
 ```
 
 ---
 
 ## 5. Troubleshooting
 
-| Issue | Fix |
-|-------|-----|
-| `ModuleNotFoundError: connectors.dtc` | `python scripts/upload_notebooks.py --modules-only` |
-| `401 Unauthorized` (DTC) | `dtc_api_key_<env>` secret missing/expired |
-| `401 / unauthorized_client` (BeProduct) | refresh token expired → update `refresh_token` secret |
-| `NO_IN_SCOPE_REQUESTS` | no in-scope active request for that customer/env — check naming + `request_is_active` |
-| `400` creating a request | handled — uses the validated `POST /v1/sheets` shape (see `docs/DTC_GUIDE.md`) |
-| Image upload `400` | webp source → auto-transcoded to PNG (Phase 3) |
-| Pushed field silently blanked | MultiSelect must be sent as array + a valid Master Data value (`docs/BEPRODUCT_GUIDE.md`) |
-
-More: `docs/DTC_GUIDE.md`, `docs/BEPRODUCT_GUIDE.md`, `AGENTS.md`.
+See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) — symptom runbooks
+(missing record, field not pushed, no costing line, missing / outdated duty) and
+a table of job-level errors.

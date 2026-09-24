@@ -1,21 +1,45 @@
-Costing Chart — field mapping & data sources (Phase 9a)
-=========================================================
-Confirmed live against DTC UAT 2026-07-17.
+Costing Chart — field mapping & data sources (Stage 30, build_costing)
+=====================================================================
+Confirmed live against DTC UAT 2026-07-17; inputs revised for v2 (2026-09-15).
 
-This is the field-level SSOT only. For DAG placement, the 3-job split,
-NT Orbit auth, cache mechanics, and every current gating condition, see
-docs/v1/PHASE9_WORKFLOW.md and docs/v1/PIPELINE_GATES.md.
+This is the field-level SSOT only. For DAG placement, every gate, the
+duty_compute companion job (NT Orbit auth, cache mechanics, schedules) and
+force_refresh_duty, see docs/PIPELINE.md -> "Stage 30 — build_costing" and
+"Companion job". Exact DTC column names and the PATCH allow-list:
+docs/SYNC_CONTRACT.md -> "Costing/duty → DTC". Symptoms ("no costing line",
+"missing / outdated duty"): docs/TROUBLESHOOTING.md.
 
 Purpose
 -------
-Phase 9a joins the DTC WIP master chart with the DTC LinePlan to produce a
-denormalized "Costing Chart" at the Style × Color × Vendor/Factory slot level.
-Output: `lft.beproduct.costing_chart` (full overwrite each run).
+build_costing (p9a_build_costing_chart.py, wip_effective_mode=intent) joins
+the WIP master chart with the DTC LinePlan to produce a denormalized
+"Costing Chart" at the Style × Color × Material × Vendor/Factory slot level.
+Output: `lft.beproduct.costing_chart` (full overwrite each run; recovery is
+Delta time travel, `RESTORE TABLE … VERSION AS OF n`).
 
-Input tables
-------------
-  lft.beproduct.dtc_wip_ktb        WIP rows (all fields in data_json)
-  lft.beproduct.dtc_lineplan_ktb   LinePlan rows (all fields in data_json)
+Who writes duty values:
+  - BeProduct_DTC_sync_duty_compute (p9b1_compute_duty_rates, serverless,
+    10:00 / 15:00 HKT) -- NT Orbit -> nt_orbit_duty_cache + costing_chart.
+  - build_costing (Stage 30) -- refills duty fields from the WIP row and from
+    nt_orbit_duty_cache on every rebuild (zero API calls).
+  - wip_push (Stage 40, main job BeProduct_DTC_sync_v2) -- pushes HTS / duty /
+    tariff from costing_chart to the per-slot DTC WIP columns below.
+
+Input tables (v2 "intent" mode)
+-------------------------------
+  lft.beproduct.dtc_wip_ktb                WIP start-of-run snapshot (data_json) --
+                                           base row + every DTC-OWNED column
+                                           (Lineplan Ref #, vendor/factory slots,
+                                           production country, existing HTS/duty/tariff)
+  lft.beproduct.beproduct_to_dtc_staging   overlaid onto the WIP row: style
+                                           identity, Class, Sub Class, Gender, ...
+                                           (what wip_push is about to write)
+  lft.beproduct.bom_segments               overlaid onto the WIP row: material_no,
+                                           fabric_content, fabric_group
+  lft.beproduct.dtc_lineplan_ktb           LinePlan rows (data_json)
+  lft.beproduct.nt_orbit_duty_cache        read-only duty back-fill
+  In the column table below, "WIP JSON" means the WIP column name; for the
+  overlaid columns the value comes from staging / bom_segments in intent mode.
 
 Join key
 --------
@@ -65,12 +89,12 @@ style_description      | WIP JSON     | "Style Description"
 color_name             | WIP (fixed)  | color_wash column (= "Color / Wash" in DTC)
 lineplan_ref           | WIP JSON     | "Lineplan Ref #"
 fabric_content         | WIP JSON     | "Content"  (corrected 2026-09-03 -- was mistakenly "Fabric Group".
-                       |              | Source REVISED 2026-09-09 "2nd revision": Phase 10 writes this from
+                       |              | In intent mode: from bom_segments. Source REVISED 2026-09-09 "2nd revision": Phase 10 writes this from
                        |              | the techpack's `**MaterialContent` column (customer_teckpack_style_
                        |              | log.custom_fields -- NOT bom_unified.material_name, an earlier,
                        |              | briefly-tried mapping that caused live data corruption for some
                        |              | styles and was reverted the same day) -- see WIP_FIELD_CONTENT /
-                       |              | the module docstring in sync/bom.py and docs/v1/PHASE10_WORKFLOW.md.
+                       |              | the module docstring in sync/bom.py and docs/PIPELINE.md Stage 20b.
                        |              | STILL ACCURATE after a round trip: the BOM source moved to the
                        |              | BeProduct PageBomVariation API 2026-09-16 (which would have made
                        |              | this line wrong, and it was never updated) and was WALKED BACK to
@@ -82,7 +106,7 @@ fabric_content         | WIP JSON     | "Content"  (corrected 2026-09-03 -- was 
 fabric_type            | WIP JSON     | "Fabric Type" (new 2026-09-03, same DTC-trigger-populated column;
                        |              | traceability ONLY -- NOT part of the filter or costing-chart key,
                        |              | still solely DTC-trigger-populated and may be blank in practice)
-material_no            | WIP JSON     | "Mill Fabric Article #" (new 2026-09-03 -- Phase 10's own field;
+material_no            | WIP JSON     | "Mill Fabric Article #" (new 2026-09-03 -- the BOM contribution's field; intent mode: bom_segments;
                        |              | THE completeness filter AND costing-chart key column, see below)
                        |              | NOTE 2026-09-22: DTC now ALSO carries "LF Fabric ID"
                        |              | (LF_Material_ID, the key that identifies a material ACROSS
@@ -90,12 +114,12 @@ material_no            | WIP JSON     | "Mill Fabric Article #" (new 2026-09-03 
                        |              | beproduct_style_interested_fields.txt). costing_chart does NOT
                        |              | carry it and its key is UNCHANGED: `material_no` stays the
                        |              | material discriminator here. Adding LF_Material_ID would be a
-                       |              | costing_chart SCHEMA + key change affecting p9b1's COSTING_KEY
+                       |              | costing_chart SCHEMA + key change affecting duty_compute's COSTING_KEY
                        |              | merge and the duty cache -- deliberately not done; raise it as
                        |              | its own decision if the cross-system key should win here too.
 gender                 | WIP JSON     | "Gender"                      (may be blank)
 class_name             | WIP JSON     | "Class"
-sub_class              | WIP JSON     | "Sub Class"
+sub_class              | WIP JSON     | "Sub Class"  (intent mode: from staging -- populated where v1 had NULL)
 supplier_type          | derived      | "Main" | "1" | "2" | "3"  (which vendor/factory
                        |              |   column-pair; NOT LinePlan "INTERNAL/ SOURCED")
 supplier               | WIP JSON     | vendor column for the slot
@@ -108,7 +132,7 @@ production_country     | WIP JSON     | "Factory Production Country for [Main Fa
                        |              | cell could stay NULL while the factory beside it was populated, and
                        |              | only fill later when something touched the row through a view that
                        |              | shows them (erratic, 0.6-10 min). Fixed 2026-09-23 by exposing them
-                       |              | on the Full view; see AGENTS.md for the full RCA and the three wrong
+                       |              | on the Full view (owner action, DTC view config); see AGENTS.md for the full RCA and the three wrong
                        |              | diagnoses. Why it matters HERE: a blank production_country makes
                        |              | duty.py skip the market, so that slot silently gets no HTS / duty /
                        |              | tariff either. This pipeline never writes these columns -- they are
@@ -124,14 +148,14 @@ duty_rate_mx           | WIP JSON     | "Main Factory Duty Rate (MX)" / "Factory
 tariff_rate            | WIP JSON     | "Main Factory Tariff" / "Factory [1-3] - Tariff"
                        |              | REVISED 2026-09-17: read from WIP like its siblings above.
                        |              | Previously NULL-on-rebuild + a Step 4b COALESCE carry-forward,
-                       |              | because no WIP column existed. All four went live, the
+                       |              | because the WIP columns were believed absent. All four are live, the
                        |              | WIP_TARIFF_COLS_LIVE switch was DELETED (tariff is written
                        |              | unconditionally, overwriting DTC), and Step 4b was removed.
 updated_at             | derived      | current_timestamp() at build time
 
-WIP HTS / Duty field names (exact DTC column names, confirmed 2026-07-17)
--- this IS the canonical Phase 9b allow-list referenced in AGENTS.md's
-Ground rule #6 (lean sheetData PATCH bodies) --
+WIP HTS / Duty / Tariff field names (exact DTC column names, confirmed 2026-07-17)
+-- written by wip_push (Stage 40); part of the PATCH allow-list in
+docs/SYNC_CONTRACT.md (executable: wip_plan.allowed_patch_columns()) --
 --------------------------------------------------------------------------
   Main Factory HTS Code           Main Factory Duty Rate (US/CA/MX)
   Factory 1 - HTS code            Factory 1 - Duty Rate (US/CA/MX)
@@ -178,114 +202,53 @@ p9a_build_costing_chart.py's LinePlan aggregation step also runs a best-effort
 conflict DETECTOR (warns, does not block) when a ref's plan values actually
 disagree across rows/requests.
 
-Phase 9b — implemented, split into 2 notebooks / jobs (2026-09-03)
----------------------------------------------------------------
-`dtc/notebooks/p9b_fill_duty_rates.py` (the notebook originally referenced
-here) is now a superseded/manual-fallback artifact, kept for history but not
-scheduled. Phase 9b runs as two independently-scheduled pieces:
-  - `p9b1_compute_duty_rates.py` (job `BeProduct_DTC_sync_duty_compute`,
-    task `compute_duty_rates`) -- NT Orbit lookups -> `costing_chart` only.
-    Zero DTC dependency (no API key, no DTC read/write).
-  - `p9b2_push_duty_to_wip.py` (main job `BeProduct_DTC_sync_dag`, task
-    `push_duty_rates`) -- re-reads `costing_chart` for any row with a
-    filled value and diffs against the live WIP row before PATCHing (only
-    pushes fields that actually differ -- lean-PATCH, Ground Rule #6).
-See `AGENTS.md`'s 2026-09-03 decisions log entry ("Pipeline split into 3
-independent Databricks jobs") for the full rationale (DTC's concurrent-edit
-limitation) and `docs/v1/PIPELINE_GATES.md`'s "Phase 9b" section for the exact
-current lookup/cache/push gating logic.
+Duty lookup, cache, auth and push -- pointer
+--------------------------------------------
+Not duplicated here. See docs/PIPELINE.md:
+  - "Companion job" -> BeProduct_DTC_sync_duty_compute: which markets need a
+    call, cache TTL (cache_ttl_days, default 180), Entra delegated OAuth,
+    "General Duty" line vs tariff lines, serial calls, the sequencing gap.
+  - "Refreshing a duty rate that has CHANGED -- force_refresh_duty".
+  - "Stage 30" gates 1-9: completeness filter (material_no, bp_style_no,
+    fabric_content, fabric_group == "Main Fabric", all ANDed), LinePlan INNER
+    JOIN, per-slot vendor filter, WIP fallback, cache fill.
+  - "Stage 40" for the DTC push of duty values.
+v1's separate duty-push task is superseded (folded into wip_push) and not
+scheduled.
 
-For costing rows where hts_code IS NULL or duty_rate_* IS NULL or tariff_rate IS NULL:
-  1. Check the PERSISTENT cross-run cache table `duty_cache_table`
-     (default lft.beproduct.nt_orbit_duty_cache; NEVER overwritten by Phase
-     9a, unlike costing_chart) for a hit on
-     (product_description, origin_country, import_country), fresh within
-     `cache_ttl_days` (default 180). A hit is used directly — NO API call.
-     Only a miss/stale entry calls the NT Orbit Duty Tools 3rd-party API
-     (https://orbitduty.neotangent.com/API-DOCS/, POST /api/v1/calculate/single/,
-     one call per market US/CA/MX still needed). This matters because each
-     call is ~30s (sometimes longer — the connector's HTTP timeout is 60s,
-     raised from 30s 2026-09-01 after live timeouts were observed) and
-     costing_chart is FULLY OVERWRITTEN by every Phase 9a run (see below) —
-     without a cache that survives ACROSS runs, every daily run would
-     re-look-up every row from scratch. Calls are made SERIALLY by default
-     (`parallel_calls`/`orbit_parallel_calls` job param = false) rather than
-     via a thread pool, since NT Orbit's tolerance for concurrent calls under
-     real load is unconfirmed; set `parallel_calls=true` (+ `max_workers`) to
-     trade safety for throughput once that's validated.
-  2. Fill in the values on costing_chart (write-once — never overwrites an
-     already-populated cell). duty_rate_xx is taken from the response's
-     "General Duty" detailed_line rate (NOT the combined data.duty_rate,
-     which also includes tariff + fees); tariff_rate is the sum of any other
-     type="duty" detailed_lines, and is only ever set from a US-market call.
-     Newly-fetched results are also written into the persistent cache table
-     so the NEXT run (even after Phase 9a wipes costing_chart) can reuse
-     them without another API call.
-  3. If push_to_wip=true, push updated HTS / Duty Rate values back to the
-     corresponding per-slot WIP columns via the same Phase 1 PATCH contract
-     (DTCConnector.patch_rows, UPDATE-only since the WIP rows already exist).
-     Tariff Rate has NO live WIP column yet (see note above) so it is pushed
-     to nowhere — it stays in costing_chart only; the push step logs this as
-     a "skipped" reason rather than silently dropping the value.
-
-Auth: NT Orbit requires a per-user Microsoft Entra ID delegated OAuth2 bearer
-token (NOT the DTC x-api-key scheme) — refresh_token -> access_token via
-dtc/python/client/entra_auth.py. One-time interactive setup:
-scripts/nt_orbit_oauth_setup.py (run locally, once, as the delegated user).
-Entra rotates the refresh_token on (most) uses; the notebook auto-persists
-the rotated value to lft.<schema>.nt_orbit_oauth_state every run
-(dbutils.secrets is read-only, so it cannot be written back to the secret
-scope from a notebook) and prefers that table's value over the static secret
-on every subsequent run — so, like BeProduct's OAuth, this is "seed once,
-then fully automatic" as long as the job keeps running at least every ~90
-days (it runs 3x/day). No manual secret-scope updates needed after the
-initial seed.
-
-Live in the deployed job as of 2026-09-01: `run_phase9b=true` gates the main
-job's `push_duty_rates` task. `push_duty_to_wip` was REMOVED as a job
-parameter 2026-09-08 (found redundant during a full-pipeline conflict scan
--- `run_phase9b` already gates the task's only job post-split, so the
-separate flag had zero effect). The notebook's own standalone widget default
-for `dry_run` remains `"true"` (safe for ad-hoc/interactive runs without job
-parameters); the job's shared `dry_run` parameter is `false`.
-
-Costing chart table name is a PARAMETER (widget/job-param `costing_chart_table`):
-  default : lft.beproduct.costing_chart
-  testing : lft.beproduct.costing_chart_kei
-Persistent duty-lookup cache table + TTL are also PARAMETERS
-(`duty_cache_table` / `cache_ttl_days`), default
-lft.beproduct.nt_orbit_duty_cache / 180 days.
+Parameters (field-relevant only)
+--------------------------------
+  costing_chart table : `costing_chart_table` / `costing_chart_table_name`,
+                        default lft.beproduct.costing_chart (kept for future
+                        comparison builds; the old costing_chart_kei scratch
+                        table was dropped 2026-09-15)
+  duty cache / TTL    : `duty_cache_table` / `cache_ttl_days`, default
+                        lft.beproduct.nt_orbit_duty_cache / 180 days
 Pure decision logic (no Spark/HTTP) lives in dtc/python/sync/duty.py, unit
 tested in dtc/tests/test_duty.py.
 
-Completeness filter (Step 1b) — see docs/v1/PIPELINE_GATES.md "Phase 9a" for
-the full, current, exact gating logic (material_no non-blank, bp_style_no
-non-blank, fabric_content non-blank, fabric_group=="Main Fabric" -- all
-ANDed, each with its own drop-count reported). Content REINSTATED as a
-Phase 10 output field 2026-09-09 means this gate is expected to pass for
-more rows over time as styles get re-enriched from the new source, rather
-than being permanently starved as it briefly was 2026-09-09 morning when
-Phase 10 stopped writing Content at all.
-
 Costing chart key
 ------------------
+  duty.COSTING_KEY =
   [customer, season_code, brand, bp_style_no, lf_style_no, color_name,
    lineplan_ref, material_no, supplier_type, supplier, factory]
+  Joins/MERGEs on it MUST be null-safe (<=> / eqNullSafe) -- lf_style_no can
+  be NULL (see docs/PIPELINE.md Stage 30).
 
 `material_no` added 2026-09-03 (REVISED same day from an initial
 `fabric_content` attempt -- owner correction: "multiple material_no can
 have same content, and multiple style could share a lineplan" -- so
 `fabric_content` and `lineplan_ref` are each individually unreliable
-material-level discriminators; `material_no` -- Phase 10's own "Mill Fabric
-Article #" -- is the real, unambiguous one). Phase 10 can produce multiple
+material-level discriminators; `material_no` -- the BOM contribution's own "Mill Fabric
+Article #" -- is the real, unambiguous one). The BOM fan-out produces multiple
 WIP rows sharing the same lineplan_ref/bp_style_no/color_name/supplier/
 factory (one "Main Fabric" row + one duplicate per "Fabric" segment),
-differing only in material fields; without material_no in the key, Phase
-9b's MERGE write-back could match multiple source rows to the same
-costing_chart row. `p9b2_push_duty_to_wip.py`'s WIP-row lookup index uses
-the identical (bp_style_no, color_name, material_no) key for the same
-reason.
+differing only in material fields; without material_no in the key,
+duty_compute's MERGE write-back could match multiple source rows to the same
+costing_chart row. wip_push applies duty to every WIP row sharing
+(style, colour, article) for the same reason.
 
-The table is FULLY OVERWRITTEN on every Phase 9a run (no incremental).
-All prior Phase 9b-filled values are also overwritten; Phase 9b must re-run
-after each Phase 9a rebuild to re-populate tariff_rate / HTS gaps.
+The table is FULLY OVERWRITTEN on every build_costing run (no incremental).
+Duty values survive the rebuild via the WIP fallback (all five fields,
+including tariff_rate since 2026-09-17) and the nt_orbit_duty_cache fill --
+duty_compute does NOT need to re-run after each rebuild.

@@ -6,7 +6,7 @@ used, the connector, and the DTC-related tables on Databricks (`lft.beproduct`).
 > Systems & data model: [ARCHITECTURE.md](ARCHITECTURE.md). What runs and in
 > what order, with every gate: [PIPELINE.md](PIPELINE.md). Field directions,
 > match keys and the WIP PATCH allow-list: [SYNC_CONTRACT.md](SYNC_CONTRACT.md).
-> Field-mapping SSOT: `beproduct_style_interested_fields.txt`. Verified API
+> Diagnosing a symptom: [TROUBLESHOOTING.md](TROUBLESHOOTING.md). Verified API
 > behaviour: [../AGENTS.md](../AGENTS.md).
 
 ---
@@ -15,14 +15,25 @@ used, the connector, and the DTC-related tables on Databricks (`lft.beproduct`).
 
 `Workspace → Document → Request → Sheet → View`. A **Request** (e.g.
 `KTB FW26 Wrangler`) instantiates a **Document** (`KTB WIP`); **Views** are column
-projections on the Document. Sync only ever reads the **`WIP_ITS_USE`** view
-(complete data). Requests registered with any other view are skipped + logged.
+projections on the Document. Sync only ever reads and writes through the
+**`WIP_ITS_USE`** view (complete data). Requests registered with any other view
+are skipped + logged. Users typically save through the **Full** view — which
+matters for lookup fields (below).
 
-**In-scope rule:** a reference must parse as `<customer> <seasonCode> <brand>`
-(`seasonCode` = 2 letters + 2 digits, e.g. `FW26`) **and** the customer token must
-match the configured `customer`. `KTB FW26 Wrangler` is in scope for `KTB`;
-`KON FW26 Wrangler` is not. Logic: `dtc/python/sync/phase1.py`
-(`parse_request_reference`, `is_in_scope`).
+**In-scope rule** (`phase1.is_in_scope`): parses as `<customer> <seasonCode>
+<brand>`, customer token matches, and the name contains no
+cancel / backup / archive / delete word and no `-SUPPLIER`. Full rule:
+[SYNC_CONTRACT.md](SYNC_CONTRACT.md) → Scope.
+
+**Locking.** Any successful write moves the request's server-side `last_read`;
+every browser session loaded earlier is refused on save and must reload. Reads
+are free. The scope is the whole request.
+
+**Lookup / formula fields** are computed by DTC and **only materialized if the
+column is on the view the user saved through**. A lookup hidden in "Full" (e.g.
+`Factory Production Country for …`, `Main Factory Customer ID`) stays NULL in
+storage while the UI shows a value, so the API — and this pipeline — see NULL.
+Formula and `contact`-type (image) columns reject writes.
 
 ---
 
@@ -49,19 +60,20 @@ connector = DTCConnector(api_key=api_key, environment=environment, workspace_nam
 | List requests | `GET /v1/requests` | `workspaceName` + `filters` in the **JSON body** (not query params). Server-side `requestIsActive:"Y"` filter. |
 | Get request | `GET /v1/requests/{id}` | by-id; inactive requests 400 on get-by-id. |
 | Get views | `GET /v1/requests/{id}/views` | resolve the `WIP_ITS_USE` `viewId`. |
-| View definition | `GET /v1/views/{viewId}` | `dynamicFields[].fieldName` = authoritative column list. **NOTE:** returns 403 for some view IDs with the sync API key (e.g. the wrong view id `6a3907f6df772fd797ee5b7c` is "XTS Master"). Correct KTB WIP view id: `69f04983501f3d9cf4fc379c` (198 fields). `allowed_cols` in push notebook UNIONs data-scan with FALLBACK_COLS. |
-| Get sheet rows | `GET /v1/sheets/{sheetId}/views/{viewId}` | returns `sheetData[]` with `rowId`/`rowIndex` + columns. |
-| **Upsert rows** | `PATCH /v1/sheets/{sheetId}/views/{viewId}` | body `{"sheetData":[{…,"rowId"\|"rowIndex":…}]}` → **204**. A single PATCH **cannot mix** `rowId` (update) and `rowIndex` (insert) — separate batches. |
-| Delete rows | `DELETE /v1/sheets/{sheetId}/views/{viewId}/rows` | body `{"rowIndexes":[…]}` → 204 (keys off `rowIndex`). |
+| View definition | `GET /v1/views/{viewId}` | `dynamicFields[]` (`fieldName`, `type`, `formula`) = the **authoritative** column list (205 fields on `WIP_ITS_USE`). Can 403 intermittently at the gateway; `wip_push` unions a static fallback. `sheetData` only contains populated cells, so never infer "column missing" from sheet data or `dtc_wip_ktb`. View id `6a3907f6df772fd797ee5b7c` belongs to "XTS Master", not KTB WIP. |
+| Get sheet rows | `GET /v1/sheets/{sheetId}/views/{viewId}` | returns `sheetData[]` with `rowId`/`rowIndex` + populated columns. |
+| **Update rows** | `PATCH /v1/sheets/{sheetId}/views/{viewId}` | body `{"sheetData":[{…,"rowId":…}]}` → **204 = stored**. |
+| **Append rows** | `POST /v1/sheets/{sheetId}/views/{viewId}/rows` | body `{"sheetData":[{…}]}` with **no** `rowId`/`rowIndex` (either → 400) → **201** `{"rows":[{rowId,rowIndex}…]}` in send order. Used for every v2 insert. |
+| Delete rows | `DELETE /v1/sheets/{sheetId}/views/{viewId}/rows` | body `{"rowIndexes":[…]}` → 204, but removes **at most ~11 rows per call** (silently) and renumbers the rest — loop re-read + delete. |
 | **Create request/sheet** | `POST /v1/sheets` | → **201**. Body must use `requestReference` (NOT `requestName`), a **non-empty** `requestDescription`, `viewName`, and `requestAssigneeSharingViewNames`/`sheetData` as **arrays** (empty `[]` ok). Response nests ids under `data` with a capital-S `SheetId`. |
 | **Share (user)** | `POST /v1/requests/{requestId}/shares/{userEmail}` | body `{"viewNames":[…],"message":"…","sendEmail":"Y\|N"}` → 201. |
 | **Share (group)** | `POST /v1/requests/{requestId}/shares/usergroups/{userGroupName}` | path segment URL-encoded (group names have spaces). |
 | Read shares | `GET …/shares`, `GET …/shares/usergroups` | used for idempotency. |
-| **Image upload** | `POST /v1/sheets/{sheetId}/views/{viewId}/images?rowindex={int}&columnname=Style Image` | `multipart/form-data`, file part named `file`. DTC **rejects webp (400)** → transcode to PNG first. |
+| **Image upload** | `POST /v1/sheets/{sheetId}/views/{viewId}/images?rowid={uuid}&columnname=Style Image` | `multipart/form-data`, file part named `file`. Parameter is lowercase **`rowid`** (camelCase is ignored). Never use `rowindex`: a non-existent index returns 201 and **creates a row**. DTC **rejects webp (400)** → transcode to PNG first. |
 
 Connector methods: `search_requests`, `get_request`, `get_views`,
-`get_view_definition`/`get_view_column_names`, `get_sheet`, `patch_rows`
-(+`create_row`/`update_row`), `delete_rows`, `create_sheet`,
+`get_view_definition`/`get_view_column_names`, `get_sheet`, `patch_rows`,
+`append_rows`, `delete_rows`, `create_sheet`,
 `share_request_with_user`/`share_request_with_usergroup`/`get_request_shares`/
 `get_request_share_usergroups`, `upload_row_image`.
 
@@ -69,19 +81,23 @@ Connector methods: `search_requests`, `get_request`, `get_views`,
 
 ## 4. Notebooks (DTC side)
 
-| Notebook | Does | Writes |
-|----------|------|--------|
-| `dtc/notebooks/00_init_request_registry.py` | Standalone WIP registry build/refresh (first build or targeted `request_ids`). | `dtc_request_registry` |
-| `dtc/notebooks/00_init_season_mapping.py` | Seed the season-code prefix table. | `dtc_seasoncode_mapping` |
-| `dtc/notebooks/p1_pull_masters_to_delta.py` | Refresh WIP registry; pull each in-scope active request's `WIP_ITS_USE` view (Steps 3 + 7). | `dtc_wip_<customer>` |
-| `dtc/notebooks/p8a_pull_fabric_to_delta.py` | ⚠️ **RETIRED 2026-09-01** (superseded by MaterialLib) — kept as manual-fallback only, no longer scheduled. | `dtc_fabric_<customer>`, `dtc_fabric_registry` |
-| `dtc/notebooks/p9a_pull_lineplan_to_delta.py` | Phase 9a: pull KTB LinePlan (LINEPLAN_ITS_USE → Full fallback). | `dtc_lineplan_<customer>`, `dtc_lineplan_registry` |
-| `dtc/notebooks/p9a_build_costing_chart.py` | Phase 9a: join WIP × LinePlan on "Lineplan Ref #"; transpose 4 vendor/factory slots. | `costing_chart` (full overwrite) |
-| `dtc/notebooks/p9b1_compute_duty_rates.py` | Phase 9b part 1/2 (own job `BeProduct_DTC_sync_duty_compute`): NT Orbit Duty Tools HTS/Duty/Tariff lookups, persistent cross-run cache. Zero DTC dependency. | `costing_chart`, `nt_orbit_duty_cache`, `nt_orbit_oauth_state` |
-| `dtc/notebooks/p9b2_push_duty_to_wip.py` | Phase 9b part 2/2 (main job): re-reads `costing_chart`, diffs against live WIP, pushes only changed fields. | DTC WIP (per-slot HTS/Duty) |
-| `dtc/notebooks/p9b_fill_duty_rates.py` | ⚠️ SUPERSEDED 2026-09-03 (split into the 2 notebooks above) — kept as manual-fallback only, no longer scheduled. | — |
-| `dtc/notebooks/p10_pull_bom_and_enrich.py` | Phase 10: BOM enrichment (Fabric Group/Placement/Mill Fabric Article #/Content) from `customer_teckpack_style_log.custom_fields` (2026-09-09 "2nd revision" — was `customer_teckpack_style_latest.bom_unified`); runs on serverless compute (Lakebase source). | DTC WIP (per-row PATCH/INSERT) |
-| `dtc/notebooks/p2_push_dtc_to_beproduct.py` | Phase 2 pushback of DTC-owned fields (Vendor, Factory, Lot#, Customer Factory ID, COO). | BeProduct (+ `dtc_to_beproduct_sync_log`) |
+| Notebook | Stage | Does | Writes |
+|----------|-------|------|--------|
+| `p0_pull_xts_master_to_delta.py` | 00 | Pull XTS Supplier/Factory Master | `dtc_xts_master_ktb` |
+| `p1_pull_masters_to_delta.py` | 10 | Refresh WIP registry; pull each in-scope active request's `WIP_ITS_USE` view | `dtc_wip_<customer>`, `dtc_request_registry` |
+| `p9a_pull_lineplan_to_delta.py` | 10 | Pull every active KTB LinePlan request (no name filter; `Full` view) | `dtc_lineplan_<customer>`, `dtc_lineplan_registry` |
+| `v2_pull_bom_segments.py` | 20b | Lakebase techpack BOM (serverless-only source) | `bom_segments` |
+| `p9a_build_costing_chart.py` | 30 | Intent overlay + LinePlan INNER join + 4-slot transpose + cache fill | `costing_chart` (full overwrite) |
+| `v2_wip_push.py` | 40 | **The single DTC write window** (style + material + duty) | DTC WIP, `beproduct_to_dtc_sync_log` |
+| `p2_push_dtc_to_beproduct.py` | 50 | DTC-owned fields → BeProduct (Vendor, Factory, Customer Factory ID, COO, Lot#) | BeProduct, `dtc_to_beproduct_sync_log` |
+| `v2_push_customer_code.py` | 55 | DTC customer code → BeProduct material master (**disabled**) | BeProduct |
+| `p9b1_compute_duty_rates.py` | duty_compute job | NT Orbit lookups with persistent cache; zero DTC contact | `costing_chart`, `nt_orbit_duty_cache`, `nt_orbit_oauth_state` |
+| `00_init_request_registry.py` | on demand | Standalone WIP registry build/refresh | `dtc_request_registry` |
+| `00_init_season_mapping.py` | on demand | Seed the season-code prefix table | `dtc_seasoncode_mapping` |
+| `v2_inspect_requests.py` / `v2_set_dtc_cell.py` | on demand | Read-only request inventory / set one cell safely | — / one DTC cell |
+
+v1-only, not scheduled: `p10_pull_bom_and_enrich.py`, `p9b2_push_duty_to_wip.py`,
+`p9b_fill_duty_rates.py`, `p8a_pull_fabric_to_delta.py` (retired).
 
 `beproduct/p1_dtc_request_manager.py` (BeProduct-side, but DTC-writing) resolves /
 **creates** / **shares** WIP requests and writes `dtc_request_mapping`.
@@ -136,39 +152,26 @@ Built from an **explicit schema** (so all-NULL columns don't trip
 (LONG), `bp_style_number` (Phase 6 match key), `lf_style_number`, `color_wash`,
 `extracted_at` (TIMESTAMP), `data_json` (full row JSON).
 
-- **Operation keys:** `row_id` → UPDATE (PATCH); `row_index` → INSERT/DELETE.
-- **In-request match key:** `(BP Style#, Color / Wash)` (Phase 6; was `LF Style#`).
-- **Cross-request identity:** `(customer, season_code, brand, bp_style_number, color_wash)`.
+A **start-of-run snapshot**: a DTC save made after `pull_master_dtc` is seen by
+the next run. `data_json` holds only populated cells. `row_id` is the stable
+locator; `row_index` is kept for deterministic tie-breaks only. Keys:
+[SYNC_CONTRACT.md](SYNC_CONTRACT.md) → Keys.
 
-### `dtc_fabric_<customer>` — ⚠️ RETIRED and DROPPED (Phase 8a, 2026-09-01)
+`dtc_fabric_<customer>` / `dtc_fabric_registry` — retired Phase 8a tables, DROPPED 2026-09-01.
 
-Superseded by a separate "MaterialLib" application, per project team
-confirmation. No longer pulled/written, and `dtc_fabric_ktb` /
-`dtc_fabric_registry` were DROPPED from Delta the same day (owner-confirmed
-— zero downstream readers). Kept below for historical reference only. Prior
-shape: `lf_material_id`, `its_key`, `mill_fabric_code`,
-`mill_name`, `material_class`, `fabric_type`, `fabric_content` (→ BP Material
-Description), `kb_fabric_code`, `adoption`, `season_code`, `brand`,
-`sheet_type` (PROD/DEV/MILL), `mill_code`, `data_json`. View: FABRIC
-`WIP_ITS_USE` (id `6a0ac943fedfa0ca7ff2bf48`, 120 fields).
-
-### `dtc_lineplan_<customer>` — Phase 9a LinePlan rows
+### `dtc_lineplan_<customer>` — LinePlan rows (Stage 10)
 
 `lineplan_ref`, `projected_volume`, `target_ldp`, `target_fob`, `internal_sourced`,
 `gender`, `category`, `product_line`, `region`, `season_launched`, `data_json`.
 View: "Full" (id `69f0788555010bb745140ac4`, 30 fields). Exact DTC field names
 (all UPPERCASE): `"PROJECTED VOLUME (season)"`, `"TARGET SAP w/ Tariff impact"`.
 
-### `costing_chart` — Phase 9a Style × Color × Vendor/Factory
+### `costing_chart` — Stage 30
 
-Key: `[customer, bp_style_no, color_name, lineplan_ref, supplier_type, supplier, factory]`.
-`supplier_type` = `"Main"|"1"|"2"|"3"`, GENERATED from WIP structure (which
-vendor/factory column-pair — renamed from `factory_slot` 2026-09-01; this is
-NOT LinePlan's "INTERNAL/ SOURCED" field, which does not flow into this
-table). HTS/Duty columns per slot; `tariff_rate` filled by Phase 9b (NT
-Orbit). WIP↔LinePlan join is INNER (changed from LEFT 2026-09-01) — a WIP
-row with no matching `Lineplan Ref#` is dropped, not surfaced with nulls.
-Full overwrite each run.
+Style × colour × material × vendor slot, Main Fabric rows only. Columns, key and
+gates: [PIPELINE.md](PIPELINE.md) → Stage 30 and
+[ARCHITECTURE.md](ARCHITECTURE.md) § 5. A WIP row with no matching
+`Lineplan Ref #` is dropped (INNER join), not surfaced with nulls.
 
 ### `dtc_request_mapping` — resolved requests (overwritten each run)
 
@@ -182,8 +185,8 @@ year). Forward-only (BeProduct → DTC), applied in `p1p7_beproduct_to_dtc_trans
 
 ### Sync logs
 
-`beproduct_to_dtc_sync_log` (stages `resolve`/`create`/`share`/`push`/`images`) and
-`dtc_to_beproduct_sync_log` (Phase 2).
+`beproduct_to_dtc_sync_log` (stages `resolve`/`create`/`share`/`registry_audit`/`wip_push`/`images`) and
+`dtc_to_beproduct_sync_log` (Stage 50). Query recipes: TROUBLESHOOTING.md § 0.4.
 
 `p1_pull_masters_to_delta.py` parameters: `dtc_environment` (uat|prod), `customer`
 (also the table suffix), `dtc_workspace`, `dtc_document`, `catalog`/`schema`,
@@ -193,12 +196,12 @@ year). Forward-only (BeProduct → DTC), applied in `p1p7_beproduct_to_dtc_trans
 
 ## 6. Troubleshooting
 
+Symptom runbooks and job-level errors: [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+DTC-specific extras:
+
 | Issue | Fix |
 |-------|-----|
-| `ModuleNotFoundError: connectors.dtc` | Deploy modules: `python scripts/upload_notebooks.py --modules-only`. |
-| `401 Unauthorized` | `dtc_api_key_<env>` secret missing/expired. |
 | `TABLE_OR_VIEW_NOT_FOUND … dtc_request_registry` | Run `00_init_request_registry.py` (or any notebook with `refresh_registry=true`) first. |
-| `NO_IN_SCOPE_REQUESTS` | Registry has no in-scope active request for that customer/env — check `request_reference` parsing and `request_is_active`. |
 | `400 … create` | Use the validated `POST /v1/sheets` body (§3): `requestReference`, non-empty description, array fields. |
-| `400` on image upload | Source is webp — transcoded to PNG by Phase 3 (`classify_image_type`). |
 | `CANNOT_DETERMINE_TYPE` | The pull builds an explicit schema; ensure no all-NULL column is created without a declared type. |
+| A value visible in DTC is NULL via the API | Lookup/formula column not on the view the user saved through (§1). |

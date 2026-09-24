@@ -2,6 +2,14 @@
 
 This directory contains specialized Kilo skills for working with the BeProduct Databricks Sync platform.
 
+> **These skills are general API references, not the project's behaviour spec.**
+> For what the pipeline actually does, the project docs win wherever they
+> disagree with a skill: [`docs/PIPELINE.md`](../docs/PIPELINE.md) (stages,
+> order, gates), [`docs/SYNC_CONTRACT.md`](../docs/SYNC_CONTRACT.md) (field
+> directions, exact column names, keys, PATCH allow-list) and
+> [`docs/TROUBLESHOOTING.md`](../docs/TROUBLESHOOTING.md) (symptom runbooks).
+> The live job is `BeProduct_DTC_sync_v2` (367710575109755, serverless).
+
 ## Available Skills
 
 ### 1. databricks-integration
@@ -13,7 +21,7 @@ Comprehensive guide for Databricks operations:
 - **Tables** - Query, create, write to Delta Lake tables with Unity Catalog
 - **Jobs** - Create, configure, run, and manage Databricks jobs
 - **Secrets** - Manage Databricks secrets and credentials
-- **Common Patterns** - API to Delta Lake sync, change tracking, multi-environment configs
+- **Common Patterns** - API to Delta Lake sync, multi-environment configs
 
 **When to use:**
 - Working with Databricks workspace, notebooks, or Delta tables
@@ -29,13 +37,11 @@ Guide for DTC (Data Collaboration Tool) integration:
 - **Read Sheets** - Fetch worksheets and views from DTC
 - **Parse Data** - Extract business logic from request names
 - **DataFrames** - Convert to Pandas/Spark DataFrames
-- **Change Tracking** - Track modifications and push updates
 - **Push Updates** - Send changes back to DTC
 
 **When to use:**
 - Pulling data from DTC API to Delta Lake
 - Working with DTC requests, sheets, or views
-- Implementing DTC change tracking
 - Pushing updates back to DTC
 
 ### 3. beproduct-integration
@@ -174,8 +180,10 @@ Additional documentation in the repository:
 - `QUICK_START.md` - Setup, how to use, which notebook to run
 - `docs/ARCHITECTURE.md` - Components, data flow, and the full ADB data model
 - `docs/PIPELINE.md` - Stages, ordering and gates (v1 phase docs archived in `docs/v1/`)
+- `docs/SYNC_CONTRACT.md` - Field directions, exact DTC column names, keys, PATCH allow-list
+- `docs/TROUBLESHOOTING.md` - Symptom runbooks
 - `docs/BEPRODUCT_GUIDE.md` / `docs/DTC_GUIDE.md` - Per-component API/SDK + ADB tables
-- `docs/beproduct_style_interested_fields.txt` - Field-mapping SSOT
+- `docs/beproduct_style_interested_fields.txt` - Field-level SSOT (fieldIds / JSONPaths; direction lives in SYNC_CONTRACT.md)
 - `AGENTS.md` - Verified API behaviour & invariants
 
 ## Support
@@ -202,6 +210,4 @@ To update skills:
 ## Version
 
 **Created:** 2026-06-09  
-**Skills:** 3 (databricks-integration, dtc-integration, beproduct-integration)  
-**Total Lines:** 2,571 lines of documentation  
-**Status:** Production Ready
+**Skills:** 3 (databricks-integration, dtc-integration, beproduct-integration)

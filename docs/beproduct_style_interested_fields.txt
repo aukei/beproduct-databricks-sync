@@ -4,6 +4,10 @@ Verified live against the BeProduct "KTB" folder schema on 2026-06-17
 (api.style.folder_schema / folder_colorway_schema, folder id
 37dcc63a-4754-4bb8-8d34-8c07a4145fcd).
 
+Stage numbers below (00, 20, 20b, 40, 45, 50, 55) are the v2 stages in
+docs/PIPELINE.md. Direction, keys and the PATCH allow-list are owned by
+docs/SYNC_CONTRACT.md; this file owns DTC column names, fieldIds and JSONPaths.
+
 Phase 6 structural update (2026-06-26):
   - header_number field renamed in BP from "LF Style Number" → "BP Style Number".
     The field_id (header_number) and data values are UNCHANGED.
@@ -20,23 +24,21 @@ Phase 6 structural update (2026-06-26):
     upstream integration; flows BP→DTC optional (was DTC→BP before Phase 6).
   - DTC "Customer Style#" column: DECIDED NOT TO CREATE (2026-07-02). No DTC→BP
     path for customer_style_number. Removed from phase2.REVERSE_HEADER_FIELDS.
-  - "BP STYLE#" (new DTC column, PENDING): will hold header_number (BP Style Number).
-    This is the new in-request match key once created. Until then MATCH_KEY_COLS is
-    set to ("BP Style#", ...) in code but will fail to match until column exists and
-    DTC admin migrates "LF Style#" data into "BP Style#".
+  - "BP Style#" DTC column: LIVE (was pending in 2026-07). Holds header_number
+    (BP Style Number) and is the in-request match key with "Color / Wash".
 
-PENDING DTC column creation (as of 2026-07-02, confirmed by scanning all 75 active KTB requests):
-  - "BP Style#"  — BLOCKER for match key switch; sync produces missing_bp_style until created
-  - "Gender"     — dormant Phase 1 mapping until created
-  - "Supplier"   — dormant Phase 1 default-fill until created
-  NOT PENDING (already exist in the view, just blank on some/older requests):
+DTC WIP_ITS_USE column readiness (re-checked 2026-09-22):
+  - The authoritative column list is the VIEW DEFINITION, GET /v1/views/{viewId}
+    -> dynamicFields (205 fields as of 2026-09-22). Never infer "does this column
+    exist" from sheetData or the dtc_wip_ktb Delta snapshot -- empty columns do
+    not appear there. (An older note here said the view endpoint returned 403 and
+    a data-scan union was used instead; that is superseded.)
+  - "BP Style#", "Gender", "Supplier" are LIVE in the view (no longer pending).
   - "Legacy Code", "Garment Finish", "Tech Pack Stage", "Main Vendor (Sampling)"
-  NOTE: DTC "Customer Style#" is NOT being created (decision 2026-07-02).
-  NOTE: GET /v1/views/{viewId} returns 403 for the sync API key (confirmed for all view IDs
-  including the document-level template 6a3907f6df772fd797ee5b7c). Per-request view ID used
-  for sheet data access remains 69f04983501f3d9cf4fc379c. Since the view definition endpoint
-  is inaccessible, allowed_cols uses a data-scan union with FALLBACK_COLS so Phase-1-owned
-  columns are always sent even when blank on a fresh sheet.
+    exist too, just blank on some/older requests.
+  - DTC "Customer Style#" is NOT being created (decision 2026-07-02).
+  - KTB WIP per-request view id for sheet data: 69f04983501f3d9cf4fc379c.
+    6a3907f6df772fd797ee5b7c belongs to the XTS Master document -- not KTB WIP.
 
 JSONPath conventions (against a Style record from api.style.attributes_list):
   - Header fields live in an ARRAY: headerData.fields[] = [{id, name, type, value}, ...]
@@ -48,66 +50,31 @@ JSONPath conventions (against a Style record from api.style.attributes_list):
     (colorName is a top-level colorway property, not inside .fields.)
   - frontImage is a header-level object: headerData.frontImage.origin
 
-Sync direction (one-way per field; see AGENTS.md "field mapping" for code locations):
-  BeProduct -> DTC (Phase 1, phase1.FIELD_MAPPING):
-    Product Status, Style Description, Class, Sub Class, Division, Brand,
-    Garment Finish, Tech Pack Stage, Gender (pending DTC col);
-    BP Style# (new key; pending DTC col), LF Style# (optional), Legacy Code (optional);
-    Supplier (default-fill "Supplier" when DTC cell blank; pending DTC col);
-    Fabric Group, Mill Fabric Article #, Placement (default-fill ONLY --
-    fixed 2026-09-03, extended 2026-09-11 "WIP = style x color x material":
-    these are Phase 10's fields now, sourced from TPM/BOM data, not
-    BeProduct; Phase 1 only sets the initial DUMMY_FABRIC_GROUP /
-    DUMMY_FABRIC_ARTICLE ("NO TPM BOM") constants on INSERT (Placement stays
-    blank) and NEVER re-pushes on UPDATE once the DTC cell holds any value --
-    a scheduled Phase 1 run was live-observed silently reverting Phase 10's
-    real enrichment before this fix; see AGENTS.md decisions log)
-    Color / Wash (a style with ZERO colorways gets DUMMY_COLOR, "NO BP
-    COLORWAY", instead of being dropped from staging entirely -- 2026-09-11)
-  TPM/BOM -> DTC (Phase 10, sync/bom.py -- NOT sourced from BeProduct at all):
-    Fabric Group, Placement, Mill Fabric Article #, Content, LF Fabric ID.
-    The first three appear in the Phase 1 list above ONLY as INSERT-time
-    default-fill sentinels; Phase 10 owns every real ongoing value.
-    LF Fabric ID (added 2026-09-22) is Phase 10's alone -- Phase 1 never
-    writes it and it gets NO sentinel. See the table row below.
-  BeProduct -> DTC (Phase 7, sample-app submit history; sync.samples.format_sample_field):
-    All 6 apps mapped (confirmed live 2026-08-28, 204-field WIP_ITS_USE view):
-    Proto -> "Proto Sample - Sample Status", PreLine -> "Pre-line Sample - Status",
-    SMS -> "SMS - Sample Status", Fit -> "2nd Fit Sample Approval Status" (was
-    "1st Fit Sample Approval Status" before the 2026-08-28 DTC WIP restructure),
-    PP -> "PP Sample Submission Approval Status" (was "2nd Fit Sample Approval
-    Status"; requested name "PP Sample Approval Status" does not exist live -
-    confirmed correct by the project team 2026-08-28), TOP -> "TOP Sample
-    Approval Status".
-    Value = one quoted comma-separated line PER submit: "name","status","date"
-    (NOT a JSON array - no brackets at all), multiple submits stacked on
-    separate newline-separated lines (confirmed 2026-08-28; superseded an
-    earlier same-day flat-JSON-array iteration, itself a fix of the original
-    nested [[ ]] array). phase1.norm() preserves embedded newlines (changed
-    2026-08-28) so the multi-line structure survives to the DTC push.
-  DTC -> BeProduct (Phase 2, phase2.REVERSE_*):
-    Lot#, Main Vendor (Sampling), Main Factory (Sampling),
-    Main Factory Customer ID (wired up 2026-09-03, was unsupported),
-    Factory Production Country for Main Factory (wired up 2026-09-09,
-      value-transformed via beproduct_master_coo -- see below)
-  [REMOVED Phase 6]: "Legacy Code" DTC→BP. "Customer Style#" DTC column not created.
-  key (used for matching, not overwritten): BP Style# + Color / Wash (in-request);
-    [Customer, BP Style#, SeasonCode, Brand] (composite/request-routing)
-  BeProduct -> DTC image only (Phase 3, phase3 / p3_beproduct_to_dtc_images):
-    Style Image (binary; uploaded via the multipart images endpoint, only when
-    the DTC cell is blank and BeProduct has a valid front_image_url. NEVER
-    pushed via the Phase 1 sheetData PATCH, and never read back to BeProduct.)
+
+Sync direction: see docs/SYNC_CONTRACT.md -> "Direction partition" (one-way per
+field) and "The WIP sheetData PATCH allow-list". Summary of who writes what,
+for reading the Notes column below:
+  - BeProduct -> DTC style fields: transform (Stage 20) stages them, wip_push
+    (Stage 40) writes them. Fabric Group / Mill Fabric Article # get INSERT-only
+    "NO TPM BOM" sentinels; Color / Wash gets "NO BP COLORWAY" for a style
+    with zero colorways.
+  - TPM/BOM (Lakebase) -> DTC material fields (Fabric Group, Placement, Mill
+    Fabric Article #, Content, LF Fabric ID): pull_bom (Stage 20b) + wip_push
+    (Stage 40). NOT sourced from BeProduct.
+  - Sample-app submit history -> DTC: Stage 20 formats, Stage 40 writes.
+  - DTC -> BeProduct style: phase2_push (Stage 50).
+  - Style Image: phase3_images (Stage 45), binary upload only.
 
 DTC column                 | BeProduct field name           | fieldId                  | Location (JSONPath in Style JSON)                          | Notes
 ---------------------------+--------------------------------+--------------------------+------------------------------------------------------------+------------------------------------------------------------
 Product Status             | PRODUCT STATUS                 | style_status             | headerData.fields[id="style_status"].value                 |
-Style Image                | (front image)                  | -                        | headerData.frontImage.origin                               | Phase 3 only: binary upload to blank cells (images endpoint); excluded from Phase 1 PATCH
-BP Style#                  | BP Style Number                | header_number            | headerData.fields[id="header_number"].value                | TARGET match key. DTC column PENDING CREATION. Field renamed from "LF Style Number" to "BP Style Number" in BP (field_id unchanged). Code already targets this; sync is blocked until DTC creates column + migrates "LF Style#" data.
+Style Image                | (front image)                  | -                        | headerData.frontImage.origin                               | Stage 45 only: binary upload to blank cells (images endpoint, lowercase rowid); excluded from every sheetData PATCH
+BP Style#                  | BP Style Number                | header_number            | headerData.fields[id="header_number"].value                | In-request match key (with Color / Wash). DTC column LIVE. BP→DTC. Field renamed from "LF Style Number" to "BP Style Number" in BP (field_id unchanged).
 LF Style#                  | LF STYLE NUMBER                | lf_style_number          | headerData.fields[id="lf_style_number"].value              | OPTIONAL BP→DTC. Existing DTC column. Receives the new BP lf_style_number field value (will be populated by upstream integration; currently empty). NOT a new DTC column.
 Active / Dropped           | (blank)                        | -                        | (not sourced from BeProduct)                               |
 Legacy Code                | CUSTOMER STYLE NUMBER / PLM #  | customer_style_number    | headerData.fields[id="customer_style_number"].value        | CHANGED to BP→DTC (optional). Source = existing BP field customer_style_number; no new BP "Legacy Code" field. Populated by upstream integration; sent to DTC when non-blank.
-Gender                     | GENDER                         | gender                   | headerData.fields[id="gender"].value                       | Phase 6: BP→DTC. DTC column PENDING CREATION. Values: Ladies/Mens/Girls/None/'' (validated live).
-Supplier                   | (constant, not from BP)        | -                        | (hardcoded default "Supplier")                             | Phase 6: new DTC column PENDING CREATION. Default-fill only: written as "Supplier" when DTC cell blank; existing DTC values never overwritten (DEFAULT_FILL_COLS in phase1).
+Gender                     | GENDER                         | gender                   | headerData.fields[id="gender"].value                       | BP→DTC. DTC column LIVE. Values: Ladies/Mens/Girls/None/'' (validated live).
+Supplier                   | (constant, not from BP)        | -                        | (hardcoded default "Supplier")                             | DTC column LIVE. Default-fill only: written as "Supplier" when DTC cell blank; existing DTC values never overwritten (DEFAULT_FILL_COLS in phase1).
 Style Description          | DESCRIPTION                    | header_name              | headerData.fields[id="header_name"].value                  |
 Class                      | PRODUCT CATEGORY               | product_category         | headerData.fields[id="product_category"].value             |
 Sub Class                  | PRODUCT SUB CATEGORY           | product_sub_category     | headerData.fields[id="product_sub_category"].value         |
@@ -118,7 +85,7 @@ Garment Finish             | GARMENT FINISH                 | garment_finish    
 LP Ref#                    | (blank)                        | -                        | (not sourced from BeProduct)                               |
 Tech Pack Stage            | TECHPACK STAGE                 | techpack_stage           | headerData.fields[id="techpack_stage"].value               |
 Lot#                       | Lot Code                       | drawing_number_walmart   | colorways[].fields.drawing_number_walmart                  | COLORWAY-level field (id "drawing_number_walmart",
-                           |                                |    (COLORWAY field)      |                                                            | name "Lot Code"). Populated DTC -> BeProduct in Phase 2,
+                           |                                |    (COLORWAY field)      |                                                            | name "Lot Code"). Populated DTC -> BeProduct in Stage 50,
                            |                                |                          |                                                            | so it is empty for all BeProduct rows today (expected).
                            |                                |                          |                                                            | IGNORE the legacy headerData.fields[id="drawing_number_walmart"]
                            |                                |                          |                                                            | (not in current header schema; carries stale junk e.g. "2027").
@@ -126,18 +93,17 @@ Main Vendor (Sampling)     | PARENT VENDOR                  | parent_vendor     
 Main Factory (Sampling)    | FACTORY                        | factory                  | headerData.fields[id="factory"].value                      | type PartnerDropDown
 Main Factory Customer ID   | Customer Factory Code          | customer_factory_code    | headerData.fields[id="customer_factory_code"].value        | DTC→BP (wired up 2026-09-03, was unsupported). `LockField: true` UI property does NOT block API writes (live-tested write+revert). Present in both KTB and TEST KTB folders.
 Factory Production Country for Main Factory | COO       | country_of_origin        | headerData.fields[id="country_of_origin"].value            | DTC→BP (wired up 2026-09-09). fieldType DropDown, 249 choices (live-confirmed via folder_schema + MasterData/country_of_origin -- identical). DTC stores a 2-char ISO 3166-1 alpha-2 code (e.g. "US"); BeProduct stores the country NAME (e.g. "United States") -- VALUE TRANSFORM required, see phase2.resolve_coo_country_name(). Lookup table synced into beproduct_master_coo by p5utl_beproduct_master_data_sync.py (MASTER_DATA_FIELDS["coo"]).
-Fabric Group               | (none -- constant)             | (n/a)                    | (n/a)                                                       | INSERT-only DUMMY_FABRIC_GROUP constant ("NO TPM BOM", default-fill, fixed 2026-09-03, extended 2026-09-11) -- no longer sourced from core_main_material at all; Phase 10 (TPM/BOM data) owns real ongoing values
-Mill Fabric Article #      | (none -- constant)             | (n/a)                    | (n/a)                                                       | INSERT-only DUMMY_FABRIC_ARTICLE constant ("NO TPM BOM", default-fill, added 2026-09-11) -- Phase 10 owns real ongoing values
-Placement                  | (none -- blank)                | (n/a)                    | (n/a)                                                       | left blank at INSERT (no longer sourced from core_main_material, retired 2026-09-11) -- Phase 10 owns real ongoing values
-LF Fabric ID               | (none -- Phase 10 only)        | (n/a)                    | (n/a)                                                       | NOT written by Phase 1 at all, and given NO "NO TPM BOM" sentinel (added 2026-09-22, owner spec). Phase 10 writes it from the techpack's `**MaterialCode` -- the LF_Material_ID that keys a material ACROSS systems (BeProduct / techpack / DTC). Live-verified writable in WIP_ITS_USE 2026-09-22 (205 dynamicFields; string, no formula). NOTE the WIP column is "LF **Fabric** ID" -- "LF Material ID" is a DIFFERENT DTC document's column (KTB FABRIC; see beproduct_material_interested_fields.txt). A NORMAL upsert, deliberately not write-once: the techpack extraction lands only AFTER a style reaches DTC, so it arrives late and progressively and a corrected code must propagate. A blank is never written. Excluded from the BOM match key, which stays (Fabric Group, Mill Fabric Article #).
+Fabric Group               | (none -- constant)             | (n/a)                    | (n/a)                                                       | INSERT-only DUMMY_FABRIC_GROUP constant ("NO TPM BOM", default-fill, fixed 2026-09-03, extended 2026-09-11) -- no longer sourced from core_main_material at all; the BOM contribution (Stages 20b + 40) owns real ongoing values
+Mill Fabric Article #      | (none -- constant)             | (n/a)                    | (n/a)                                                       | INSERT-only DUMMY_FABRIC_ARTICLE constant ("NO TPM BOM", default-fill, added 2026-09-11) -- the BOM contribution (Stages 20b + 40) owns real ongoing values
+Placement                  | (none -- blank)                | (n/a)                    | (n/a)                                                       | left blank at INSERT (no longer sourced from core_main_material, retired 2026-09-11) -- the BOM contribution (Stages 20b + 40) owns real ongoing values
+LF Fabric ID               | (none -- BOM only)              | (n/a)                    | (n/a)                                                       | NOT a style field at all, and given NO "NO TPM BOM" sentinel (added 2026-09-22, owner spec). The BOM contribution (Stage 40) writes it from the techpack's `**MaterialCode` -- the LF_Material_ID that keys a material ACROSS systems (BeProduct / techpack / DTC). Live-verified writable in WIP_ITS_USE 2026-09-22 (205 dynamicFields; string, no formula). NOTE the WIP column is "LF **Fabric** ID" -- "LF Material ID" is a DIFFERENT DTC document's column (KTB FABRIC; see beproduct_material_interested_fields.txt). A NORMAL upsert, deliberately not write-once: the techpack extraction lands only AFTER a style reaches DTC, so it arrives late and progressively and a corrected code must propagate. A blank is never written. Excluded from the BOM match key, which stays (Fabric Group, Mill Fabric Article #).
 Color / Wash               | DUMMY_COLOR when no colorway   | (n/a)                    | (n/a)                                                       | "NO BP COLORWAY" constant for a style with zero BeProduct colorways (added 2026-09-11) -- upgraded in place the first time a real colorway appears
-BP STYLE#                  | BP Style Number                | header_number            | headerData.fields[id="header_number"].value                | NEW DTC column to hold BP's style number. Populated BP→DTC. Same source as "BP Style#" match key column.
-Proto Sample - Sample Status | Proto Sample app           | proto_sample (app)       | app_get(Proto).data.submits[]    (first size per submit)   | Phase 7 BP→DTC. Value = one quoted line per submit "name","status","date" (not JSON, no brackets); multiple submits newline-separated. staging col proto_sample_status. sync.samples.format_sample_field.
-Pre-line Sample - Status   | PreLine Sample app             | preline_sample (app)     | app_get(PreLine).data.submits[]  (first size per submit)   | Phase 7 BP→DTC. Note: lowercase 'l' in "line", dash separator. staging col preline_sample_status.
-SMS - Sample Status        | SMS Sample app                 | sms_sample (app)         | app_get(SMS).data.submits[]      (first size per submit)   | Phase 7 BP→DTC. staging col sms_sample_status.
-2nd Fit Sample Approval Status | Fit Sample app             | fit_sample (app)         | app_get(Fit).data.submits[]      (first size per submit)   | Phase 7 BP→DTC. CHANGED 2026-08-28 (was "1st Fit Sample Approval Status"). staging col fit_sample_status.
-PP Sample Submission Approval Status | PP Sample app        | pp_sample (app)          | app_get(PP).data.submits[]       (first size per submit)   | Phase 7 BP→DTC. CHANGED 2026-08-28 (was "2nd Fit Sample Approval Status"). Requested name "PP Sample Approval Status" does not exist live; this column confirmed correct by the project team. staging col pp_sample_status.
-TOP Sample Approval Status | TOP Sample app                 | top_sample (app)         | app_get(TOP).data.submits[]      (first size per submit)   | Phase 7 BP→DTC. staging col top_sample_status.
+Proto Sample - Sample Status | Proto Sample app           | proto_sample (app)       | app_get(Proto).data.submits[]    (first size per submit)   | BP→DTC (Stage 20 formats, Stage 40 writes). Value = one quoted line per submit "name","status","date" (not JSON, no brackets); multiple submits newline-separated. staging col proto_sample_status. sync.samples.format_sample_field.
+Pre-line Sample - Status   | PreLine Sample app             | preline_sample (app)     | app_get(PreLine).data.submits[]  (first size per submit)   | BP→DTC (Stage 20 formats, Stage 40 writes). Note: lowercase 'l' in "line", dash separator. staging col preline_sample_status.
+SMS - Sample Status        | SMS Sample app                 | sms_sample (app)         | app_get(SMS).data.submits[]      (first size per submit)   | BP→DTC (Stage 20 formats, Stage 40 writes). staging col sms_sample_status.
+2nd Fit Sample Approval Status | Fit Sample app             | fit_sample (app)         | app_get(Fit).data.submits[]      (first size per submit)   | BP→DTC (Stage 20 formats, Stage 40 writes). CHANGED 2026-08-28 (was "1st Fit Sample Approval Status"). staging col fit_sample_status.
+PP Sample Submission Approval Status | PP Sample app        | pp_sample (app)          | app_get(PP).data.submits[]       (first size per submit)   | BP→DTC (Stage 20 formats, Stage 40 writes). CHANGED 2026-08-28 (was "2nd Fit Sample Approval Status"). Requested name "PP Sample Approval Status" does not exist live; this column confirmed correct by the project team. staging col pp_sample_status.
+TOP Sample Approval Status | TOP Sample app                 | top_sample (app)         | app_get(TOP).data.submits[]      (first size per submit)   | BP→DTC (Stage 20 formats, Stage 40 writes). staging col top_sample_status.
 
 Last-minute schema changes captured here (2026-06-17):
   1. BRANDS (and CUSTOMER) are MultiSelect lists of plain strings; with the
@@ -145,7 +111,7 @@ Last-minute schema changes captured here (2026-06-17):
      Match by fieldId (brands_multi / sold_to_customer), not by display name.
   2. "Lot Code" moved to the COLORWAY schema as fieldId "drawing_number_walmart"
      (colorways[].fields.drawing_number_walmart). It is filled by the DTC->BeProduct
-     Phase 2 push, hence empty in BeProduct now. The old header-level "Lot Code" is
+     Stage 50 push, hence empty in BeProduct unless DTC holds a value. The old header-level "Lot Code" is
      deprecated and must not be read.
 
 Phase 6 changes (2026-06-26, validated live):
@@ -166,19 +132,20 @@ Phase 6 changes (2026-06-26, validated live):
      by upstream integration; flows BP→DTC (was DTC→BP before Phase 6).
    7. DTC "Customer Style#" column: DECIDED NOT TO CREATE (2026-07-02). Removed from
       phase2.REVERSE_HEADER_FIELDS. No DTC→BP for customer_style_number.
-   8. DTC "BP Style#" (NEW COLUMN, PENDING): BP→DTC, carries header_number value; new
-      in-request match key once created. Code already writes to this column; sync will
-      fail to match existing rows until DTC creates column and migrates data from "LF Style#".
-   9. BeProduct styles with Product Status = "Finalized" are EXCLUDED from DTC sync
-      (filtered in p1p7_beproduct_style_sync.py before app enrichment). Valid sync statuses:
-      Proto, Pre-Line, SMS, Production (any status not equal to "Finalized").
-  10. New DTC column "Gender" (PENDING): BP→DTC from BP field_id `gender`. Values:
-      Ladies/Mens/Girls/'' (confirmed live). Code staged in FIELD_MAPPING + INTERESTED_FIELDS.
-  11. New DTC column "Supplier" (PENDING): default-fill "Supplier" when DTC cell blank;
+   8. DTC "BP Style#" column: LIVE. BP→DTC, carries header_number; the in-request
+      match key with "Color / Wash".
+   9. Terminal Product Status ("Finalized" / "Drop"): ktb_styles KEEPS these styles
+      (they only skip sample-app enrichment in p1p7_beproduct_style_sync.py). The
+      transform (Stage 20) lets one last push through so the terminal status itself
+      reaches DTC, then excludes the style once the WIP row's own Product Status has
+      caught up. A reactivated style resumes automatically. Logic: sync/lifecycle.py.
+  10. DTC column "Gender": LIVE. BP→DTC from BP field_id `gender`. Values:
+      Ladies/Mens/Girls/'' (confirmed live). In FIELD_MAPPING + INTERESTED_FIELDS.
+  11. DTC column "Supplier": LIVE. Default-fill "Supplier" when DTC cell blank;
       never overwrites existing DTC values (DEFAULT_FILL_COLS in phase1). Staged as
       lit("Supplier") in transform. Not sourced from any BeProduct field.
-  12. DTC view definition GET /v1/views/{viewId} returns 403 for all view IDs with the
-      current sync API key (confirmed 2026-07-02, including document-level template
-      6a3907f6df772fd797ee5b7c and per-request view 69f04983501f3d9cf4fc379c). The
-      allowed_cols fallback now UNIONs the data-scan result with FALLBACK_COLS so
-      Phase-1-owned columns that are blank on a fresh sheet are still allowed in PATCH.
+  12. The PATCH allow-list is wip_plan.allowed_patch_columns() (derived from the
+      payload builders) -- see docs/SYNC_CONTRACT.md. Column existence is checked
+      against the view definition (205 dynamicFields). The 2026-07-02 note that
+      GET /v1/views/{viewId} returned 403 and a data-scan/FALLBACK_COLS union was
+      used is superseded.

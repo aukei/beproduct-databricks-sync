@@ -780,21 +780,12 @@ def build_v2_tasks():
     push_duty_rates updates). At the target cadence -- a run every ~2 hours
     during active style development -- that is 36 write moments a day and
     ~6-8 h/day of user-visible exposure. v2 writes each request at exactly ONE
-    point, in <=2 back-to-back calls (2 is the floor: patch_rows rejects a body
-    mixing rowId and rowIndex). Consolidating the write path is the
+    point: a PATCH of updates by rowId, then an append_rows POST of inserts
+    (DTC assigns the locators), back to back. Consolidating the write path is the
     PRECONDITION for the cadence, not an optimisation.
 
-        p0_pull -> p0_upsert -> p0_push -+-> bp_style_sync ----> transform -+-> request_manager -+
-                                         |                                 |                    |
-                                         +-> pull_master_dtc --------------+--------------------+
-                                         |          |                      |                    |
-                                         |          +-> phase2_push        |                    |
-                                         |                                 |                    |
-                                         +-> pull_lineplan_dtc ------------+-> build_costing ---+
-                                                                                                |
-                                                                                                v
-                                                                                            wip_push
-                                                                          (the only DTC write in this job)
+    The task graph (Mermaid) is in docs/PIPELINE.md -> "The DAG"; the stage
+    table there lists every edge. Keep the two in step with this function.
 
     Differences from build_main_tasks() beyond the merge:
 
@@ -803,17 +794,16 @@ def build_v2_tasks():
         2026-09-02 with the same Workspace-Files sys.path pattern, no task
         declares `libraries`, and nothing uses sparkContext/.rdd/UDFs/
         spark.conf.set. Also removes the Lakebase constraint that forced the
-        BOM read into its own task, so it collapses into `transform`.
+        BOM read into its own task; it is now the parallel `pull_bom` task.
       * NO CONDITION TASKS. See the run_* parameters in JOB_PARAMS.
-      * No repull_dtc / repull_dtc_bom -- `transform` emits style x color x
-        material directly, and `build_costing` reads staging + the start-of-run
-        pull instead of a round-trip through DTC.
+      * No repull_dtc / repull_dtc_bom -- the material dimension is resolved
+        at plan time in wip_push, and `build_costing` overlays staging +
+        bom_segments on the start-of-run pull instead of a round-trip through DTC.
       * Every edge is run_if=ALL_DONE: a failed stage should degrade the run,
         not abort it. Notably wip_push still pushes style/BOM/sample data when
         build_costing failed; it just contributes no duty fields that round.
 
-    Notebooks marked NEW below do not exist yet -- this job definition is the
-    spec they are built against. Deploy it with --no-schedule until they land.
+    LIVE since 2026-09-15 as job 367710575109755.
     """
     def v2_task(task_key, notebook_path, params, depends=None):
         # serverless=True => no job_cluster_key; ALL_DONE => degrade, don't abort.
@@ -939,7 +929,7 @@ def build_v2_tasks():
     # push_duty_rates (Phase 9b push half). Per request: ONE live get_sheet, one
     # combined plan (sync/wip_plan.py composing phase1/bom/duty -- it composes,
     # it does not re-implement), then one PATCH of updates keyed by rowId and
-    # one PATCH of inserts keyed by rowIndex, back to back.
+    # one append_rows POST of inserts (server-assigned locators), back to back.
     #
     # INVARIANT: if the combined plan is empty, send NOTHING -- no GET-to-PATCH
     # path, zero calls, zero user disruption. At 12 runs/day this is the
@@ -1093,8 +1083,7 @@ JOB_SPECS = {
     # rollback is "pause v2, unpause v1" with no data migration (both write the
     # same tables with the same keys, and every write is idempotent and
     # diff-gated). serverless=True => no job_clusters block at all.
-    # Deploy with --no-schedule until the NEW notebooks land; see
-    # docs/MIGRATION_V1_V2.md ("Rollout").
+    # LIVE since 2026-09-15 (job 367710575109755); v1 `main` and `images` are paused.
     "v2": {
         "display_name": "BeProduct_DTC_sync_v2",
         "build_tasks": build_v2_tasks,

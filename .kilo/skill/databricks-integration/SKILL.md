@@ -813,13 +813,22 @@ for i, cmd in enumerate(obj.get('commands', [])):
 
 ### Per-step logs: prefer the multi-task job
 
-The production pipeline is now the **multi-task job** `BeProduct_DTC_sync_dag`
-(job 294837488757511, defined in `scripts/deploy_job.py`). Each step is a
-first-class task, so per-step timing/logs come straight from
+The production pipeline is the **serverless multi-task job**
+`BeProduct_DTC_sync_v2` (job 367710575109755, `scripts/deploy_job.py --job v2`,
+stages in `docs/PIPELINE.md`), plus the companion job
+`BeProduct_DTC_sync_duty_compute` (1026599988408090). The v1 job
+`BeProduct_DTC_sync_dag` (294837488757511) is PAUSED, rollback only. Each stage
+is a first-class task, so per-task state and timing come straight from
 `GET /api/2.1/jobs/runs/get?run_id=<JOB_RUN>` → `.tasks[]` (each has its own
-`run_id`, `execution_duration`, state). Export any single step's command-level
-model with `runs/export?run_id=<tasks[].run_id>` — **no `WORKFLOW_RUN` hunting**.
-The technique below is only needed for the RETIRED single-notebook
+`run_id`, `setup_duration`, `execution_duration`, state).
+
+**Serverless caveat:** the Jobs API returns **no notebook stdout** for
+serverless runs (`get_run_output(...).logs` is empty); only the
+`dbutils.notebook.exit` value comes back. v2 notebooks therefore exit a JSON
+summary — read it with `scripts/run_v2_job.py` / `scripts/run_v2_task.py`, or
+`runs/get-output?run_id=<tasks[].run_id>` → `notebook_output.result`. The
+`runs/export` / cell-timing techniques in this section are v1-era (classic
+cluster). The technique below is only needed for the RETIRED single-notebook
 `orchestrate_sync.py` (or any other `dbutils.notebook.run` caller).
 
 ### Child notebooks via `dbutils.notebook.run` (legacy orchestrate_sync) — HOW TO GET THEIR LOGS
@@ -963,7 +972,7 @@ job = w.jobs.create(
 
 ### Project-Specific Patterns
 - Deploy script: `scripts/upload_notebooks.py` (notebooks + `dtc/python` modules)
-- Orchestrator job: `beproduct/orchestrate_sync.py` (runs Phases 1+2+3)
+- Job definitions: `scripts/deploy_job.py` (`--job v2` is production; `beproduct/orchestrate_sync.py` is retired)
 - DTC connector: `dtc/python/connectors/dtc.py`
 - BeProduct notebooks: `beproduct/*.py`
 - Documentation: `README.md`, `QUICK_START.md`, `docs/ARCHITECTURE.md`

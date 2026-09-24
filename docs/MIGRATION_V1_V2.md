@@ -4,6 +4,17 @@
 lives in [PIPELINE.md](PIPELINE.md) and [SYNC_CONTRACT.md](SYNC_CONTRACT.md); this
 document is the *reasoning*, the *risks*, and the *rollout plan*.
 
+> **Status: LIVE since 2026-09-15; this is the design record.** What runs today,
+> and every gate, is in [PIPELINE.md](PIPELINE.md); field directions and exact
+> column names in [SYNC_CONTRACT.md](SYNC_CONTRACT.md); symptom runbooks in
+> [TROUBLESHOOTING.md](TROUBLESHOOTING.md). Where this document and those
+> disagree, they win. `BeProduct_DTC_sync_v2` (367710575109755) runs serverless
+> every 2 h at :05 on odd hours HKT; `BeProduct_DTC_sync_duty_compute`
+> (1026599988408090) runs serverless at 10:00 / 15:00 HKT. The v1 jobs
+> `BeProduct_DTC_sync_dag` (294837488757511) and `BeProduct_DTC_sync_images`
+> (847087837807970) are PAUSED, kept for rollback only. What is still open
+> before the real `KTB` folder is switched on: [Remaining go-live items](#remaining-go-live-items).
+
 ---
 
 ## The problem
@@ -51,9 +62,14 @@ an optimisation here; it is the precondition for the cadence.
 ### 1. One write window per request
 
 All WIP writes move into a single `wip_push` stage: one live `get_sheet()` per
-request, one combined plan, one PATCH of updates and one PATCH of inserts, back to
-back. Two calls is the floor — `patch_rows` rejects a body mixing `rowId` and
-`rowIndex`.
+request, one combined plan, one PATCH of updates (`patch_rows`, keyed by
+`rowId`) and one POST of inserts (`append_rows` to `.../rows`), back to back.
+
+> **Changed 2026-09-23.** Inserts were originally a second PATCH keyed by a
+> client-computed `rowIndex` (a body cannot mix `rowId` and `rowIndex`). They
+> now use the append endpoint, where DTC assigns `rowId`/`rowIndex` itself, so no
+> index is computed anywhere. Still two calls, still one window — see
+> [PIPELINE.md](PIPELINE.md) design rule 3.
 
 ### 2. The material dimension is resolved at plan time
 
@@ -80,7 +96,7 @@ brand-new style × color gets its material fan-out in the same run, and
 `p9a_build_costing_chart.py` takes `wip_effective_mode`: `"table"` (v1, read the
 snapshot as-is) or `"intent"` (v2, overlay the material and style-identity
 columns from `bom_segments` + staging first). Everything downstream — the
-gates, the LinePlan join, the slot transpose, the carry-forward, the cache fill
+gates, the LinePlan join, the slot transpose, the WIP fallback, the cache fill
 — is shared. One costing implementation, one set of gates.
 
 **Validated against v1: an exact match.** 7 rows, 5 styles in both; key-set
@@ -116,9 +132,9 @@ condition tasks" below.
 | | v1 | v2 |
 |---|---|---|
 | DTC write windows per request per run | 3 | **1** |
-| PATCH calls per request per run | up to 5 | **≤2** |
+| Write calls per request per run | up to 5 | **2** (1 PATCH + 1 POST; more only past `batch_size` rows per side) |
 | Full DTC re-pulls per run | 2 | **0** |
-| Tasks in the main job | 17 (incl. 5 gates + `wait_cluster`) | **11** |
+| Tasks in the main job | 17 (incl. 5 gates + `wait_cluster`) | **14** (incl. `phase3_images` Stage 45 and `push_customer_code` Stage 55) |
 | Planning reads live DTC | style fields only | **all contributions** |
 
 ---
@@ -161,8 +177,9 @@ wrap pure functions already unit-tested in `sync/samples.py` and
 Python over collected rows — as `v2_wip_push` already does for the whole plan —
 removes the UDF boundary entirely at no meaningful cost.
 
-**Port:** drop `job_cluster_key` from every task, drop `wait_cluster`, retire the
-instance pool.
+**Port:** drop `job_cluster_key` from every task, drop `wait_cluster`. The
+instance pool is idled to `min_idle_instances=0` but deliberately **kept**: the
+paused v1 job definitions reference it, so deleting it would break rollback.
 
 ### Live-validated 2026-09-14 (run `66807905429726`)
 
@@ -195,8 +212,8 @@ otherwise look identical.
 runs/day, and it lands before any of the merge work.
 
 **Cost is still the open question, not feasibility.** Serverless DBU rates are
-higher per second, but the pooled VMs stop being paid for between runs. Measure
-one real full run before deleting the pool.
+higher per second, but the pooled VMs stop being paid for between runs. Tracked
+under [Remaining go-live items](#remaining-go-live-items).
 
 **Two things the smoke check turned up that affect how v2 is built:**
 
@@ -219,9 +236,11 @@ one real full run before deleting the pool.
 > **not** extrapolate. Correctness validation is unaffected.
 
 **Consequence for the plan:** because the whole job is serverless, the Lakebase
-constraint that forced Phase 10 into its own task costs nothing, and the BOM read
-collapses into the transform. An earlier draft of this plan had a separate
-serverless BOM-staging task purely to work around this; it is no longer needed.
+constraint that forced Phase 10 into its own task costs nothing. The BOM read
+still ended up as its own task — `pull_bom` (Stage 20b), running in parallel
+with `transform` — but for the grain reason in §2, not for compute. Its source
+has moved twice: Lakebase → BeProduct PageBomVariation (2026-09-16) → Lakebase
+again (2026-09-22, owner decision); see [PIPELINE.md](PIPELINE.md) Stage 20b.
 
 ---
 
@@ -273,11 +292,16 @@ Stated plainly, because these are real:
 
 ## What v2 does not change
 
-- `compute_duty_rates` stays its own job. Zero DTC contact, ~30–60 s serial NT
-  Orbit calls; there is no reason for its latency to sit inside a 2-hour loop.
-- `phase3_images` stays its own job. It cannot join `wip_push`'s PATCH — image
-  cells are writable only through the multipart `/images` endpoint and DTC rejects
-  any `sheetData` write to `Style Image`.
+- `compute_duty_rates` stays its own job (`BeProduct_DTC_sync_duty_compute`,
+  now serverless, unpaused). Zero DTC contact, ~30–60 s serial NT Orbit calls;
+  there is no reason for its latency to sit inside a 2-hour loop. Its *DTC write*
+  did move: duty values now reach DTC through `wip_push` (Stage 40), not v1's
+  `push_duty_rates` / `p9b2_push_duty_to_wip`.
+- `phase3_images` cannot join `wip_push`'s PATCH — image cells are writable only
+  through the multipart `/images` endpoint and DTC rejects any `sheetData` write
+  to `Style Image`. **Changed 2026-09-15:** it was nonetheless moved INTO the v2
+  DAG as Stage 45, immediately after `wip_push`, so its window is adjacent rather
+  than independent; it now addresses rows by lowercase `rowid` (2026-09-23).
 - Phase 2 (DTC → BeProduct) is untouched. It writes BeProduct, never DTC.
 - Every field mapping, match key, gate condition and hard-won bug fix carries over
   unchanged. v2 is a restructuring of *when and how often we write*, not of *what
@@ -285,132 +309,70 @@ Stated plainly, because these are real:
 
 ---
 
-## Rollout
+## Rollout (done)
 
-The v2 job is deployed as a **new job, `BeProduct_DTC_sync_v2`**, alongside the
-live v1 job. v1 keeps running on `master` throughout; nothing about it changes.
+v2 was deployed as a **new job, `BeProduct_DTC_sync_v2`** (367710575109755),
+alongside v1, and cut over on **2026-09-15**. All five planned stages of work
+shipped:
 
-### Workspace isolation
+| # | Deliverable | Windows per request |
+|---|---|---|
+| 0 | Branch, consolidated docs, `BeProduct_DTC_sync_v2` job definition | — |
+| 1 | Serverless port; `module_path` parameter; in-notebook run flags | — |
+| 2 | `sync/wip_plan.py` + `test_wip_plan.py` — composition, zero-diff-zero-write | — |
+| 3 | `v2_pull_bom_segments` + `v2_wip_push`; drop `repull_dtc` | 3 → 2 |
+| 4 | `build_costing` in "intent" mode; drop `repull_dtc_bom` | 2 → 2 |
+| 5 | Fold the duty contribution into `wip_push` | 2 → **1** |
 
-v1 and v2 notebooks must not share a Workspace path, or checking out the v2 branch
-would silently change what the live v1 job executes. v2 deploys to its own root:
+Summary of what was proven, in order:
+
+- **Smoke check** (2026-09-14, run `66807905429726`) — serverless feasibility,
+  above.
+- **End-to-end dry run** (2026-09-15, run `51302327795660`, `dry_run=true`) —
+  SUCCESS, dependency order verified programmatically, serverless setup
+  **1–4 s per task**. The 278 s wall is **not** comparable to `PERFORMANCE.md`'s
+  v1 numbers (`TEST KTB`, 8 styles, vs the ~145-style `KTB` folder).
+- **First real run** (`dry_run=false`) — the one-off catch-up: 40 updates
+  (`Sub Class` only), **1 PATCH call, 1 write window**, 263 s. `Sub Class` went
+  from 15 filled / 45 blank to 57 / 3 (the 3 have no staging row).
+- **Second consecutive real run** — 60 noops, **0 PATCH calls, 0 write
+  windows**. The zero-diff-zero-write invariant confirmed against live DTC — the
+  single property the 2-hourly cadence depends on.
+- **Scheduled** every 2 h at :05 on odd hours HKT, 12 runs/day; `phase3_images`
+  folded in as Stage 45 the same day; `duty_compute` moved to serverless and
+  unpaused; v1 main and images jobs paused.
+- **2026-09-23** — inserts switched to the `append_rows` POST (DTC assigns the
+  row locators); Stage 45 switched to lowercase `rowid`.
+
+Workspace isolation, which made side-by-side running safe: v1 and v2 notebooks
+never share a Workspace path, and every notebook reads its import root from the
+`module_path` job parameter (`scripts/upload_notebooks.py --root` selects the
+upload target).
 
 ```
 v1   /Workspace/Repos/beproduct-sync/{beproduct,DTC/notebooks,DTC/python}
 v2   /Workspace/Repos/beproduct-sync-v2/{beproduct,DTC/notebooks,DTC/python}
 ```
 
-`scripts/upload_notebooks.py --root` selects the target.
+> The JOB parameter `module_path` overrides a task base_parameter of the same
+> name — every task whose notebook lives under the v2 root must get the v2
+> `module_path` at job level (AGENTS.md 2026-09-17).
 
-**Done (stage 1).** Every notebook previously hardcoded
-`sys.path.append("/Workspace/Repos/beproduct-sync/DTC/python")`, so a v2 notebook
-uploaded to the v2 root would still have imported v1's modules. All 17 sites now
-read a **`module_path`** widget instead, defaulting to the v1 path — so a task
-that passes nothing behaves exactly as before, and the v2 job overrides it to
-`/Workspace/Repos/beproduct-sync-v2/DTC/python`.
-
-### Run flags replacing condition tasks
-
-**Done (stage 1).** The reused notebooks relied on `gate_phase*` condition tasks
-that v2 does not have, so they would have run unconditionally. Each now reads its
-own flag and exits as a SUCCESS no-op when disabled:
-
-| Notebook | Flag | Was |
-|---|---|---|
-| `p0_pull_xts_master_to_delta` | `run_phase0` | `gate_phase0` |
-| `p0_xts_master_to_directory_upsert` | `run_phase0` | downstream of `gate_phase0` |
-| `p5utl_beproduct_master_data_sync` | `run_phase0` | downstream of `gate_phase0` |
-| `p2_push_dtc_to_beproduct` | `run_phase2` | `gate_phase2` |
-| `p9a_pull_lineplan_to_delta` | `run_costing` | `gate_phase9a` |
-
-All default to `"true"`, so ad-hoc and interactive runs that pass nothing are
-unaffected; only an explicit `"false"` skips. `p9a_pull_lineplan_to_delta` is
-gated on `run_costing` rather than a flag of its own because the LinePlan pull
-exists solely to feed `build_costing`.
-
-### Stages of work
-
-| # | Deliverable | Reduces windows to | Status |
-|---|---|---|---|
-| 0 | Branch, consolidated docs, `BeProduct_DTC_sync_v2` job definition | — | **done** |
-| 1 | Serverless port; `module_path` parameter; in-notebook run flags | — | **done** |
-| 2 | `sync/wip_plan.py` + `test_wip_plan.py` — composition, zero-diff-zero-write | — | **done** |
-| 3 | `v2_pull_bom_segments` + `v2_wip_push`; drop `repull_dtc` | 3 → 2 | **done** |
-| 4 | `build_costing` in "intent" mode; drop `repull_dtc_bom` | 2 → 2 | **done** |
-| 5 | Fold the duty contribution into `wip_push` | 2 → **1** | |
-
-Each stage ships independently and each reduces either window count or runtime, so
-there is benefit before the whole thing lands.
-
-### End-to-end validation (2026-09-15, run `51302327795660`)
-
-`BeProduct_DTC_sync_v2` = job **367710575109755**, created unscheduled.
-`dry_run=true`. **SUCCESS — all 12 tasks, 278 s wall.** Dependency order was
-verified programmatically (every task starts after all its dependencies end),
-and the three parallel groups behaved as designed.
-
-Serverless setup is **1–4 s per task** (~18 s total) against v1's single ~3 min
-pool startup — the one timing figure here that is dataset-independent. The 278 s
-wall is **not** comparable to `PERFORMANCE.md`'s v1 numbers: those were measured
-on the ~145-style `KTB` folder, this on `TEST KTB` with 8 styles.
-
-`wip_push` matched its isolated behaviour exactly: 40 updates, `Sub Class` only,
-**1 PATCH call, 1 write window**, zero violations or degraded contributions.
-
-### Live cutover (2026-09-15)
-
-`BeProduct_DTC_sync_v2` = job **367710575109755**, **scheduled every 2 hours at
-:05 on odd hours (01,03,…,23) HKT** — 12 runs/day, serverless, unpaused.
-
-| | result |
-|---|---|
-| First real run (`dry_run=false`) | 40 updates, **1 PATCH call, 1 write window**, 263 s |
-| Second consecutive real run | 60 noops, **0 PATCH calls, 0 write windows**, 217 s |
-
-The second run is the point: **the zero-diff-zero-write invariant confirmed
-against live DTC**, not just in unit tests. That is the single property the
-2-hourly cadence depends on.
-
-Drift repaired and verified: `Sub Class` went from 15 filled / 45 blank to 57
-filled / 3 blank (the 3 have no staging row to source from). `Content` was
-untouched by both runs, confirming the write-once rule holds — without it, every
-run would have opened a window forever.
-
-**The v1 jobs remain paused.** `duty_compute` and `images` are paused too and
-must be re-enabled separately; v2 replaces only the main DAG.
-
-### Validation before cutover
-
-1. Deploy `BeProduct_DTC_sync_v2` **unscheduled** (`--no-schedule`) and with
-   `dry_run=true`. Confirm the plan it computes matches what v1 actually pushed
-   for the same input state.
-2. Run against the sacrificial request `KTB FW26 Wrangler`
-   (UAT `6ab113b708ef2276cf34c0d2`) with `dry_run=false`.
-3. Confirm the zero-diff invariant directly: run twice back to back and assert the
-   second run issues **zero** PATCH calls.
-4. Compare `costing_chart` built from staging against v1's re-pull-based output for
-   the same run. They should be identical except for rows whose WIP state changed
-   during the run.
-5. Only then attach a schedule and pause v1.
+The `gate_phase*` condition tasks were replaced by in-notebook flags; the full
+flag list is the Stages table in [PIPELINE.md](PIPELINE.md).
 
 ### Rollback
 
-v1 is untouched and independently scheduled throughout. Rollback is: pause
-`BeProduct_DTC_sync_v2`, unpause `BeProduct_DTC_sync_dag`. No data migration —
-both write the same tables with the same keys, and every write is idempotent and
-diff-gated.
+Pause `BeProduct_DTC_sync_v2`; unpause `BeProduct_DTC_sync_dag` **and**
+`BeProduct_DTC_sync_images` (v1 ran images as its own job). `duty_compute` is
+shared by both versions and stays as it is. No data migration — both write the
+same tables with the same keys, and every write is idempotent and diff-gated.
 
 ---
 
-## Open items
+## Decisions made during rollout
 
-**Blocking the first v2 run**
-
-- Stage 5 only: folding the duty contribution's *write* into `wip_push` is
-  already done, so what remains is end-to-end validation and cutover. Stages
-  1–4 are complete.
-
-### `sync/wip_plan.py` — the composition layer (stage 2, done)
+### `sync/wip_plan.py` — the composition layer
 
 Composes the three contributions into one plan per request. It **composes; it
 does not re-implement** — `phase1.py`, `bom.py` and `duty.py` keep their
@@ -442,7 +404,7 @@ Scale-checked at production size: **linear**, 36 ms for 250 styles / 1500 rows
 (0.024 ms/row, flat from 8 to 500 styles), and `is_empty()` holds throughout on
 a settled dataset.
 
-**Coverage: both pre-filters are OFF in v2 (decided 2026-09-15)**
+### Coverage: both pre-filters are OFF in v2 (2026-09-15)
 
 v1 gates coverage with two **style-level** filters that run *before any field is
 compared*: `sync_status = 'pending'` on the staging row, and
@@ -470,17 +432,13 @@ rows). They now only cost correctness, so both default to `false`.
 > (`RESTORE TABLE … VERSION AS OF <n>`) since the table is fully overwritten
 > every run regardless.
 
-> **Expect a one-off catch-up on the first real v2 run.** In UAT that is 60 rows
-> — but still **one write window and one PATCH call**, which is precisely the
-> cost model v2 exists to create. Review a `dry_run=true` run's `sample_changes`
-> before cutover: it shows concrete current-vs-new values, which is what
-> distinguishes a genuine correction from a diffing bug. (It already earned its
-> keep: a `Content` write planned on all 60 rows looked like a bug until the
-> values showed live DTC holding `"100% test from ML"` against the techpack
-> BOM's `"test from ML 100%"` — real drift, and BOM has owned `Content` since
-> 2026-09-09.)
+> The first real v2 run was that one-off catch-up — in UAT, 40 cells in one
+> PATCH call. A `dry_run=true` run's `sample_changes` (concrete current-vs-new
+> values) is what distinguishes a genuine correction from a diffing bug; it
+> earned its keep when a `Content` write planned on all 60 rows turned out to be
+> notation drift (next section). Repeat that review before the `KTB` switch.
 
-**`Content` is write-once (resolved 2026-09-15)**
+### `Content` is write-once (2026-09-15)
 
 The first full-scan dry run planned a `Content` write on **60 of 60 rows** — and
 not one was a semantic change. DTC writes `97% Cotton / 3% Spandex`; the
@@ -500,7 +458,7 @@ This matters beyond tidiness: re-writing a non-blank `Content` would diff on
 *every* run, opening a write window on the request every time — which at a
 2-hourly cadence would defeat v2's whole premise on its own.
 
-**`-SUPPLIER` requests are out of scope (2026-09-15)**
+### `-SUPPLIER` requests are out of scope (2026-09-15)
 
 DTC generates supplier-scoped artifact requests named
 `<customer> <seasonCode> <brand>-SUPPLIER <xxx>`; four appeared in one afternoon
@@ -510,7 +468,7 @@ parsed as valid in-scope requests and would each have become a push target on
 the next registry refresh. `phase1.is_in_scope()` now excludes `-supplier\b`
 alongside `\(backup`. In-scope requests dropped from 10 to 6 of 109 live.
 
-**Lifecycle marker words are out of scope (2026-09-15)**
+### Lifecycle marker words are out of scope (2026-09-15)
 
 `is_in_scope()` now also excludes any reference containing **cancel / backup /
 archive / delete**, matched at a word boundary with any suffix. This supersedes
@@ -522,80 +480,50 @@ duplicate in-scope name resolved itself — both copies of
 `KTB FW26 Cancel Wrangler Global TALISMAN LTD` are `Cancel`-named, so the
 inventory now reports zero duplicates.
 
-## Go-live checklist — `folder_name` is still `TEST KTB`
+### Customer-code reverse push → Stage 55
 
-Everything validated so far ran against **`TEST KTB`: 8 styles, 60 WIP rows, 1
-in-scope request.** Production is **~250 styles**, roughly **30×**. Flipping
-`folder_name` to `KTB` is the moment that volume arrives, so re-check these
-before doing it:
+The 2026-09-16 "BOM reverse push" open issue is resolved into a stage of its
+own: DTC `"Fabric Customer # or SAP #"` is written to the BeProduct **material
+master**, not the BOM row (`CUSTOMER MATERIAL CODE` is not editable on a
+material-linked row). It is currently **disabled**, because the Lakebase BOM
+carries no `materialId`. Design, gates and re-enable condition:
+[PIPELINE.md](PIPELINE.md) Stage 55.
 
-| Item | Why it changes at 30× |
+---
+
+## Remaining go-live items
+
+*(This is the "go-live checklist" other docs refer to.)*
+
+`folder_name` is still **`TEST KTB`: 8 styles, 60 WIP rows, 1 in-scope
+request.** Production is **~250 styles**, roughly **30×**. Flipping
+`folder_name` to `KTB` is the moment that volume arrives; the correctness
+results carry over, none of the timing figures do.
+
+| Item | What to do |
 |---|---|
-| **Sample-app enrichment** | One `app_get` per (style × app), pinned to `FULL`. 8 styles ≈ 48 calls; 250 styles ≈ **1,500 calls per run**, ~18,000/day at 12 runs. This is the single largest runtime item and it scales linearly. Give it its own slower schedule before go-live. |
-| **`batch_size` (default 100)** | The "≤2 PATCH calls per request" figure only holds up to 100 rows per side. A request with 250 changed rows issues 3 update calls. Still **one write window** (consecutive), but tune or re-measure rather than assuming the number. |
-| **`wip_push` planning** | Measured linear, 36 ms for 250 styles / 1500 rows — not a concern, but re-confirm rather than assume. |
-| **Live `get_sheet` per request** | 1 request today. Production has more in-scope requests, each costing a read. Reads are free w.r.t. locking but not w.r.t. runtime. |
-| **The catch-up write** | The first `KTB` run will carry whatever drift the v1 pre-filters left unreachable — potentially much larger than the 40 cells seen in UAT. **Run `dry_run=true` and read `sample_changes` first.** |
-| **NT Orbit** | More styles ⇒ more genuinely-blank duty rows ⇒ real lookups at ~30–60 s each, serial. `duty_compute` has no call budget and no checkpointing; a large backlog may need `orbit_parallel_calls=true` or several runs to drain. |
+| **`folder_name` `TEST KTB` → `KTB`** | The go-live switch itself. Re-check every row below first. |
+| **Volume rechecks (~30×)** | `wip_push` planning measured linear (36 ms for 250 styles / 1500 rows) — re-confirm. One live `get_sheet` per in-scope request: free w.r.t. locking, not w.r.t. runtime. More genuinely-blank duty rows ⇒ real NT Orbit lookups at ~30–60 s each, serial, with no call budget or checkpointing — a backlog may need `orbit_parallel_calls=true` or several runs to drain. |
+| **`batch_size` / call count** | "2 calls per request" holds only up to `batch_size` (default 100) rows per side; 250 changed rows ⇒ 3 update calls. Still consecutive, still **one window** — tune or re-measure, do not quote the number. |
+| **Dry-run catch-up review** | The first `KTB` run carries whatever drift the v1 pre-filters left unreachable — potentially far more than UAT's 40 cells. Run `dry_run=true` and read `sample_changes` first. |
+| **Sample-app cadence split** | One `app_get` per (style × app), pinned to `FULL` because app edits do not bump `style.modifiedAt`. ~1,500 calls/run at 250 styles, ~18,000/day at 12 runs — the largest runtime item once the DTC passes are merged, and it scales linearly. Move it to its own 2–3×/day schedule and let the 2-hour loop consume whatever `ktb_styles` holds. |
+| **Re-enable Stage 55** | `run_customer_code_push` stays `false` until `v2_probe_material_code` returns `PROVEN` and the live end-to-end proof is repeated ([PIPELINE.md](PIPELINE.md) Stage 55). |
+| **Cross-contribution delta filter** | The BOM and costing contributions recompute every style every run — 12× the Lakebase reads and costing rebuilds for data that changes maybe twice a day. The plan builder should carry one delta filter across all contributions (without reintroducing v1's correctness-costing pre-filters). |
+| **Serverless cost / pool retirement** | Measure real serverless cost over a representative period; only then delete the idle instance pool — and only once v1 rollback is no longer wanted, since the paused v1 jobs reference it. |
+| **`duty_compute` sequencing gap** | Narrowed by Stage 30's cache fill, not structurally closed ([PIPELINE.md](PIPELINE.md), companion job). |
+| **DTC concurrent-edit ETA** | Get a date for DTC's websocket / client-merge work — see next section. |
+| **DTC "Full" view must expose the lookup columns** | A DTC `lookup`/`formula` field (e.g. `Factory Production Country for …`) is only materialized if it is on the view the user **saves through**. Users save through "Full", where these are hidden, so the stored cell stays NULL and the costing slot silently gets no duty. DTC view configuration, owner action — no repo change (AGENTS.md 2026-09-23). |
 
-**Cadence-limiting, independent of this refactor****Cadence-limiting, independent of this refactor**
+Operational notes that are not blockers:
 
-- **Sample-app enrichment.** One `app_get` per (style × app) — ~876 calls, ~120 s
-  for KTB — pinned to `FULL` because app changes do not bump `style.modifiedAt`.
-  At 12 runs/day that is ~10,500 BeProduct calls/day, and once the DTC passes are
-  merged it becomes the largest single runtime item in the job. Recommended:
-  split it onto its own 2–3×/day schedule and let the 2-hour loop consume whatever
-  `ktb_styles` holds. Sample statuses changing within 2 hours is unlikely to be
-  what is driving the cadence request.
-- **Delta filtering across contributions.** v1's style push is `delta_only`
-  against `registry.last_pushed`, but Phase 10 and 9b recompute every style every
-  run. At 12 runs/day that is 12× the Lakebase reads and costing rebuilds for data
-  that changes maybe twice a day. The v2 plan builder should carry a delta filter
-  across all three contributions.
-- **Serverless cost.** Measure one real run before retiring the instance pool.
-- **The sacrificial request was RE-CREATED (2026-09-23).** The old
-  `KTB FW26 Wrangler` (`6a26581854e92e7acd8fa71b`) is dead; a live request of
-  the same name now exists at `6ab113b708ef2276cf34c0d2` and was used for the
-  append_rows validation. Every other FW26 request is `(BACKUP)`-named. The
-  id is recorded in several places — grep before assuming.
+- **Sacrificial request re-created (2026-09-23).** `KTB FW26 Wrangler` now lives
+  at `6ab113b708ef2276cf34c0d2` (the old `6a26581854e92e7acd8fa71b` is dead) and
+  was used for the `append_rows` validation. The id is recorded in several
+  places — grep before assuming.
 - **Duplicate request references.** `dtc_request_registry` can hold several rows
   with the same `request_reference` (one active, one inactive sibling).
   Resolving by name alone silently picks the wrong sheet — always filter
   `request_is_active='Y' AND in_scope` and refuse on ambiguity.
-
-**Open issue — BOM reverse push (raised 2026-09-16)**
-
-**Corrected 2026-09-17.** Writing BOM rows *does* work — the Update DTO takes
-`rows[].rowFields`, not the `fields` key the GET response uses. An unrecognised
-key was silently discarded (200, `modifiedAt` stamped, nothing applied), which
-is what produced the earlier and incorrect "variation-scoped" conclusion.
-`placement` and `Size` write and restore cleanly.
-
-The actual blocker is narrower and is a **data-model** question, not an API gap:
-
-```
-Field [customer_material_code] is not editable on a material-linked row.
-```
-
-`CUSTOMER MATERIAL CODE` is owned by the linked **Material** record, not the BOM
-row, and **13 of 13 probed rows are material-linked** (`isAdHoc: false`). So the
-DTC → BOM push cannot target the BOM row at all. Options:
-
-1. Write the **Material** record instead — needs the right field identified;
-   the material's `headerData` exposes only `fields`/`mainImage`/`detailImage`.
-2. Confirm with the owner whether ad-hoc BOM rows are ever expected, since the
-   field *is* writable on those.
-
-Everything else is ready — the match key `(Group, MILL FABRIC CODE/SUPPLIER ITEM
-CODE)` is confirmed unique per style and is already `bom.segment_key()`, tested.
-
-**Deferred**
-
-- **The images job is a second write window.** It cannot share the PATCH, but it
-  could at least be co-scheduled so the two windows are adjacent rather than
-  independent. Worth doing once the main job's window is proven.
-- **The `duty_compute` sequencing gap** (PIPELINE.md, companion jobs) is narrowed
-  by Stage 30's cache fill but not structurally closed.
 
 ---
 
@@ -622,5 +550,8 @@ Even after the revamp ships, lean single-window writes remain strictly better:
 fewer server-side merges to propagate, less client churn, fewer opportunities for
 merge logic to surprise a user mid-edit. It simply stops being existential.
 
-**Recommendation:** get a rough ETA. Weeks → do stages 1–3 and hold stage 5, the
-most invasive and least valuable of the three. A quarter or more → do all of it.
+**Recommendation (made before rollout; all five stages have since shipped):** get
+a rough ETA. Weeks → do stages 1–3 and hold stage 5, the most invasive and least
+valuable of the three. A quarter or more → do all of it. The ETA is still worth
+having: it decides how much further locking-driven work (e.g. more write
+consolidation) is worth doing.

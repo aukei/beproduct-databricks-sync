@@ -10,13 +10,18 @@ what a row must satisfy to progress*. It consolidates four v1 documents:
 | `PIPELINE_GATES.md` | "Gates" subsections below; original archived |
 
 Field-level mapping is **not** here — see [SYNC_CONTRACT.md](SYNC_CONTRACT.md).
+Diagnosing a specific symptom (missing row, field not pushed, no costing line,
+missing / outdated duty) — start at [TROUBLESHOOTING.md](TROUBLESHOOTING.md),
+which cites the gates below by stage and number.
 Why v2 exists and how it differs from v1 — see [MIGRATION_V1_V2.md](MIGRATION_V1_V2.md).
 Systems, repo layout and the Delta data model — see [ARCHITECTURE.md](ARCHITECTURE.md).
 
-> **Implementation status.** The stage table marks each task `reused` (v1
-> notebook, unchanged) or `NEW` (not yet written). The DAG and this document are
-> the specification the v2 notebooks are being built against; `BeProduct_DTC_sync_v2`
-> will not run end-to-end until every `NEW` task exists.
+> **Status: LIVE since 2026-09-15.** `BeProduct_DTC_sync_v2` (job
+> 367710575109755) runs serverless every 2 h at :05 on odd hours HKT; the
+> companion `BeProduct_DTC_sync_duty_compute` (1026599988408090) at 10:00 and
+> 15:00 HKT. The v1 jobs `BeProduct_DTC_sync_dag` and `BeProduct_DTC_sync_images`
+> are PAUSED, kept only for rollback. `folder_name` is still `TEST KTB` until
+> go-live.
 
 ---
 
@@ -95,52 +100,81 @@ development) viable at all:
 
 ## The DAG
 
+```mermaid
+flowchart TD
+    subgraph S00["Stage 00 — XTS Master → Directory"]
+        p0_pull[phase0_pull] --> p0_upsert[phase0_upsert] --> p0_push[phase0_push]
+    end
+    subgraph S10["Stage 10 — source pulls (parallel)"]
+        bp_style_sync[bp_style_sync]
+        pull_master_dtc[pull_master_dtc]
+        pull_lineplan_dtc[pull_lineplan_dtc]
+    end
+    p0_push --> bp_style_sync & pull_master_dtc & pull_lineplan_dtc
+
+    bp_style_sync --> transform["transform (20)"]
+    bp_style_sync --> pull_bom["pull_bom (20b)"]
+
+    transform --> request_manager["request_manager (25)"]
+    pull_master_dtc --> request_manager
+
+    transform & pull_bom & pull_master_dtc & pull_lineplan_dtc --> build_costing["build_costing (30)"]
+
+    request_manager & build_costing --> wip_push[["wip_push (40) — DTC sheetData"]]
+    wip_push --> phase3_images[["phase3_images (45) — DTC image"]]
+
+    transform & pull_master_dtc --> phase2_push(["phase2_push (50) — BeProduct style"])
+    pull_bom & pull_master_dtc --> push_customer_code(["push_customer_code (55) — BeProduct material, disabled"])
+
+    classDef dtc fill:#fde2e1,stroke:#c0392b,color:#000
+    classDef bp fill:#e1ecfd,stroke:#2c5aa0,color:#000
+    class wip_push,phase3_images dtc
+    class p0_push,phase2_push,push_customer_code bp
 ```
-p0_pull ─► p0_upsert ─► p0_push ─┬─► bp_style_sync ─┬─► transform ─┬─► request_manager ─┐
-                                 │                  │              │                    │
-                                 │                  └─► pull_bom ──┤                    │
-                                 │                                 │                    │
-                                 ├─► pull_master_dtc ──────────────┼────────────────────┤
-                                 │           │                     │                    │
-                                 │           └─► phase2_push       │                    │
-                                 │                                 │                    │
-                                 └─► pull_lineplan_dtc ────────────┴─► build_costing ───┤
-                                                                                        ▼
-                                                                                    wip_push
-                                                                                        │
-                                                                                        ▼
-                                                                                  phase3_images
-```
+
+Red = writes DTC, blue = writes BeProduct; every other task writes Delta only.
+Every edge is `run_if=ALL_DONE`. `wip_push` also reads `bom_segments` and
+`costing_chart` directly.
 
 **Two jobs, not four** (2026-09-15). `phase3_images` moved INTO this DAG; the
 standalone images job is paused and superseded. Only one companion job remains:
 
-```
-BeProduct_DTC_sync_duty_compute   compute_duty_rates   NT Orbit → nt_orbit_duty_cache + costing_chart.
-                                                       Zero DTC contact. Serverless.
-                                                       10:00 and 15:00 HKT.
+```mermaid
+flowchart LR
+    duty["BeProduct_DTC_sync_duty_compute<br/>compute_duty_rates · 10:00 / 15:00 HKT"]
+    orbit[(NT Orbit API)]
+    cache[(nt_orbit_duty_cache)]
+    chart[(costing_chart)]
+    main["next BeProduct_DTC_sync_v2 run<br/>build_costing → wip_push"]
+    duty <--> orbit
+    duty --> cache & chart
+    cache --> main
 ```
 
 ---
 
 ## Stages
 
-| # | Task | Notebook | Status | Depends on |
-|---|---|---|---|---|
-| 00 | `phase0_pull` | `p0_pull_xts_master_to_delta` | reused | — |
-| 00 | `phase0_upsert` | `p0_xts_master_to_directory_upsert` | reused | `phase0_pull` |
-| 00 | `phase0_push` | `p5utl_beproduct_master_data_sync` | reused | `phase0_upsert` |
-| 10 | `bp_style_sync` | `p1p7_beproduct_style_sync` | reused | `phase0_push` |
-| 10 | `pull_master_dtc` | `p1_pull_masters_to_delta` | reused | `phase0_push` |
-| 10 | `pull_lineplan_dtc` | `p9a_pull_lineplan_to_delta` | reused | `phase0_push` |
-| 20 | `transform` | `p1p7_beproduct_to_dtc_transform` | reused | `bp_style_sync` |
-| 20b | `pull_bom` | `v2_pull_bom_segments` (Lakebase techpack) | **NEW** | `bp_style_sync` |
-| 25 | `request_manager` | `p1_dtc_request_manager` | reused | `transform`, `pull_master_dtc` |
-| 30 | `build_costing` | `p9a_build_costing_chart` (`wip_effective_mode=intent`) | reused + Step 1a | `transform`, `pull_bom`, `pull_master_dtc`, `pull_lineplan_dtc` |
-| 40 | `wip_push` | `v2_wip_push` | **NEW** | `request_manager`, `build_costing` |
-| 45 | `phase3_images` | `p3_beproduct_to_dtc_images` | reused, moved in | `wip_push` |
-| 50 | `phase2_push` | `p2_push_dtc_to_beproduct` | reused | `transform`, `pull_master_dtc` |
-| 55 | `push_customer_code` | `v2_push_customer_code` | **NEW** | `pull_bom`, `pull_master_dtc` |
+| # | Task | Notebook | Writes | Flag | Depends on |
+|---|---|---|---|---|---|
+| 00 | `phase0_pull` | `p0_pull_xts_master_to_delta` | Delta `dtc_xts_master_ktb` | `run_phase0` | — |
+| 00 | `phase0_upsert` | `p0_xts_master_to_directory_upsert` | Delta `beproduct_directory` | `run_phase0` | `phase0_pull` |
+| 00 | `phase0_push` | `p5utl_beproduct_master_data_sync` | **BeProduct** Directory | `run_phase0` | `phase0_upsert` |
+| 10 | `bp_style_sync` | `p1p7_beproduct_style_sync` | Delta `ktb_styles` | — | `phase0_push` |
+| 10 | `pull_master_dtc` | `p1_pull_masters_to_delta` | Delta `dtc_wip_ktb`, registry | — | `phase0_push` |
+| 10 | `pull_lineplan_dtc` | `p9a_pull_lineplan_to_delta` | Delta `dtc_lineplan_ktb` | `run_costing` | `phase0_push` |
+| 20 | `transform` | `p1p7_beproduct_to_dtc_transform` | Delta `beproduct_to_dtc_staging` | — | `bp_style_sync` |
+| 20b | `pull_bom` | `v2_pull_bom_segments` | Delta `bom_segments` | `run_bom` | `bp_style_sync` |
+| 25 | `request_manager` | `p1_dtc_request_manager` | Delta `dtc_request_mapping`; creates DTC requests | — | `transform`, `pull_master_dtc` |
+| 30 | `build_costing` | `p9a_build_costing_chart` (`wip_effective_mode=intent`) | Delta `costing_chart` | `run_costing` | `transform`, `pull_bom`, `pull_master_dtc`, `pull_lineplan_dtc` |
+| 40 | `wip_push` | `v2_wip_push` | **DTC** WIP `sheetData` | `run_wip_push`, `run_duty_push` | `request_manager`, `build_costing` |
+| 45 | `phase3_images` | `p3_beproduct_to_dtc_images` | **DTC** Style Image | `run_phase3` | `wip_push` |
+| 50 | `phase2_push` | `p2_push_dtc_to_beproduct` | **BeProduct** style | `run_phase2` | `transform`, `pull_master_dtc` |
+| 55 | `push_customer_code` | `v2_push_customer_code` | **BeProduct** material master | `run_customer_code_push` (**false**) | `pull_bom`, `pull_master_dtc` |
+
+Every task also takes `dry_run` (job default `false`); a stage whose flag is
+`false` exits SUCCESS with `SKIPPED_run_<flag>_false`, so a disabled stage looks
+green in the run UI.
 
 Every dependency edge carries `run_if=ALL_DONE`. A stage that fails should degrade
 the run, not abort it — notably `wip_push` still runs (and still pushes style, BOM
@@ -232,144 +266,85 @@ a human-enforced invariant; Stage 30 only warns on conflict, never blocks.
 
 ---
 
-### Stage 20 — `transform` → style × color staging  (reused, unchanged)
+### Stage 20 — `transform` → style × color staging
 
-The v1 transform already produces `beproduct_to_dtc_staging` correctly and needs
-no change for v2. Writes Delta only; touches no DTC.
+Produces `beproduct_to_dtc_staging` from `ktb_styles`: one row per **style ×
+colour**, carrying every BeProduct → DTC field and the computed target request
+name `dtc_request_name = "<customer> <seasonCode> <brand>"`. Writes Delta only;
+touches no DTC. The same notebook as v1, unchanged.
 
-> **Correction to an earlier draft of this document.** It said the v2 transform
-> would emit the final **style × color × material** grain. It cannot, and should
-> not:
->
-> 1. The material fan-out depends on which segments a colorway is **already
->    represented by in live DTC**. The transform has no live DTC state, so it
->    cannot compute it — only `wip_plan.compute_request_plan()`, which sees the
->    live rows, can.
-> 2. `phase1.compute_upsert()` treats a repeated `(BP Style#, Color / Wash)` as
->    a `duplicate_bp_key` exception, so material-grain rows would make every
->    multi-material style raise.
->
-> Staging therefore stays at **style × color**, the BOM becomes a separate
-> style-keyed table (Stage 20b), and the material dimension is resolved at
-> **plan time** in Stage 40. `repull_dtc` still disappears — planning against
-> intent is what removed it, not the staging grain.
+Staging deliberately stays at style × colour, **not** style × colour ×
+material: the material fan-out depends on which segments a colourway is
+*already* represented by in live DTC, which the transform cannot see, and
+`phase1.compute_upsert()` treats a repeated `(BP Style#, Color / Wash)` as a
+`duplicate_bp_key` exception. The BOM is a separate style-keyed table (Stage
+20b) and the material dimension is resolved at **plan time** in Stage 40.
 
-### Stage 20b — `pull_bom` → `bom_segments`  **NEW**
+**Gates — staging eligibility** (`sync/lifecycle.py`, the transform notebook):
 
-Reads the techpack BOM from the **`alb_tpm_*` Lakebase tables** and writes the
-raw payload to Delta. Runs in **parallel** with `transform`; touches no DTC, and
-writes nothing back to BeProduct.
-
-> **SOURCE WALKBACK 2026-09-22 — this reverses the 2026-09-16 switch below.**
-> Owner decision. The BOM read is back on
-> `customer_teckpack_style_latest` + `customer_teckpack_style_log`, via the same
-> two-hop join v1 used. `run_bom` and the `bom_catalog` / `bom_schema` /
-> `bom_table` / `bom_log_table` / `bom_customer_name` parameters are live again.
->
-> The table **keeps the name `bom_segments`**; only its column shape reverts
-> (`custom_fields` / `parse_error`, not `segments_json` / `error`). All three
-> consumers sniff which shape they were handed — via
-> `bom.segments_table_mode()` / `segments_from_delta_value()` — so none of them
-> changed. Switching the BOM source is a **one-notebook** redeploy in either
-> direction, and the PageBomVariation parser stays dormant but unit-tested in
-> `sync/bom.py` ("SOURCE 2"). A full snapshot of the BeProduct-sourced pipeline
-> is on branch `v2-bomvariation`.
->
-> Two things the walkback gives up, both known and accepted:
-> - `KTB-00029`'s placements are blank in Lakebase where BeProduct gave
->   `BODICE` / `LINING` / `HEM`. The one-way blank guard in
->   `plan_style_enrichment()` means the values already in DTC survive — this
->   loses future corrections, it does not revert live data.
-> - `Content` notation returns to `"Cotton 97%, Spandex 3%"`. See Stage 40's
->   Content note — **write-once must stay on**.
->
-> It also breaks Stage 55's material resolution outright; see that stage.
-
-> **Historical — source replaced 2026-09-16, reverted 2026-09-22.** For one
-> week BOM came straight from BeProduct's PageBomVariation API. That removed an
-> intermediate system, its two-hop join, and the serverless-only access
-> constraint that originally forced Phase 10 onto its own task (moot in v2 —
-> the whole job is serverless).
->
-> Validated against the Lakebase source across all 8 styles at the time:
-> identical counts, **7 of 8 byte-identical** on `(Fabric Group, Mill Fabric
-> Article #, Placement)`, and the 8th *better* — `KTB-00029`. Switching
-> produced **zero** DTC writes. The equivalence evidence is kept because it
-> applies symmetrically: walking back should also produce zero writes, and
-> anything beyond the two known deltas above is a bug rather than the walkback.
->
-> The access pattern below is retained for whoever re-switches.
-
-```
-style.app_list(header_id)          → the "BOMVariations" page. Its pageId is
-                                     FOLDER-CONSTANT, so it is discovered once
-                                     per run (pin it with `bom_page_id`).
-style.app_get(header_id, page_id)  → the VARIATION LIST. There is no separate
-                                     list endpoint.
-GET Style/{h}/PageBomVariation/{p}/Variation/{v}
-                                   → {metadata, id, …, rows[]}
-```
-
-Field mapping lives in `sync/bom.py`, not the notebook, so it keeps its unit
-tests. Two traps worth knowing:
-
-- **`rows[].group` is a GUID, not the group name.** The name is
-  `fields["Group"]`, whose values are exactly the two segments the decision tree
-  already knows: `"Main Fabric"` and `"Fabric"`.
-- **Field objects carry a stable `id`** (`placement`,
-  `vendor_material_reference_no`, `fabric_content`, `customer_material_code`)
-  alongside the display `name`. Prefer `id` — display names are precisely what
-  the original spec got wrong.
-
-`FACE FABRIC/MATERIAL CONTENT` is **structured**
-(`[{"value": 97.0, "code": "Cotton"}, …]`), so `bom.render_material_content()`
-chooses the rendering: `"97% Cotton / 3% Spandex"`. That matches DTC's dominant
-notation but **not all of it** — see Stage 40's Content note; write-once stays on.
-
-Colorway affinity is deliberately ignored (owner decision): variations carry
-`syncColorways` / `selectedVariationColorways`, but every variation applies to
-all colorways. Per-colorway coverage stays with `plan_style_enrichment()`.
-
-> **Note on writing BOM rows.** The Update DTO takes `rows[].rowFields` — NOT
-> `fields`, which is what the GET response uses and which the endpoint silently
-> discards (200, nothing applied). `placement` and `Size` write and restore
-> cleanly. `CUSTOMER MATERIAL CODE` is the exception: it is not editable on a
-> material-linked row, because the row only *displays* it. That push therefore
-> targets the Material master — see Stage 55.
-
-**Gates — staging eligibility** (`sync/lifecycle.py`, `sync/bom.py`):
-
-1. **Colorway presence is not a gate.** A style with zero colorways gets one row
+1. **Folder.** Only styles in the BeProduct folder named by `folder_name`
+   (currently `TEST KTB`) exist in `ktb_styles` at all.
+2. **Colorway presence is not a gate.** A style with zero colorways gets one row
    with `color = DUMMY_COLOR` ("NO BP COLORWAY") rather than being dropped.
    Stage 40 upgrades that row in place the first time a real colorway appears.
-2. **BOM presence is not a gate.** A style with no resolvable Main Fabric segment
-   stages with `DUMMY_FABRIC_GROUP` / `DUMMY_FABRIC_ARTICLE` ("NO TPM BOM") and is
-   enriched on a later run. Never an error.
 3. **Lifecycle** (`should_include_in_staging()`) — non-terminal `Product Status`
    always included; terminal (`Finalized` / `Drop`) included only until the DTC
    row's own `Product Status` has caught up, then excluded until reactivation.
-   Fails **open** if the WIP snapshot can't be read.
+   Fails **open** if the WIP snapshot can't be read. `ktb_styles` keeps terminal
+   styles; only staging drops them.
 4. **DTC-marked-Dropped** (`is_wip_row_dropped()`, WIP `"Active / Dropped"`) — a
-   safe no-op today: the column's real name was never live-verified (the view
-   endpoint 403s; a full scan of 84 active requests found no match). Activates
+   safe no-op today: the column's real name was never live-verified. Activates
    automatically once confirmed.
 5. **Required non-null** — `bp_style_number`, `season_code`, `brand`, `color`.
-   A violation **raises and aborts the run** rather than skipping the row: a null
-   here means an upstream data problem (usually a missing `dtc_seasoncode_mapping`
-   entry) that needs fixing, not something to work around.
+   A violation **raises and fails the task** rather than skipping the row: a null
+   here means an upstream data problem (usually a BeProduct season/year with no
+   `dtc_seasoncode_mapping` row) that needs fixing. Because every edge is
+   `ALL_DONE`, downstream stages still run — against the **previous** run's
+   staging, so new styles silently stop appearing until this is fixed.
 6. **Request name format** — `^[A-Z]+ [A-Z]{2}[0-9]{2} .+$`; also a raise.
 
-Parses each payload eagerly and reports per-style diagnostics — how many styles
-have a Main Fabric segment, which do not, and which payloads failed to parse — so
-a malformed BOM surfaces in **this** task, attributed to a specific style, rather
-than silently degrading a contribution two stages later.
+---
 
-The raw `custom_fields` is stored verbatim rather than pre-parsed into segments,
-so `sync/bom.py` stays the single source of truth for BOM parsing: Stage 40
-re-parses it with the very same function the unit tests cover.
+### Stage 20b — `pull_bom` → `bom_segments`
 
-Flag: `run_bom` (v1's `run_phase10`). Disabling it leaves whatever the table
-already holds; downstream never reverts on missing BOM data.
+Reads the techpack BOM from the **`alb_tpm_*` Lakebase tables** and writes the
+raw payload to Delta, one row per style. Runs in **parallel** with `transform`;
+touches no DTC and writes nothing to BeProduct.
+
+Source: `customer_teckpack_style_latest.latest_techpack_style_log_id →
+customer_teckpack_style_log.teckpack_style_log_id`, joined to `ktb_styles` on
+`(bp_style_number = style_no, season || " - " || year = style_season)`, INNER
+JOIN throughout — **a style with no Lakebase row simply has no BOM**. The
+payload is `custom_fields`, path
+`xts_data.TECH_PACK_EXTRACTION.Table[Type="BOM"]`. The `**`-column → DTC-column
+mapping is in [SYNC_CONTRACT.md](SYNC_CONTRACT.md) → "BOM → DTC".
+
+**Gates — BOM presence**:
+
+1. **BOM presence is not a gate for the row.** A style with no resolvable Main
+   Fabric segment stages with `DUMMY_FABRIC_GROUP` / `DUMMY_FABRIC_ARTICLE`
+   ("NO TPM BOM") and is enriched on a later run. Never an error.
+2. Each payload is parsed eagerly; `main_fabric_count`, `fabric_count` and
+   `parse_error` are stored per style, so a malformed BOM surfaces in **this**
+   task, attributed to a specific style, rather than silently degrading a
+   contribution two stages later. The raw `custom_fields` is kept verbatim so
+   `sync/bom.py` stays the single BOM parser — Stage 40 re-parses it with the
+   very function the unit tests cover.
+
+Flag: `run_bom`. Disabling it leaves whatever the table already holds;
+downstream never reverts on missing BOM data.
+
+> **Source history.** From 2026-09-16 to 2026-09-22 the BOM came from
+> BeProduct's PageBomVariation API instead; the owner reverted it
+> (2026-09-22). That parser is kept dormant but unit-tested in `sync/bom.py`
+> ("SOURCE 2"), all consumers sniff either table shape
+> (`bom.segments_table_mode()`), and branch `v2-bomvariation` snapshots the
+> BeProduct-sourced pipeline — so switching back is a one-notebook redeploy.
+> Accepted costs of the revert: `KTB-00029`'s Lakebase placements are blank
+> (DTC keeps the values it already has), `Content` notation is
+> `"Cotton 97%, Spandex 3%"` (hence write-once, Stage 40), and Stage 55 lost
+> its `materialId` (see Stage 55). API access notes and the equivalence
+> evidence are in AGENTS.md (2026-09-16 / 2026-09-17 entries).
 
 ---
 
@@ -404,23 +379,29 @@ violate the one-window rule.
 ### Stage 30 — `build_costing` → `costing_chart`  (shared notebook, "intent" mode)
 
 Same output table and key as v1, different inputs. v1 read the twice-re-pulled
-`dtc_wip_<customer>`; v2 reads **staging** (for the material dimension we own) ⋈
-**`pull_master_dtc`** (for the DTC-owned dimension) ⋈ **LinePlan**.
-
-That substitution is sound because the split is clean:
+`dtc_wip_<customer>`; v2 runs **before** the push, so its Step 1a overlays the
+values `wip_push` is *about to* write onto the start-of-run WIP snapshot, then
+joins **LinePlan**:
 
 | Input | Source in v2 | Why |
 |---|---|---|
-| `material_no`, `fabric_content`, `fabric_group` | staging | We write these; our plan is authoritative |
-| `lineplan_ref`, 4 vendor/factory slots, production country | `pull_master_dtc` | DTC-owned, never written by us — the start-of-run pull is current by definition |
+| `material_no`, `fabric_content`, `fabric_group` | `bom_segments` (Stage 20b) | We write these; our plan is authoritative |
+| style identity, `sub_class`, `class_name`, `gender`, … | staging (Stage 20) | Same |
+| `lineplan_ref`, 4 vendor/factory slots, production country, existing HTS/duty/tariff | `dtc_wip_ktb` (`pull_master_dtc`) | DTC-owned, never written by us — the start-of-run pull is current by definition |
 
-The one v1 dependency that would have blocked this is already gone: `Content` used
-to be populated by a DTC-internal trigger polling `Mill Fabric Article #`, which
-was confirmed unreliable in UAT; since 2026-09-09 Phase 10 writes it directly, so
-staging knows the value without a round-trip. `fabric_type` remains
-DTC-trigger-only but is traceability-only, never a filter or key.
+**One representative row per style × colour** feeds costing: the row whose
+`Fabric Group` is `Main Fabric`, else the lowest `rowIndex`. So every DTC-owned
+input (Lineplan Ref #, vendors, factories) must be entered **on the Main Fabric
+row** — values typed on a "Fabric" segment row are not read.
 
-Fully overwritten every run, no incremental.
+`fabric_type` remains DTC-trigger-only but is traceability-only, never a filter
+or key.
+
+Fully overwritten every run, no incremental — recovery for a bad build is
+`RESTORE TABLE … VERSION AS OF n`. The exit value reports every gate's drop
+count (`gates.dropped_*`, `joined_to_lineplan`, `rows_by_vendor_slot`,
+`duty_fields_non_blank`); serverless returns no stdout, so that JSON is the
+diagnostic.
 
 **Key** (`duty.COSTING_KEY`): `[customer, season_code, brand, bp_style_no,
 lf_style_no, color_name, lineplan_ref, material_no, supplier_type, supplier,
@@ -455,15 +436,20 @@ error — this is the most common source of "why isn't my style in `costing_char
 
 *Per vendor slot (Main/1/2/3), independently:*
 7. The slot's vendor must be non-blank. Zero populated slots → zero rows; two of
-   four → exactly two rows, transposed.
+   four → exactly two rows, transposed. A blank **factory** does *not* drop the
+   slot — the row forms, but `production_country` is blank, so it never gets a
+   duty lookup (see duty_compute gate 1), with no error. Production country is a
+   DTC **lookup on the factory**, and DTC only materializes a lookup if the
+   column is on the view the user **saved through** ("Full"); otherwise the
+   stored cell stays NULL while the UI shows a value (AGENTS.md 2026-09-23).
 
 *Duty back-fill, in order:*
-8. **WIP fallback** — all five duty fields (`hts_code`, `duty_rate_us|ca|mx`,
-   `tariff_rate`) are re-read from the live DTC WIP row's own per-slot columns,
-   which is how a value survives this table being fully overwritten every run.
-   `tariff_rate` joined this on **2026-09-17**, when its DTC columns went live;
-   before that it was reset to `NULL` and restored by a separate Step 4b
-   carry-forward keyed on `COSTING_KEY`, now **removed** as redundant.
+8. **WIP fallback** (Step 4) — all five duty fields (`hts_code`,
+   `duty_rate_us|ca|mx`, `tariff_rate`) are re-read from the DTC WIP row's own
+   per-slot columns, which is how a value survives this table being fully
+   overwritten every run. `tariff_rate` joined this on **2026-09-17**, when its
+   DTC columns went live; the old tariff-only Step 4b carry-forward was removed
+   the same day.
 9. **Cache fill** — every duty field is filled directly from
    `nt_orbit_duty_cache`, read-only, zero API calls. The cache is keyed purely on
    `(product_description, origin_country, import_country)` with no style/color/
@@ -471,16 +457,16 @@ error — this is the most common source of "why isn't my style in `costing_char
    product+origin+market combination has ever been looked up — including for a
    different style. Reuses the same pure functions the NT Orbit job uses to decide
    whether to call (`markets_needing_lookup`, `cache_key`, `is_cache_entry_stale`,
-   `merge_lookup_into_row`), with the API call simply never made. Write-once; a
-   miss leaves the field `NULL` for `duty_compute` to fill later. This strictly
-   supersedes gate 8, which is kept only as a redundant safety net.
+   `merge_lookup_into_row`), with the API call simply never made. Fill-blank-only
+   (it never overrides a value from gate 8, except under `force_refresh_duty`);
+   a miss leaves the field `NULL` for `duty_compute` to fill later.
 
 Flag: `run_costing`. Checked inside the notebook — **never** as a condition task,
 since `wip_push` depends on this stage.
 
 ---
 
-### Stage 40 — `wip_push` → the single DTC write window  **NEW**
+### Stage 40 — `wip_push` → the single DTC write window
 
 Everything that writes to a DTC WIP request. Replaces v1's `phase1_push` (Phases
 1/4/7), `fill_bom_data` (Phase 10) and `push_duty_rates` (Phase 9b's push half).
@@ -491,7 +477,7 @@ Per request, in order:
 2. Re-validate the request is still active **by `request_id`** against the current
    registry snapshot — a request can go inactive between resolver and push, and
    DTC's "inactive" means hidden from users, i.e. deleted. Refuse to push if so.
-3. Build one combined plan (`sync/wip_plan.py`, **NEW**) composing three
+3. Build one combined plan (`sync/wip_plan.py`) composing three
    contributions against that single live snapshot:
    - **style fields** — `phase1.compute_upsert` / `build_target_payload`
    - **material fields** — `bom.plan_style_enrichment`, fanned out against the
@@ -500,8 +486,18 @@ Per request, in order:
      `(bp_style_number, color_wash, Mill Fabric Article #)`
 4. If the combined plan is empty → **send nothing at all.** No GET-to-PATCH path,
    zero calls, zero user disruption. Design rule 2.
-5. Otherwise: one PATCH of updates keyed by `rowId`, then one PATCH of inserts
-   keyed by `rowIndex`. Back to back.
+5. Otherwise: updates as a `patch_rows` PATCH keyed by `rowId`, then inserts as
+   an `append_rows` POST to `.../rows` — the server assigns `rowId`/`rowIndex`
+   and returns them in send order, so every inserted row is logged with its
+   real id. Back to back; chunked by `batch_size` (100).
+
+Every operation is logged to `beproduct_to_dtc_sync_log` (`stage='wip_push'`;
+`operation` = `UPDATE` / `INSERT` / `NOOP` / `EXCEPTION` / `STRANDED_ROWS` /
+`REQUEST_INACTIVE` / `COLUMN_NOT_IN_VIEW` / `ERROR`). The exit value adds
+`columns_changed`, `columns_not_seen_in_view`, `stranded_rows`, `degraded`,
+`violations`, `bom_parse_errors`, `write_windows_opened` and per-request
+`sample_changes`. Status is `COMPLETED_WITH_VIOLATIONS` /
+`COMPLETED_WITH_WARNINGS` rather than `OK` when those are non-empty.
 
 `sync/wip_plan.py` composes; it does not re-implement. `phase1.py`, `bom.py` and
 `duty.py` keep their decision logic and their existing unit tests unchanged.
@@ -518,8 +514,9 @@ limit, so it has to be re-established explicitly in the composition layer.
    a static fallback — the view endpoint 403s for this API key, so the data-scan
    fallback alone would miss columns blank in every current row).
 3. `DEFAULT_FILL_COLS` (`Supplier`, `Fabric Group`, `Placement`) are **write-once**
-   — never overwritten on UPDATE if DTC already holds any non-blank value. This is
-   what protects the material contribution's ownership from the style contribution.
+   from the *style* contribution — never overwritten on UPDATE if DTC already
+   holds any non-blank value. This is what protects the material contribution's
+   ownership from the style contribution.
 4. On UPDATE, a field is sent only if `norm(current) != norm(new)`.
 5. Row-level exceptions (skipped and logged, never raised): `missing_bp_style`,
    `season_mismatch` / `brand_mismatch` (when `enforce_scope`), `duplicate_bp_key`,
@@ -533,7 +530,9 @@ limit, so it has to be re-established explicitly in the composition layer.
 - **Dummy colorway upgrade**: the first real colorway UPDATEs the style's
   unclaimed `DUMMY_COLOR` row(s) in place — never insert-then-delete. A second
   real colorway gets a genuine INSERT.
-- **INSERT** uses `rowIndex = max(rowIndex)+1` within the request, sparse-aware.
+- **INSERT** carries no locator at all — DTC assigns it (`append_rows`). A
+  copied base row's `rowId`/`rowIndex` must be stripped
+  (`bom.INSERT_EXCLUDE_COLS`), or the whole request is rejected with a 400.
 - **Moved-key orphans**: when BP Style#, brand or season changes, the row's
   request changes. The new request gets an INSERT; the row stranded in the old
   request is marked `Product Status = "(removed)"` — an invalid BeProduct value
@@ -552,6 +551,15 @@ limit, so it has to be re-established explicitly in the composition layer.
   data-policy call.
 
 **Gates — material fields** (`sync/bom.py`, `plan_style_enrichment()`):
+
+> **`Content` is write-once** (`material_fill_if_blank_columns = "Content"`,
+> owner decision 2026-09-15). DTC's own trigger rewrites Content in a different
+> notation (`97% Cotton / 3% Spandex` vs the BOM's `Cotton 97%, Spandex 3%`), so
+> an owning writer would diff on every row, every run, and open a write window
+> each time. Its only job is to make the cell non-blank for Stage 30 gate 3, so
+> it fills a blank cell and never touches a filled one. Skips are recorded in
+> `PlannedRow.dropped`, never silent.
+
 1. Style must have at least one row (existing or planned) — else no-op.
 2. **A "Main Fabric" segment must exist this run.** If not — missing, wrong JSON
    shape, or genuinely absent — **zero actions for the whole style**, regardless
@@ -629,14 +637,56 @@ limit, so it has to be re-established explicitly in the composition layer.
 Flags: `run_wip_push` (whole stage), `run_duty_push` (duty contribution only).
 
 **DTC write contract** (validated live):
-- Upsert — `PATCH /v1/sheets/{sheetId}/views/{viewId}`,
-  body `{"sheetData":[{…,"rowId"|"rowIndex":…}]}` → 204
+- Update — `PATCH /v1/sheets/{sheetId}/views/{viewId}`,
+  body `{"sheetData":[{…,"rowId":…}]}` → 204. **204 means stored.**
+- Insert — `POST /v1/sheets/{sheetId}/views/{viewId}/rows`,
+  body `{"sheetData":[{…}]}` with **no** locator → 201
+  `{"rows":[{"rowId","rowIndex"},…]}` in send order.
 - Delete — `DELETE /v1/sheets/{sheetId}/views/{viewId}/rows`,
-  body `{"rowIndexes":[…]}` → 204
+  body `{"rowIndexes":[…]}` → 204, but removes **at most ~11 rows per call** and
+  renumbers the rest; loop re-read + delete to empty a sheet. Nothing in the
+  pipeline deletes rows today.
 - Create — `POST /v1/sheets` → 201, ids nested under `data` with a capital-S `SheetId`
 - Share — `POST /v1/requests/{requestId}/shares/{userEmail}` and
   `…/shares/usergroups/{userGroupName}`,
   body `{"viewNames":[…],"message":"…","sendEmail":"Y|N"}` → 201
+
+---
+
+### Stage 45 — `phase3_images` → DTC Style Image
+
+Runs right after `wip_push`, inside the DAG since 2026-09-15 (the standalone
+`BeProduct_DTC_sync_images` job is PAUSED). **This is the second DTC write
+window.** It cannot join `wip_push`'s PATCH: image cells are writable *only*
+through the multipart `/images` endpoint, and DTC rejects any `sheetData` write
+to `Style Image`. Running it adjacent to `wip_push` means one disruption period
+per run, and it sees `wip_push`'s newly inserted rows in the same run. In steady
+state it uploads nothing and opens no window.
+
+Reads `dtc_request_mapping` / `beproduct_to_dtc_staging`, and does its own live
+`get_sheet()` immediately before writing (that read also supplies the current
+blank-vs-populated Style Image state). Logs to `beproduct_to_dtc_sync_log` with
+`stage='images'`.
+
+**Addressing is by `rowId`** (query parameter lowercase `rowid`; camelCase
+`rowId` is silently ignored). Never by `rowindex`: a stale or non-existent
+`rowindex` returns **201 and creates a new row** holding the image.
+
+**Gates** (`sync/phase3.py`, `compute_image_uploads()`):
+1. Row has a resolvable match key.
+2. Style Image cell is currently blank — idempotent, never re-uploads.
+3. Row has a `rowId`, else skipped `missing_row_id`.
+4. Source, in priority order: **(a) sibling copy** — any other row for the same BP
+   Style# in this request that already has a real image, reusing that DTC-hosted
+   URL (downloaded with the DTC `x-api-key`) rather than re-downloading from
+   BeProduct; **(b)** BeProduct's `front_image_url`, which must be non-blank and
+   `http(s)://`; **(c)** neither → skipped `no_source_image`.
+5. Content type (`classify_image_type()`): `jpeg`/`png` as-is; `webp`/`gif`/`bmp`/
+   `tiff` transcoded to PNG; `svg+xml` skipped (`unsupported_vector_image`);
+   anything else skipped (`unsupported_image_type`). Some BeProduct CDN URLs
+   return 403 on download (per-file SAS issue on the BeProduct side).
+
+Flag: `run_phase3`.
 
 ---
 
@@ -646,7 +696,17 @@ Unchanged from v1. Reads the DTC snapshot, writes **BeProduct**. No DTC writes, 
 it is outside the write-window constraint entirely and runs in parallel with
 Stages 20–40.
 
-Flag: `run_phase2`.
+Flag: `run_phase2`. Logs every decision to `dtc_to_beproduct_sync_log` (no
+exit JSON). Current BeProduct values are read live per style for the diff.
+
+Identity comes from staging: a DTC row joins on `(request, BP Style#, colour)`;
+no staging match → `UNMATCHED` / `no_beproduct_identity` (a stranded or moved
+row). Two of the fields are DTC **lookups** (`Main Factory Customer ID`,
+`Factory Production Country for Main Factory`) and are only stored if on the
+view the user saved through — see Stage 30 gate 7. COO needs
+`beproduct_master_coo`, filled by `p5utl_beproduct_master_data_sync`
+`mode=PULL_ONLY`; if that table is empty COO silently never resolves (every
+other field still pushes).
 
 **Gates** (`sync/phase2.py`, `build_beproduct_updates()`):
 1. Identity required — no `beproduct_style_id` → `missing_style_id`; a
@@ -657,21 +717,105 @@ Flag: `run_phase2`.
 3. Blank handling — `push_blanks=false` (default) skips blanks entirely and never
    clears BeProduct; `push_blanks=true` writes an explicit empty string.
 4. NOOP when `norm(current_bp) == norm(new_dtc)`.
-5. `header_value_conflict` — two DTC rows for one style disagreeing on a
-   header-level field is an exception, not an arbitrary pick.
+5. `header_value_conflict` — two DTC rows for one style (different colours, or
+   the several material rows of one colour) disagreeing on a header-level field
+   is an exception: the first value is kept and the rest flagged. Blank rows are
+   skipped before this check, so entering a value on one row only is fine.
 6. `UNSUPPORTED_FIELDS` (currently empty) is skipped *and logged*, never silently
    dropped.
 
+### Stage 55 — `push_customer_code` → BeProduct **material master**
+
+DTC `"Fabric Customer # or SAP #"` → the material's `customer_material_code`.
+Writes **BeProduct only**, so it opens no DTC write window and runs alongside
+anything.
+
+**The target is the material, not the BOM row.** `CUSTOMER MATERIAL CODE` is not
+editable on a material-linked row — the row only *displays* it, read through from
+the linked material. Writing the material makes the BOM row show the new value
+immediately (verified live).
+
+```mermaid
+flowchart LR
+    row[DTC WIP row] -- "(Fabric Group, Mill Fabric Article #)" --> seg[BOM segment]
+    seg -- "materialId" --> mat[BeProduct material master]
+```
+
+That pair is unique within a style and is the same `bom.segment_key()` the
+enrichment direction uses, so both directions agree on what "the same fabric
+assignment" means. The write always uses the GUID `materialId`.
+
+> **DISARMED 2026-09-22 (`run_customer_code_push=false`) by the Stage 20b source
+> walkback.** This is the one stage that did *not* walk back cleanly: only the
+> PageBomVariation payload carried `materialId`, and the Lakebase BOM has no
+> such column.
+>
+> Note the failure mode, because it is quiet rather than loud: with Lakebase
+> segments every `material_id` is `None`, so `bom_push`'s
+> `is_ad_hoc or not material_id` guard funnels **every** row into
+> `ad_hoc_skipped` and the stage reports a clean `writes: 0`. That reads as
+> success. Hence the flag, rather than trusting a green run.
+>
+> **The replacement route**: Lakebase carries `**MaterialCode`, which *is* the
+> material master's `headerNumber` (e.g. `LF-BD26-000002--SH` — the suffix is
+> part of the key). `bom.extract_enrichment_fields()` now carries it as
+> `lf_material_id`, and the notebook's `resolve_material_ids()` turns codes into
+> GUIDs before planning. It **refuses rather than guesses**: `attributes_list`
+> is used directly (never `attributes_get_by_number`, which hides a second match
+> behind `next(..., None)`), the server's `Eq` result is post-filtered to an
+> exact `headerNumber`, and a code matching zero or several materials goes to
+> the `unresolved` bucket. Lookups are cached per code and only fetched for rows
+> that actually carry a value — with the DTC column blank, that is **zero API
+> calls**.
+>
+> **Cost of the route**: the GUID was chosen precisely so the planned
+> reorganisation of material master into per-customer folders could not break
+> this stage. Resolving through `headerNumber` puts that exposure back — it
+> depends on `headerNumber` staying globally unique, and the lookup is
+> deliberately folder-agnostic.
+>
+> Re-enable only after `v2_probe_material_code` returns `PROVEN` and the live
+> end-to-end proof is repeated.
+
+**Gates** (`sync/bom_push.py`, all pure and unit-tested):
+1. A **blank** DTC value is never pushed — this stage can set or change a code,
+   never clear one.
+2. **Conflicting materials are never written.** Materials are *shared*: the 60
+   live DTC rows resolve to just 8 distinct materials, up to 10 rows each. If two
+   rows disagree about one material's code, "last row wins" would corrupt a
+   record other styles depend on — so the material is skipped and the conflict
+   reported.
+3. An already-correct material is a no-op.
+4. An unmatched `(group, article)`, or an ad-hoc row with no linked material, is
+   reported — never guessed.
+4b. An LF material code that resolves to **zero or several** materials, or is
+   blank, goes to the `unresolved` bucket — reported, never guessed. Kept
+   separate from `unmatched` and `ad_hoc_skipped` on purpose: the three need
+   different fixes ("fix the DTC fabric assignment", "this row has no material
+   by design", "fix or re-key the material master"). A run with anything
+   unresolved exits `COMPLETED_WITH_UNRESOLVED`, never `OK` — work was silently
+   not done.
+5. **Every write is read back and verified.** A 200 from a vendor API means
+   accepted, not stored; this pipeline has been burned by that twice.
+
 ---
 
-## Companion jobs
+## Companion job
 
 ### `BeProduct_DTC_sync_duty_compute` — NT Orbit lookups
 
-Single task `compute_duty_rates` (`p9b1_compute_duty_rates`). NT Orbit →
-`costing_chart` + `nt_orbit_duty_cache`. **Zero DTC contact** — no API key, no
-read, no write — so it is free to run on its own schedule with its own latency.
-Unchanged in v2.
+Single task `compute_duty_rates` (`p9b1_compute_duty_rates`), job
+1026599988408090, serverless, **10:00 and 15:00 HKT**. NT Orbit →
+`nt_orbit_duty_cache` + `costing_chart` (MERGE). **Zero DTC contact** — no API
+key, no read, no write — so it is free to run on its own schedule with its own
+latency. Its results reach DTC through the next main run: Stage 30 refills
+`costing_chart` from the cache, and Stage 40 pushes the values.
+
+It is deliberately **not** in the main DAG: NT Orbit is external and
+rate-limited (~30–60 s per uncached call, serial), and the notebook has no call
+budget or checkpointing — its cache MERGE happens once at the end, so a timeout
+discards the whole run's lookups. It exits **no JSON summary**; read the task's
+cell output in the run UI (`fetched live … (failed: N)`).
 
 Auth is Microsoft Entra ID **delegated** OAuth2 (a signed-in person, never
 client-credentials), not DTC's `x-api-key`. Entra rotates the refresh token on most
@@ -751,34 +895,6 @@ years-old entry cannot override a human's correction in WIP.
 Cost: ~30 s per (row × market) — 3 live calls per row. Never leave it on for a
 scheduled run.
 
-### `BeProduct_DTC_sync_images` — Style Image upload
-
-Single task `phase3_images` (`p3_beproduct_to_dtc_images`). Unchanged in v2.
-
-**This is a second DTC write stream and therefore a second write window.** It
-cannot join `wip_push`'s PATCH: image cells are writable *only* through the
-multipart `/images` endpoint, and DTC rejects any `sheetData` write to
-`Style Image`. Consolidating or co-scheduling the two windows is an open item in
-[MIGRATION_V1_V2.md](MIGRATION_V1_V2.md).
-
-Needs nothing from the main job's same run — it reads `dtc_request_mapping` /
-`beproduct_to_dtc_staging` left by whichever run last populated them and does its
-own live `get_sheet()` immediately before writing.
-
-**Gates** (`sync/phase3.py`, `compute_image_uploads()`):
-1. Row has a resolvable match key.
-2. Style Image cell is currently blank — idempotent, never re-uploads.
-3. Row has a `rowIndex` — the multipart endpoint cannot target a row without one
-   (`missing_row_index`).
-4. Source, in priority order: **(a) sibling copy** — any other row for the same BP
-   Style# in this request that already has a real image, reusing that DTC-hosted
-   URL rather than re-downloading and re-transcoding; **(b)** BeProduct's
-   `front_image_url`, which must be non-blank and `http(s)://`; **(c)** neither →
-   left alone, no exception.
-5. Content type (`classify_image_type()`): `jpeg`/`png` as-is; `webp`/`gif`/`bmp`/
-   `tiff` transcoded to PNG; `svg+xml` skipped (`unsupported_vector_image`);
-   anything else skipped (`unsupported_image_type`).
-
 ---
 
 ## Cross-cutting
@@ -807,95 +923,24 @@ own live `get_sheet()` immediately before writing.
 | v1 task | v2 |
 |---|---|
 | `wait_cluster` | removed (serverless) |
-| `gate_phase0/2/9a/9b` | removed (in-notebook flags, design rule 4) |
-| `phase0_pull` / `phase0_upsert` / `phase0_push` | unchanged |
-| `bp_style_sync` | unchanged |
-| `pull_master_dtc` | unchanged |
-| `pull_lineplan_dtc` | unchanged; no longer behind `gate_phase9a` |
-| `transform` | unchanged (Stage 20); staging stays style × color |
-| `request_manager` | unchanged |
-| `phase1_push` | → folded into `wip_push` |
+| `gate_phase0/2/3/9a/9b` | removed (in-notebook flags, design rule 4) |
+| `phase0_pull` / `phase0_upsert` / `phase0_push` | Stage 00, unchanged |
+| `bp_style_sync` | Stage 10, unchanged |
+| `pull_master_dtc` | Stage 10, unchanged |
+| `pull_lineplan_dtc` | Stage 10, unchanged; gated by `run_costing` |
+| `transform` | Stage 20, unchanged; staging stays style × color |
+| `request_manager` | Stage 25, unchanged |
+| `phase1_push` | → folded into `wip_push` (Stage 40) |
 | `repull_dtc` | removed |
-| `fill_bom_data` | → split: the BOM read becomes `pull_bom` (Stage 20b, now BeProduct not Lakebase); the DTC write folds into `wip_push` |
+| `fill_bom_data` | → split: the Lakebase BOM read becomes `pull_bom` (Stage 20b); the DTC write folds into `wip_push` |
 | `repull_dtc_bom` | removed |
-| `build_costing_chart` | → `build_costing` (Stage 30), reads staging instead of the re-pull |
+| `build_costing_chart` | → `build_costing` (Stage 30), intent mode instead of the re-pull |
 | `push_duty_rates` | → folded into `wip_push` |
-| `phase2_push` | unchanged |
-| `compute_duty_rates` (own job) | unchanged |
-| `phase3_images` (own job) | unchanged |
+| `phase2_push` | Stage 50, unchanged |
+| `compute_duty_rates` (own job) | unchanged, own job, now serverless |
+| `phase3_images` (own job) | → Stage 45 inside the v2 DAG; addresses rows by `rowid` |
+| — | **new**: `push_customer_code` (Stage 55, disabled) |
 
-
----
-
-### Stage 55 — `push_customer_code` → BeProduct **material master**  **NEW**
-
-DTC `"Fabric Customer # or SAP #"` → the material's `customer_material_code`.
-Writes **BeProduct only**, so it opens no DTC write window and runs alongside
-anything.
-
-**The target is the material, not the BOM row.** `CUSTOMER MATERIAL CODE` is not
-editable on a material-linked row — the row only *displays* it, read through from
-the linked material. Writing the material makes the BOM row show the new value
-immediately (verified live).
-
-```
-DTC row --(Fabric Group, Mill Fabric Article #)--> BOM segment
-        --materialId-->                            material master
-```
-
-That pair is unique within a style and is the same `bom.segment_key()` the
-enrichment direction uses, so both directions agree on what "the same fabric
-assignment" means. The write always uses the GUID `materialId`.
-
-> **DISARMED 2026-09-22 (`run_customer_code_push=false`) by the Stage 20b source
-> walkback.** This is the one stage that did *not* walk back cleanly: only the
-> PageBomVariation payload carried `materialId`, and the Lakebase BOM has no
-> such column.
->
-> Note the failure mode, because it is quiet rather than loud: with Lakebase
-> segments every `material_id` is `None`, so `bom_push`'s
-> `is_ad_hoc or not material_id` guard funnels **every** row into
-> `ad_hoc_skipped` and the stage reports a clean `writes: 0`. That reads as
-> success. Hence the flag, rather than trusting a green run.
->
-> **The replacement route**: Lakebase carries `**MaterialCode`, which *is* the
-> material master's `headerNumber` (e.g. `LF-BD26-000002--SH` — the suffix is
-> part of the key). `bom.extract_enrichment_fields()` now carries it as
-> `lf_material_id`, and the notebook's `resolve_material_ids()` turns codes into
-> GUIDs before planning. It **refuses rather than guesses**: `attributes_list`
-> is used directly (never `attributes_get_by_number`, which hides a second match
-> behind `next(..., None)`), the server's `Eq` result is post-filtered to an
-> exact `headerNumber`, and a code matching zero or several materials goes to
-> the `unresolved` bucket. Lookups are cached per code and only fetched for rows
-> that actually carry a value — with the DTC column blank, that is **zero API
-> calls**.
->
-> **Cost of the route**: the GUID was chosen precisely so the planned
-> reorganisation of material master into per-customer folders could not break
-> this stage. Resolving through `headerNumber` puts that exposure back — it
-> depends on `headerNumber` staying globally unique, and the lookup is
-> deliberately folder-agnostic.
->
-> Re-enable only after `v2_probe_material_code` returns `PROVEN` and the live
-> end-to-end proof is repeated.
-
-**Gates** (`sync/bom_push.py`, all pure and unit-tested):
-1. A **blank** DTC value is never pushed — this stage can set or change a code,
-   never clear one.
-2. **Conflicting materials are never written.** Materials are *shared*: the 60
-   live DTC rows resolve to just 8 distinct materials, up to 10 rows each. If two
-   rows disagree about one material's code, "last row wins" would corrupt a
-   record other styles depend on — so the material is skipped and the conflict
-   reported.
-3. An already-correct material is a no-op.
-4. An unmatched `(group, article)`, or an ad-hoc row with no linked material, is
-   reported — never guessed.
-4b. An LF material code that resolves to **zero or several** materials, or is
-   blank, goes to the `unresolved` bucket — reported, never guessed. Kept
-   separate from `unmatched` and `ad_hoc_skipped` on purpose: the three need
-   different fixes ("fix the DTC fabric assignment", "this row has no material
-   by design", "fix or re-key the material master"). A run with anything
-   unresolved exits `COMPLETED_WITH_UNRESOLVED`, never `OK` — work was silently
-   not done.
-5. **Every write is read back and verified.** A 200 from a vendor API means
-   accepted, not stored; this pipeline has been burned by that twice.
+The v1 phase numbers still used in AGENTS.md map as: Phase 0 → 00, Phases 1/4/7
+→ 20 + 40, Phase 2 → 50, Phase 3 → 45, Phase 9a → 10 (`pull_lineplan_dtc`) +
+30, Phase 9b → duty_compute + 40, Phase 10 → 20b + 40.

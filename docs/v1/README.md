@@ -20,11 +20,11 @@ case study and hard-won bug fix recorded here is still the historical record.
 | `PHASE0_WORKFLOW.md` | PIPELINE.md — Stage 00 |
 | `PHASE1_WORKFLOW.md` | PIPELINE.md — Stages 20/25/40; SYNC_CONTRACT.md |
 | `PHASE2_WORKFLOW.md` | PIPELINE.md — Stage 50; SYNC_CONTRACT.md |
-| `PHASE3_WORKFLOW.md` | PIPELINE.md — companion jobs |
+| `PHASE3_WORKFLOW.md` | PIPELINE.md — Stage 45 |
 | `PHASE5_WORKFLOW.md` | PIPELINE.md — Stage 00 (master-data/directory modes) |
 | `PHASE7_WORKFLOW.md` | SYNC_CONTRACT.md — sample submit history |
 | `PHASE9_WORKFLOW.md` | PIPELINE.md — Stage 30 + `duty_compute` |
-| `PHASE10_WORKFLOW.md` | PIPELINE.md — Stages 20/40 |
+| `PHASE10_WORKFLOW.md` | PIPELINE.md — Stages 20b/40 |
 | `DIAGRAM.md` | PIPELINE.md — "The DAG" |
 | `PIPELINE_GATES.md` | PIPELINE.md — per-stage "Gates" subsections |
 

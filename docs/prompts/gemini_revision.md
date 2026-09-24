@@ -1,10 +1,12 @@
 # The Gemini Exemplar Prompt — BeProduct ⇄ DTC Sync
 
+> **Historical prompt artifact** — not maintained against the live system; for current behaviour read [../PIPELINE.md](../PIPELINE.md), [../SYNC_CONTRACT.md](../SYNC_CONTRACT.md) and [../TROUBLESHOOTING.md](../TROUBLESHOOTING.md).
+
 This file is a **teaching artifact**: it demonstrates how to write an *initial prompt* optimized specifically for **Google Gemini** models (such as `gemini-1.5-pro`, `gemini-2.0`, and `gemini-3.5-flash`) to produce this entire repository. 
 
 While the raw historical prompts are in `/implement_prompts.txt` and the Claude-style exemplar is in `./opus_revision.md`, this document showcases how to leverage Gemini's unique architectural strengths—such as its **massive context window (up to 2M tokens)**, **superior XML parsing**, and **strict adherence to system instructions**—to achieve an extremely clean, robust, and zero-hallucination code generation loop.
 
-This is **not** project documentation. For system-specific guides, refer to `../ARCHITECTURE.md`, `../PHASE1_WORKFLOW.md`/`PHASE2`/`PHASE3`, and `../../AGENTS.md`.
+This is **not** project documentation. For system-specific guides, refer to `../ARCHITECTURE.md`, `../v1/PHASE1_WORKFLOW.md`/`PHASE2`/`PHASE3` (archived v1 docs), and `../../AGENTS.md`.
 
 ---
 

@@ -1,9 +1,11 @@
 # Standalone utilities
 
-Notebooks here are **not part of the daily BeProduct ⇄ DTC pipeline**
-(the multi-task Databricks job `BeProduct_DTC_sync_dag`, defined in
-`scripts/deploy_job.py` — the old single-notebook orchestrator
-`beproduct/orchestrate_sync.py` is retired, kept only as a manual fallback)
+Notebooks here are **not part of the scheduled BeProduct ⇄ DTC pipeline**
+(the serverless multi-task Databricks job `BeProduct_DTC_sync_v2`, job
+367710575109755, defined in `scripts/deploy_job.py --job v2` and documented in
+`docs/PIPELINE.md`; the v1 job `BeProduct_DTC_sync_dag` is paused, kept for
+rollback only, and the old single-notebook orchestrator
+`beproduct/orchestrate_sync.py` is retired)
 and are **not auto-deployed** by `scripts/upload_notebooks.py` (which only
 scans `beproduct/` and `dtc/notebooks/`). Deploy them manually when needed
 (see below).
@@ -14,7 +16,7 @@ scans `beproduct/` and `dtc/notebooks/`). Deploy them manually when needed
 
 A standalone, **bi-directional** helper that pushes locally edited rows from a
 Delta styles table back into BeProduct. It is independent of the DTC flow — the
-DTC-driven pushback of DTC-owned fields is **Phase 2**
+DTC-driven pushback of DTC-owned fields is **Stage 50** `phase2_push`
 (`dtc/notebooks/p2_push_dtc_to_beproduct.py`, see `docs/PIPELINE.md` Stage 50).
 
 **What it does**
@@ -37,7 +39,8 @@ DTC-driven pushback of DTC-owned fields is **Phase 2**
 
 **Why standalone:** it pushes *all* extracted fields based on local edits, which is
 broader than the one-field-per-direction DTC contract. Keep it separate so it can't
-accidentally fight the field-ownership partition that Phases 1/2 enforce.
+accidentally fight the field-ownership partition in `docs/SYNC_CONTRACT.md`
+(enforced by Stages 40 and 50).
 
 **Deploy manually** (it lives outside the auto-scanned dirs):
 
@@ -53,10 +56,12 @@ load_dotenv()
 w = WorkspaceClient(host=os.environ["DATABRICKS_HOST"], token=os.environ["DATABRICKS_PAT"])
 content = base64.b64encode(Path("standalone/beproduct_style_push.py").read_bytes()).decode()
 w.workspace.import_(
-    path="/Workspace/Repos/beproduct-sync/standalone/beproduct_style_push",
+    path="/Workspace/Repos/beproduct-sync-v2/standalone/beproduct_style_push",
     format=ImportFormat.SOURCE, language=Language.PYTHON, content=content, overwrite=True,
 )
 ```
 
-Or add `("standalone", "/Workspace/Repos/beproduct-sync/standalone")` to
-`NOTEBOOK_DIRS` in `scripts/upload_notebooks.py` if you want it deployed with the rest.
+Or add `("standalone", "standalone")` to `NOTEBOOK_DIRS` in
+`scripts/upload_notebooks.py` if you want it deployed with the rest (paths there
+are relative to `--root`; the v2 root is `/Workspace/Repos/beproduct-sync-v2`,
+the v1 root `/Workspace/Repos/beproduct-sync` is frozen).

@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 /tmp/claude-1000/-home-aukei-Documents-GitHub-beproduct-databricks-sync/6a20fe1c-be4e-44fa-bc1c-997e780e9a5d/scratchpad/q.py 'live WIP holds the stale value::SELECT col_BP_Style, col_Color_Wash, col_Main_Factory_HTS_Code hts, col_Main_Factory_Duty_Rate_US us, col_Main_Factory_Tariff tariff FROM lft.beproduct.dtc_wip_ktb WHERE col_BP_Style IN \\('\\\\''KTB-00024'\\\\'','\\\\''KTB-00025'\\\\'','\\\\''KTB-00026'\\\\''\\) ORDER BY 1,2' 'chart supplier_type::SELECT bp_style_no, color_name, supplier_type, hts_code, duty_rate_us FROM lft.beproduct.costing_chart ORDER BY 1,2')",
+      "Bash(python3 /tmp/claude-1000/-home-aukei-Documents-GitHub-beproduct-databricks-sync/6a20fe1c-be4e-44fa-bc1c-997e780e9a5d/scratchpad/q.py 'cache keys written today \\(US\\)::SELECT product_description, hts_code, duty_rate FROM lft.beproduct.nt_orbit_duty_cache WHERE import_country_code='\\\\''US'\\\\'' AND looked_up_at > '\\\\''2026-09-17'\\\\'' ORDER BY 1' 'older US cache keys::SELECT product_description, hts_code, duty_rate, looked_up_at FROM lft.beproduct.nt_orbit_duty_cache WHERE import_country_code='\\\\''US'\\\\'' AND looked_up_at < '\\\\''2026-09-17'\\\\'' ORDER BY 1 LIMIT 15')",
+      "Bash(python3 /tmp/claude-1000/-home-aukei-Documents-GitHub-beproduct-databricks-sync/6a20fe1c-be4e-44fa-bc1c-997e780e9a5d/scratchpad/q.py 'tariff col values::SELECT count\\(*\\) n, count\\(col_Main_Factory_Tariff\\) filled FROM lft.beproduct.dtc_wip_ktb')",
+      "Bash(python3 -m py_compile dtc/notebooks/p9b1_compute_duty_rates.py dtc/notebooks/p9a_build_costing_chart.py scripts/deploy_job.py dtc/python/sync/duty.py)",
+      "Bash(python3 scripts/deploy_job.py --help)",
+      "Bash(python3 scripts/deploy_job.py --job duty_compute --dry-run)",
+      "Bash(python3 scripts/deploy_job.py --job v2 --dry-run)",
+      "Bash(python3 scripts/upload_notebooks.py --root /Workspace/Repos/beproduct-sync-v2)",
+      "Bash(git stash *)",
+      "Bash(python3 scripts/upload_notebooks.py --root /Workspace/Repos/beproduct-sync)",
+      "Bash(python3 scripts/upload_notebooks.py)",
+      "Bash(python3 -c ' *)",
+      "Bash(python3 scripts/deploy_job.py --job duty_compute --reset-existing 1026599988408090)",
+      "Bash(python3 scripts/deploy_job.py --job v2 --reset-existing 367710575109755)",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('dtc/notebooks/v2_probe_material_code.py'\\).read\\(\\)\\); print\\('probe parses OK'\\)\")",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('scripts/run_v2_task.py'\\).read\\(\\)\\); print\\('run_v2_task parses OK'\\)\")",
+      "Bash(python3 -)",
+      "Bash(python3 /tmp/claude-1000/-home-aukei-Documents-GitHub-beproduct-databricks-sync/1b2fa5d0-f9f1-4f8c-8474-cd49acbe8bb5/scratchpad/probe_view.py)",
+      "Bash(awk 'NR==128' docs/beproduct_style_interested_fields.txt)",
+      "Bash(python3 /tmp/claude-1000/-home-aukei-Documents-GitHub-beproduct-databricks-sync/1b2fa5d0-f9f1-4f8c-8474-cd49acbe8bb5/scratchpad/probe_ktb29.py)",
+      "Bash(python3 /tmp/claude-1000/-home-aukei-Documents-GitHub-beproduct-databricks-sync/1b2fa5d0-f9f1-4f8c-8474-cd49acbe8bb5/scratchpad/probe2.py)",
+      "Bash(python3 /tmp/claude-1000/-home-aukei-Documents-GitHub-beproduct-databricks-sync/1b2fa5d0-f9f1-4f8c-8474-cd49acbe8bb5/scratchpad/probe3.py)",
+      "Bash(python3 -c \"import databricks.sql; print\\('databricks-sql-connector available'\\)\")",
+      "Bash(timeout 300 python3 /tmp/claude-1000/-home-aukei-Documents-GitHub-beproduct-databricks-sync/1b2fa5d0-f9f1-4f8c-8474-cd49acbe8bb5/scratchpad/q.py)",
+      "Bash(timeout 300 python3 /tmp/claude-1000/-home-aukei-Documents-GitHub-beproduct-databricks-sync/1b2fa5d0-f9f1-4f8c-8474-cd49acbe8bb5/scratchpad/q2.py)"
+    ]
+  }
+}

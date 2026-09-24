@@ -1,21 +1,12 @@
-*** SUPERSEDED / RETIRED 2026-09-01 ***
-========================================
-Phase 8a/8b (this entire document's premise) are RETIRED, confirmed by the
-project team to be replaced by a separate "MaterialLib" application.
-`gate_phase8a` / `pull_fabric_dtc` have been removed from the deployed
-`BeProduct_DTC_sync_dag` job entirely (not just gated off), and the output
-tables `dtc_fabric_ktb` / `dtc_fabric_registry` were DROPPED from Delta the
-same day (owner-confirmed, zero downstream readers). This file is kept
-below ONLY as a historical record of the field mapping that was designed
-(and never fully implemented — Phase 8b was still "planned" at retirement);
-do not use it to guide new work. See AGENTS.md's decisions log for detail.
-========================================
-
-*** BUT THERE *IS* A LIVE MATERIAL-MASTER WRITE PATH (added 2026-09-22) ***
+BeProduct Material Master -- field mapping (live path: Stage 55)
 =========================================================================
-Do not read "RETIRED" above as "nothing writes to BeProduct Material Master".
-Phase 8's BULK adoption-gated upsert is dead; a NARROW, single-field write is
-live:
+Stage semantics, gates and the re-enable condition live in docs/PIPELINE.md
+-> "Stage 55 — push_customer_code"; direction in docs/SYNC_CONTRACT.md. This
+file keeps only the field-level facts and the naming trap.
+
+Do not read "RETIRED" (Phase 8, bottom of this file) as "nothing writes to
+BeProduct Material Master". Phase 8's BULK adoption-gated upsert is dead; a
+NARROW, single-field write exists:
 
   v2 Stage 55 `push_customer_code` (dtc/notebooks/v2_push_customer_code.py,
   decisions in dtc/python/sync/bom_push.py)
@@ -33,8 +24,14 @@ live:
   * Materials are SHARED across styles (60 live DTC rows -> 8 materials), so a
     material whose candidate values disagree is NEVER written; the conflict is
     reported instead.
-  * Currently DISARMED (`run_customer_code_push=false`) pending the
-    LF-Material-Code -> materialId resolver; see AGENTS.md 2026-09-22.
+  * Currently DISARMED (`run_customer_code_push=false`). WHY: since the BOM
+    source was walked back to the Lakebase techpack tables (2026-09-22), BOM
+    segments carry NO `materialId` -- only BeProduct's PageBomVariation
+    payload did. With every material_id None, the ad-hoc guard would skip
+    every row and report a clean `writes: 0`, which reads as success. The
+    replacement resolver (LF material code `**MaterialCode` == material
+    `headerNumber` -> materialId) stays off until `v2_probe_material_code`
+    returns PROVEN; see docs/PIPELINE.md Stage 55 and AGENTS.md 2026-09-22.
 
 HOW A MATERIAL IS ADDRESSED -- and the naming trap
 --------------------------------------------------
@@ -50,10 +47,11 @@ between systems is LF_Material_ID, which IS the material's `headerNumber`
 THREE DIFFERENT LABELS FOR THE SAME CONCEPT, in three places. Getting these
 confused is easy and expensive:
 
-  "LF Material ID"  DTC **KTB FABRIC** document (this file, line ~51). Phase 8,
-                    retired. NOT present in the KTB WIP view.
+  "LF Material ID"  DTC **KTB FABRIC** document (historical section below).
+                    Phase 8, retired. NOT present in the KTB WIP view.
   "LF Fabric ID"    DTC **KTB WIP** document, WIP_ITS_USE. THE LIVE ONE --
-                    written by Phase 10 since 2026-09-22. See
+                    written by the BOM contribution (Stages 20b + 40) since
+                    2026-09-22, from Lakebase `**MaterialCode`. See
                     beproduct_style_interested_fields.txt.
   "LF MATERIAL ID"  BeProduct MATERIAL MASTER header field == `headerNumber`.
                     The lookup target.
@@ -62,6 +60,21 @@ Resolve by header_number with `client.material.attributes_list(filters=[...])`
 and require EXACTLY ONE match. Do NOT use `attributes_get_by_number()`: it is
 `next(attributes_list(...), None)` and silently discards a second match.
 =========================================================================
+
+
+*** HISTORICAL -- Phase 8 (DTC FABRIC -> Material Master) RETIRED 2026-09-01 ***
+==================================================================================
+Everything from here to the end of the file is Phase 8a/8b, RETIRED, confirmed by the
+project team to be replaced by a separate "MaterialLib" application.
+`gate_phase8a` / `pull_fabric_dtc` have been removed from the deployed
+`BeProduct_DTC_sync_dag` job entirely (not just gated off), and the output
+tables `dtc_fabric_ktb` / `dtc_fabric_registry` were DROPPED from Delta the
+same day (owner-confirmed, zero downstream readers). It is kept
+ONLY as a historical record of the field mapping that was designed
+(and never fully implemented — Phase 8b was still "planned" at retirement);
+do not use it to guide new work. See AGENTS.md's decisions log for detail.
+========================================
+
 
 DTC FABRIC → BeProduct Material Master field mapping (Phase 8) — HISTORICAL
 ==============================================================

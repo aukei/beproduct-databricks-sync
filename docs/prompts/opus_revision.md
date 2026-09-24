@@ -1,5 +1,7 @@
 # An Exemplar Prompt — BeProduct ⇄ DTC Sync
 
+> **Historical prompt artifact** — not maintained against the live system; for current behaviour read [../PIPELINE.md](../PIPELINE.md), [../SYNC_CONTRACT.md](../SYNC_CONTRACT.md) and [../TROUBLESHOOTING.md](../TROUBLESHOOTING.md).
+
 This file is a **teaching artifact**: it shows how one might have written the
 *initial prompt* to a coding agent to produce this repository. The raw,
 stream-of-consciousness brief that actually drove the work is preserved at
@@ -7,7 +9,7 @@ stream-of-consciousness brief that actually drove the work is preserved at
 version, annotated so a human can learn to prompt effectively.
 
 It is **not** project documentation. For what the system actually is, read
-`../ARCHITECTURE.md`, `../PHASE1_WORKFLOW.md`/`PHASE2`/`PHASE3`, and `../../AGENTS.md`.
+`../ARCHITECTURE.md`, `../v1/PHASE1_WORKFLOW.md`/`PHASE2`/`PHASE3` (archived v1 docs), and `../../AGENTS.md`.
 
 > **Revision note (2026-09-03).** The first version of this file (2026-06-18)
 > described a 3-phase, single-job build. The delivered system is now **three

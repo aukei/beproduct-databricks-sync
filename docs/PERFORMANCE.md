@@ -1,22 +1,33 @@
 # Pipeline Performance Analysis & Optimizations
 
 Covers the full optimisation journey of the BeProduct ⇄ DTC sync pipeline, from
-baseline profiling through to the current production job. Baseline runs were against
-`BeProduct_orchestrate_sync` (job 22324120218492); current runs are against the
-multi-task job `BeProduct_DTC_sync_dag` (job 294837488757511, defined in
-`scripts/deploy_job.py`). See `AGENTS.md` for the live-validated key facts summary.
+baseline profiling through the v1 multi-task job. Baseline runs were against
+`BeProduct_orchestrate_sync` (job 22324120218492); later runs against the v1
+multi-task job `BeProduct_DTC_sync_dag` (job 294837488757511, now PAUSED). See `AGENTS.md` for the live-validated key facts summary.
 
-> ⚠️ **Stale by omission (2026-09-01):** all timing tables below reflect the
-> job's 8-task shape as of 2026-06-19 (bp_style_sync, transform, pull_dtc,
-> request_manager, phase1_push, phase2_push, repull_dtc, phase3_images). The
-> job has since grown to 24 tasks — Phase 0 (`gate_phase0` → `phase0_pull` →
-> `phase0_upsert` → `phase0_push`, now the FIRST step), Phase 9a/9b
-> (`gate_phase9a` → `pull_lineplan_dtc` → `build_costing_chart` →
-> `gate_phase9b` → `fill_duty_rates`), and Phase 10 (`gate_phase10` →
-> `fill_bom_data` → `repull_dtc_bom`, on serverless compute) were added, and
-> Phase 8a/8b were removed. None of those newer tasks' costs are reflected
-> here yet — treat this file as a historical record of the original 8-task
-> optimization work, not a current total-wall-time reference.
+> **All measurements in this file are v1-era (classic job cluster, 2026-06/07).**
+> Since 2026-09-15 production is `BeProduct_DTC_sync_v2` (job 367710575109755):
+> **serverless**, no condition tasks, no `wait_cluster`, and **no DTC re-pulls**
+> (see [PIPELINE.md](PIPELINE.md)). What carries over and what does not:
+>
+> - Serverless setup is **1–4 s per task** (~18 s total for the DAG) against v1's
+>   ~3–7 min cluster/pool start — the one v2 timing figure that is
+>   dataset-independent.
+> - The v2 end-to-end wall of **~275 s** was measured on `TEST KTB` (8 styles,
+>   60 WIP rows) and is **not comparable** to the ~145-style `KTB` numbers below;
+>   production (~250 styles) is ~30× that dataset. Re-measure at go-live
+>   ([MIGRATION_V1_V2.md → Remaining go-live items](MIGRATION_V1_V2.md#remaining-go-live-items)).
+> - The Jobs API returns **no notebook stdout for serverless runs** — the
+>   `runs/export` cell-timing technique used throughout this file does not apply.
+>   v2 notebooks exit a JSON summary; read it with `scripts/run_v2_job.py` /
+>   `scripts/run_v2_task.py`.
+> - **Moot in v2 (v1-only):** Opt B (targeted Step 7 re-pull — there is no re-pull),
+>   the multi-task job refactor (superseded by the v2 DAG), the pre-warmed cluster
+>   idea, and baking the SDK into a cluster init script.
+> - **Still relevant:** the sample-app enrichment cost (one `app_get` per style ×
+>   app, scales linearly — the largest runtime item at production volume), the
+>   single-DataFrame write / batched `MERGE` patterns (Opt E/F — never loop Delta
+>   writes per request), and the serial `registry.refresh()` by-id reads.
 
 ---
 
@@ -77,7 +88,7 @@ agents should not treat it as a meaningful optimisation.
 
 Files changed: `dtc/notebooks/p1_pull_masters_to_delta.py`
 
-### Opt B — Targeted Step 7 re-pull (orchestrator + push notebook)
+### Opt B — Targeted Step 7 re-pull (orchestrator + push notebook) — v1-only, moot in v2 (no re-pull)
 
 `p1p7_beproduct_to_dtc_push.py` now tracks which `request_id`s received at least one
 successful INSERT and emits them in a structured exit string:
@@ -233,7 +244,7 @@ cluster / use `%pip` cache).
   BeProduct offers a cheaper delta/changed-since endpoint. Opt D (INCREMENTAL) can
   be left on (no harm) but should not be expected to save time.
 
-### Multi-task job refactor — validated 2026-06-19 (job 294837488757511)
+### Multi-task job refactor — validated 2026-06-19 (job 294837488757511) — v1-only, superseded by the v2 DAG
 
 The single-notebook orchestrator (`orchestrate_sync.py`, retired) was replaced by
 a top-level **multi-task** job `BeProduct_DTC_sync_dag` (`scripts/deploy_job.py`):
@@ -282,7 +293,11 @@ bottlenecked only by `registry.refresh` (cell 2, ~40 s of serial
 Follow-up: migrate the cron schedule from the old job (22324120218492) to the new
 multi-task job (294837488757511) and pause the old one.
 
-### Step 1 sample-app enrichment cost (added 2026-06-19)
+### Step 1 sample-app enrichment cost (added 2026-06-19) — still relevant in v2
+
+> Scales linearly with styles and runs on every 2-hourly v2 run; splitting it onto
+> its own slower schedule is a go-live item in
+> [MIGRATION_V1_V2.md](MIGRATION_V1_V2.md#remaining-go-live-items).
 
 `p1p7_beproduct_style_sync` now also reads each style's 6 sample apps (Proto / PreLine /
 SMS / Fit / PP / TOP) — **one `app_get` per (style × app)**, because app changes are
@@ -321,8 +336,9 @@ Step 3 cell 5's 66-way `reduce(unionByName)` + `overwrite` write + `out.count()`
 
 ## Remaining opportunities (not yet implemented)
 
-- **Pre-warmed cluster**: pin job to an all-purpose cluster or enable keep-alive.
-  Eliminates 350–410 s cold start with zero code change.
+- ~~**Pre-warmed cluster**~~ — v1-only, moot: v2 is serverless (1–4 s setup per
+  task). (v1 did adopt a shared instance pool on 2026-09-03; it is now idled to
+  zero and kept only because the paused v1 jobs reference it.)
 - **Skip known-empty requests in full pull**: 40 of 66 in-scope requests have
   `row_count = 0`.  A `skip_empty_since` threshold in `p1_pull_masters_to_delta`
   could skip re-fetching requests that were last confirmed empty recently.
