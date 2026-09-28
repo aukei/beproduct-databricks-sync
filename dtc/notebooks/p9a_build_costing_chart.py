@@ -211,6 +211,7 @@ from datetime import datetime, timezone
 import json
 
 from sync import duty
+from sync.lineplan import LINEPLAN_REF_COLS
 from pyspark.sql import functions as F, DataFrame
 from pyspark.sql.types import StringType, StructType, StructField, TimestampType, LongType
 
@@ -353,7 +354,12 @@ wip = wip_raw.select(
     jcol("data_json", "Gender",            "gender"),
     jcol("data_json", "Class",             "class_"),           # avoid Python keyword
     jcol("data_json", "Sub Class",         "sub_class"),
-    jcol("data_json", "Lineplan Ref #",    "lineplan_ref"),
+    # First non-blank of the accepted names (sync/lineplan.py). DTC renamed
+    # "Lineplan Ref #" -> "LinePlan ref#" on 2026-09-28; reading only the old
+    # name returned NULL on every row and emptied costing_chart on a green run.
+    F.coalesce(*[F.when(F.trim(F.get_json_object(F.col("data_json"), f"$['{_c}']")) != "",
+                        F.trim(F.get_json_object(F.col("data_json"), f"$['{_c}']")))
+                 for _c in LINEPLAN_REF_COLS]).alias("lineplan_ref"),
     # Vendor / Factory pairs (4 slots)
     jcol("data_json", "Main Vendor (Sampling)",   "vendor_main"),
     jcol("data_json", "Main Factory (Sampling)",  "factory_main"),

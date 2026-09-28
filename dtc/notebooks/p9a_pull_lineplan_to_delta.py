@@ -32,7 +32,7 @@ View selection (preferred → fallback):
   If neither exists for a request, it is skipped and logged.
 
 Key staging columns (LinePlan "Full" view, 30 fields, confirmed 2026-07-17):
-  lineplan_ref       ← "Lineplan Ref #"               (join key to WIP)
+  lineplan_ref       ← "LinePlan ref#" (was "Lineplan Ref #"; see sync/lineplan.py)  (join key to WIP)
   projected_volume   ← "PROJECTED VOLUME (season)"     (→ Costing Order Qty)
   target_ldp         ← "TARGET SAP w/ Tariff impact"   (→ Costing Target LDP)
   target_fob         ← "TARGET FOB"                    (→ Costing Target FOB)
@@ -89,6 +89,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 from connectors.dtc import DTCConnector
+from sync.lineplan import lineplan_ref
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
     StructType, StructField, StringType, LongType, TimestampType,
@@ -304,7 +305,10 @@ def _build_lp_records(ref, req_id, view_name, rows):
             "row_index":         (int(row["rowIndex"])
                                   if row.get("rowIndex") is not None else None),
             # Key Phase 9a fields (exact DTC column names in "Full" view)
-            "lineplan_ref":      row.get("Lineplan Ref #"),
+            # Read via sync.lineplan: DTC renamed this column on 2026-09-28
+            # ("Lineplan Ref #" -> "LinePlan ref#") and a plain .get() of the
+            # old name silently emptied costing_chart.
+            "lineplan_ref":      lineplan_ref(row),
             "projected_volume":  row.get("PROJECTED VOLUME (season)"),
             "target_ldp":        row.get("TARGET SAP w/ Tariff impact"),
             "target_fob":        row.get("TARGET FOB"),

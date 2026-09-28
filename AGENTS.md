@@ -217,6 +217,7 @@ fieldId, JSONPath, sync direction. Always update it first, then the code constan
 | BeProduct sample submits → DTC (Phase 7) | `SAMPLE_SUBMIT_FIELDS` + `format_sample_field` | `dtc/python/sync/samples.py` (+ `phase1.FIELD_MAPPING`, transform staging) |
 | BeProduct → DTC transform (denormalize) | `FIELD_MAPPING` + staging `select` | `beproduct/p1p7_beproduct_to_dtc_transform.py` |
 | DTC WIP costing/duty push | `duty.WIP_HTS_COL` / `duty.WIP_DUTY_COL` / `duty.WIP_TARIFF_COL` | `dtc/python/sync/duty.py` |
+| WIP ⇄ LinePlan join key (read by display name, both sheets) | `lineplan.LINEPLAN_REF_COLS` (+ `names` CTE in `dashboards/data_gaps/v_data_gaps.sql`) | `dtc/python/sync/lineplan.py` |
 
 Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
 `dtc/tests/test_phase3.py`, `dtc/tests/test_samples.py`.
@@ -365,6 +366,33 @@ this stays true by construction; verify it stays true after any change).
    `"Factory 3 - Tariff"` (no `rate` suffix; ` - ` for numbered slots).
 
 ## Verified discoveries log (append-dated; do not delete)
+
+**Data-gaps dashboard, and three live defects it surfaced on day one
+(2026-09-28):**
+- `lft.beproduct.v_data_gaps` + AI/BI dashboard "BeProduct DTC - Data gaps"
+  (`scripts/deploy_gap_dashboard.py`, SQL in `dashboards/data_gaps/`). One row
+  per gap with WHO fixes it and WHAT to do, keyed to TROUBLESHOOTING runbooks.
+  It RE-DERIVES the pipeline's gates in SQL -- a v0. Any gate change in
+  PIPELINE.md must be mirrored there until stages persist per-row reasons.
+- **Schedules are now every 15 min** (main `0 5,20,35,50 * * * ?`, duty
+  `0 12/15 * * * ?`), set on the live jobs first. `deploy_job.py` still had
+  the 2 h / 10:00+15:00 crons and a `--reset-existing` would have reverted
+  them; mirrored the same day. (SDK gotcha hit while checking: `list_runs(limit=)`
+  is a PAGE size -- the iterator keeps paging, so slice it.)
+- **DTC renamed `Lineplan Ref #` -> `LinePlan ref#` on BOTH the WIP and the
+  LinePlan sheets.** 41/45 WIP rows and 36 LinePlan rows carry the new key;
+  none carry the old. The pull and build_costing read by display name, get
+  NULL everywhere, and `costing_chart` is silently EMPTY -- no error, green
+  runs. NOT fixed yet (needs owner go-ahead). The view's
+  `LINEPLAN_COLUMN_RENAMED` check exists to catch exactly this class.
+- **phase2 rewrites BeProduct every run for 6 styles with an unchanged value.**
+  `ktb_styles.parent_vendor`/`factory` hold a DropDown DICT
+  (`{'text':'ASPGAR','value':'SUPPLIER ASPGAR','code':...}`) and the no-op
+  check compares it to the plain DTC string, so it never matches. Harmless in
+  value, but 576 needless BeProduct writes/day at 15-min cadence. NOT fixed.
+- **Phase 3 sibling-copy downloads get HTTP 403** from `dtc-api.lfuat.net`
+  (4 per run) -- a regression of the 2026-09-04 401 fix, or a changed auth
+  rule on DTC image URLs. NOT investigated.
 
 **LinePlan join re-verified after the column/naming revision -- and the
 conflict guard was crying wolf (2026-09-23):**

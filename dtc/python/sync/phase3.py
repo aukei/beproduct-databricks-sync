@@ -171,6 +171,12 @@ class ImageUploadOp:
     # Retained for logging/traceability ONLY -- never used to address the cell.
     row_index: Optional[int] = None
     source: str = "beproduct_extract"  # "beproduct_extract" | "sibling_copy" -- see compute_image_uploads
+    # sibling_copy only: this row's OWN BeProduct front_image_url, tried when
+    # the DTC-hosted sibling URL cannot be downloaded. Since 2026-09-28 DTC's
+    # Application Gateway returns 403 for EVERY GET of /api/v1/images/*, with
+    # or without x-api-key (34/34 live), so without this the sibling path
+    # fails forever and the row never gets an image.
+    fallback_url: Optional[str] = None
 
 
 @dataclass
@@ -292,6 +298,9 @@ def compute_image_uploads(
             continue
         row_index = r.get("rowIndex")
 
+        bp = bp_index.get(key)
+        bp_url = norm(bp.get("front_image_url")) if bp is not None else None
+
         style_no = norm(r.get(lf_col))
         sibling_url = sibling_image_by_style.get(style_no) if style_no else None
         if sibling_url is not None:
@@ -301,10 +310,10 @@ def compute_image_uploads(
                 image_url=sibling_url,
                 row_index=(int(row_index) if row_index is not None else None),
                 source="sibling_copy",
+                fallback_url=bp_url if is_valid_image_url(bp_url) else None,
             ))
             continue
 
-        bp = bp_index.get(key)
         if bp is None:
             continue  # DTC row with no BeProduct source row -> leave it alone
 

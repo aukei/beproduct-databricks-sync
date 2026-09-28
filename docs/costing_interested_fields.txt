@@ -43,7 +43,11 @@ Input tables (v2 "intent" mode)
 
 Join key
 --------
-  WIP  "Lineplan Ref #"  =  LinePlan  "Lineplan Ref #"
+  WIP  "LinePlan ref#"  =  LinePlan  "LinePlan ref#"
+  RENAMED 2026-09-28 in DTC on BOTH sheets (was "Lineplan Ref #"). Read via
+  sync/lineplan.py LINEPLAN_REF_COLS (new name first, old as fallback) --
+  a name missing from the sheet reads as NULL and empties costing_chart
+  silently. Add any future rename there, at the front.
   NOTE: WIP column is plain "Lineplan Ref #" (no "(GC)" suffix — the spec
   annotation "(GC)" is not the literal DTC column name).
   INNER JOIN (changed from LEFT 2026-09-01, owner decision): a WIP row with
@@ -87,7 +91,7 @@ lf_style_no            | WIP (fixed)  | lf_style_number column (= "LF Style#" in
 legacy_code            | WIP JSON     | "Legacy Code"
 style_description      | WIP JSON     | "Style Description"
 color_name             | WIP (fixed)  | color_wash column (= "Color / Wash" in DTC)
-lineplan_ref           | WIP JSON     | "Lineplan Ref #"
+lineplan_ref           | WIP JSON     | "LinePlan ref#" (was "Lineplan Ref #"; sync/lineplan.py)
 fabric_content         | WIP JSON     | "Content"  (corrected 2026-09-03 -- was mistakenly "Fabric Group".
                        |              | In intent mode: from bom_segments. Source REVISED 2026-09-09 "2nd revision": Phase 10 writes this from
                        |              | the techpack's `**MaterialContent` column (customer_teckpack_style_
@@ -179,7 +183,7 @@ docs/SYNC_CONTRACT.md (executable: wip_plan.allowed_patch_columns()) --
 
 LinePlan field names (exact DTC column names — all UPPERCASE, confirmed 2026-07-17)
 -------------------------------------------------------------------------------------
-  "Lineplan Ref #"                join key to WIP
+  "LinePlan ref#"                 join key to WIP (was "Lineplan Ref #" until 2026-09-28)
   "PROJECTED VOLUME (season)"     → order_quantity
   "TARGET SAP w/ Tariff impact"   → target_ldp     (lowercase 'i' in "impact")
   "TARGET FOB"                    → target_fob

@@ -190,6 +190,29 @@ plan6e = build_beproduct_updates(rows6e)  # no value_transforms kwarg at all
 check(plan6e.updates["J"].fields.get("country_of_origin") == "US",
       "without value_transforms, COO is just copied raw like any other field (backward compatible)")
 
+print("\n[11] DropDown values read back as dicts -- no-op must still match (2026-09-28)")
+from sync.phase2 import bp_field_value
+_dd = {"text": "ASPGAR", "value": "SUPPLIER ASPGAR", "code": "c3a99fb3"}
+check(bp_field_value(_dd) == "SUPPLIER ASPGAR", "dict -> its 'value' (what we write)")
+check(bp_field_value({"text": "X", "value": ""}) == "X", "blank 'value' falls back to 'text'")
+check(bp_field_value({"code": "u"}) is None, "dict with no value/text -> None")
+check(bp_field_value(["Wrangler"]) == "Wrangler", "one-element MultiSelect unwrapped")
+check(bp_field_value("132") == "132", "Text field unchanged")
+check(bp_field_value(None) is None, "None unchanged")
+rows11 = [{
+    "beproduct_style_id": "K", "colorway_id": "c1", "bp_style_number": "S11", "color": "black",
+    "dtc": {"Main Vendor (Sampling)": "SUPPLIER ASPGAR", "Main Factory (Sampling)": "SUPPLIER INCINT"},
+    "bp": {"Main Vendor (Sampling)": _dd,
+           "Main Factory (Sampling)": {"text": "INCINT", "value": "SUPPLIER INCINT", "code": "1"}},
+}]
+plan11 = build_beproduct_updates(rows11)
+check("K" not in plan11.updates, "unchanged DropDown values -> NO BeProduct write (was re-written every run)")
+check(plan11.noops == 2, "both fields counted as NOOP")
+rows11b = [dict(rows11[0], dtc={"Main Vendor (Sampling)": "SUPPLIER TUNAPP"})]
+plan11b = build_beproduct_updates(rows11b)
+check(plan11b.updates["K"].fields.get("parent_vendor") == "SUPPLIER TUNAPP",
+      "a genuinely changed DropDown value is still written")
+
 print("\n" + "=" * 70)
 if _failures:
     print(f"❌ {len(_failures)} FAILURE(S):")

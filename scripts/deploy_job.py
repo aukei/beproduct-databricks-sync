@@ -249,8 +249,12 @@ JOB_SCHEDULE = jobs.CronSchedule(
 # A fixed, predictable minute matters operationally: users can learn that the
 # pipeline writes at five past the odd hour, rather than being interrupted at
 # arbitrary times.
+#
+# CHANGED 2026-09-28: every 15 min at :05/:20/:35/:50 HKT. Set on the live job
+# first and mirrored here so a --reset-existing does not silently revert it.
+# A run takes ~3.5 min and max_concurrent_runs=1, so runs never overlap.
 JOB_SCHEDULE_V2 = jobs.CronSchedule(
-    quartz_cron_expression="0 5 1,3,5,7,9,11,13,15,17,19,21,23 * * ?",
+    quartz_cron_expression="0 5,20,35,50 * * * ?",
     timezone_id="Asia/Hong_Kong",
     pause_status=jobs.PauseStatus.UNPAUSED,
 )
@@ -268,8 +272,14 @@ JOB_SCHEDULE_V2 = jobs.CronSchedule(
 # `nt_orbit_duty_cache`, and build_costing's Step 4c refills `costing_chart`
 # from that cache on every rebuild with zero API calls. Values computed at
 # 10:00 are therefore picked up and pushed by the next main run (11:05).
+#
+# CHANGED 2026-09-28: every 15 min at :12/:27/:42/:57 HKT (mirrors the live
+# job), i.e. 7 min after each main run starts, and so just after it ends.
+# Cheap in steady state (~30 s): only blank markets are queried. A burst of new
+# costing lines can still run long -- max_concurrent_runs=1 skips a tick
+# rather than overlapping.
 JOB_SCHEDULE_DUTY = jobs.CronSchedule(
-    quartz_cron_expression="0 0 10,15 * * ?",
+    quartz_cron_expression="0 12/15 * * * ?",
     timezone_id="Asia/Hong_Kong",
     pause_status=jobs.PauseStatus.UNPAUSED,
 )

@@ -906,3 +906,6 @@ Response code: 201 — the assigned locators, in the order the rows were sent. R
 * LinePlan request have a revised col list. And naming convention changed. However naming should not affect current 
 costing_chart mechanism - join is still via Lineplan Ref# and this number must be unique among ALL lineplan requests.
  
+# 24/9/26 checking
+1. the Duty_compute job now runs every hour at 00.
+2. 

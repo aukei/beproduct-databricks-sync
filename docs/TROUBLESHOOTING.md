@@ -29,8 +29,8 @@ rationale. You should not need it to fix a production issue.
 
 | Job | Id | Schedule (HKT) | Does |
 |---|---|---|---|
-| `BeProduct_DTC_sync_v2` | 367710575109755 | every 2 h at **:05 on odd hours** (01:05, 03:05 … 23:05) | everything except NT Orbit |
-| `BeProduct_DTC_sync_duty_compute` | 1026599988408090 | **10:00** and **15:00** | NT Orbit lookups → `nt_orbit_duty_cache` + `costing_chart`. Never touches DTC |
+| `BeProduct_DTC_sync_v2` | 367710575109755 | every **15 min** at :05 / :20 / :35 / :50 (~3.5 min per run) | everything except NT Orbit |
+| `BeProduct_DTC_sync_duty_compute` | 1026599988408090 | every **15 min** at :12 / :27 / :42 / :57 (~30 s in steady state) | NT Orbit lookups → `nt_orbit_duty_cache` + `costing_chart`. Never touches DTC |
 
 `BeProduct_DTC_sync_dag` (v1) and `BeProduct_DTC_sync_images` are **paused**.
 If either is running, someone un-paused it. Pause it again.
@@ -50,9 +50,9 @@ flowchart LR
 
 | Change made | Earliest it shows up |
 |---|---|
-| Style edited in BeProduct | the next main run (≤ 2 h) |
+| Style edited in BeProduct | the next main run (≤ 15 min, plus ~4 min run time) |
 | Value typed into DTC (vendor, factory, Lineplan Ref #, Lot# …) | the next main run. `pull_master_dtc` takes its snapshot at the start of the run, so a save made mid-run waits for the run after |
-| A new costing line that needs an NT Orbit lookup | the next `duty_compute` (10:00 / 15:00), then the next main run (11:05 / 17:05) |
+| A new costing line that needs an NT Orbit lookup | the next `duty_compute` (:12 / :27 / :42 / :57), then the next main run. Allow ~30 min end to end |
 | Techpack / BOM extraction updated | the next main run, provided the Lakebase row is already there |
 
 ### 0.3 Check these first — they explain most reports
@@ -239,7 +239,7 @@ Material rows come from the techpack BOM (PIPELINE.md → Stage 20b and Stage 40
 **1 + the number of "Fabric" segments**.
 
 ```sql
-SELECT bp_style_number, style_season, main_fabric_count, fabric_count, parse_error
+SELECT bp_style_number, main_fabric_count, fabric_count, error, extracted_at
 FROM lft.beproduct.bom_segments WHERE bp_style_number = 'KTB-00029';
 ```
 
@@ -247,7 +247,7 @@ FROM lft.beproduct.bom_segments WHERE bp_style_number = 'KTB-00029';
 |---|---|---|
 | No row | The techpack BOM is not in Lakebase for this style. The join is `style_no` + `"<season> - <year>"` | The extraction has not landed yet. Wait, or ask the techpack team |
 | `main_fabric_count = 0` | **No "Main Fabric" segment, so zero actions for the whole style** (material gate 2). DTC keeps `Fabric Group = "NO TPM BOM"` | Fix the BOM so exactly one segment has `**MaterialCategory = Main Fabric` |
-| `parse_error` set | Malformed payload | Fix the techpack data |
+| `error` set | Malformed payload | Fix the techpack data |
 | Counts look right, rows still missing | Check the `wip_push` log for this style: `degraded` or `violations` in its exit value | See material gates 3–5. A row carrying some **other** real article # is deliberately left alone, so a changed article can look like a "missing" new row |
 
 `pull_bom` disabled (`run_bom=false`) freezes the BOM at the last value it
@@ -331,7 +331,7 @@ SELECT request_reference, bp_style_number, color_wash,
   get_json_object(data_json, "$['Fabric Group']")           AS fabric_group,
   get_json_object(data_json, "$['Mill Fabric Article #']")  AS article,
   get_json_object(data_json, "$['Content']")                AS content,
-  get_json_object(data_json, "$['Lineplan Ref #']")         AS lineplan_ref,
+  get_json_object(data_json, "$['LinePlan ref#']")          AS lineplan_ref,   -- renamed 2026-09-28, was 'Lineplan Ref #' 
   get_json_object(data_json, "$['Main Vendor (Sampling)']") AS main_vendor,
   get_json_object(data_json, "$['Vendor 1']")               AS vendor_1
 FROM lft.beproduct.dtc_wip_ktb WHERE bp_style_number = 'KTB-00030';
@@ -346,7 +346,7 @@ Walk the gates **in order**. The first one that fails is your answer:
 | 2 | BP Style# non-blank | `dropped_no_bp_style_no` | Row typed by hand in DTC |
 | 3 | `Content` non-blank and not `"Main Fabric"` | `dropped_blank_content` | `**MaterialContent` blank in the techpack. Fill it at the source, or type it in DTC (Content is write-once, so a hand value is kept) |
 | 4 | `Fabric Group` is exactly `Main Fabric` | `dropped_not_main_fabric` | **By design.** "Fabric" segment rows never get a costing line. Only the Main Fabric row does |
-| 5 | `Lineplan Ref #` non-blank | `dropped_no_lineplan_ref` | Users must enter it **on the Main Fabric row**. It is DTC-owned, and the pipeline never fills it |
+| 5 | `LinePlan ref#` non-blank | `dropped_no_lineplan_ref` | Users must enter it **on the Main Fabric row**. It is DTC-owned, and the pipeline never fills it. **If it drops EVERY row**, check the column was not renamed in DTC again: the names the pipeline accepts are in `sync/lineplan.py`, and the dashboard flags `LINEPLAN_COLUMN_RENAMED` |
 | 6 | Ref matches a LinePlan row | `joined_to_lineplan` too low | Typo, or the LinePlan request is not active. Check `dtc_lineplan_ktb` |
 | 7 | At least one vendor slot filled | `dropped_no_vendor_slot` | Enter `Main Vendor (Sampling)` or `Vendor 1–3` on the Main Fabric row |
 
@@ -382,7 +382,7 @@ FROM lft.beproduct.costing_chart WHERE bp_style_no = 'KTB-00029';
 | Check | Cause | Fix |
 |---|---|---|
 | `production_country` blank | **No lookup is ever made for a blank origin, and no error is logged.** Either `Factory` / `Factory N` is blank on the row, or the country lookup was not materialized (2.2, the view-at-save rule) | Enter the factory, and make sure the country column is on the Full view. Country follows the **factory**, not the vendor |
-| Line is new since the last `duty_compute` | Lookups only happen at 10:00 / 15:00 | Wait, or run `BeProduct_DTC_sync_duty_compute` now, then the main job |
+| Line is new since the last `duty_compute` | Lookups only happen in `duty_compute`, every 15 min | Wait, or run `BeProduct_DTC_sync_duty_compute` now, then the main job |
 | `duty_compute` failed or reported `failed: N` | NT Orbit error or timeout (calls take ~30–60 s each) | Re-run. Failed markets are retried next time |
 | `duty_compute` fails with `NT Orbit /api/v1/health check failed`, or an Entra `AADSTS…` error | The refresh token is dead: the job has not run for ~90 days, or the signed-in account lost access | See 4.3 |
 | Only `tariff_rate` blank | Tariff only comes from the **US** call | Same as the rows above. US is re-queried whenever tariff is blank |
@@ -398,7 +398,7 @@ need a call".
 |---|---|---|
 | `wip_push` exit value: `run_duty_push`, or `duty_rows_matched` low | Duty push disabled, or the costing line did not find its WIP row | The join is **(BP Style#, colour, Mill Fabric Article #)**. An article # changed in DTC after costing breaks it until the next rebuild |
 | `columns_not_seen_in_view` lists the duty column | Column missing or renamed in the DTC view. The value is dropped by the allow-list | Check the exact names in SYNC_CONTRACT.md → "Costing/duty → DTC". They are **not symmetric**: `Factory 1 - HTS code`, `Factory 1 - Tariff`, `Main Factory Tariff` |
-| Filled by `duty_compute` **after** the main run | The value reaches DTC on the next main run (11:05 / 17:05) | Wait, or re-run just the push: `w.jobs.run_now(job_id=367710575109755, only=["wip_push"])` |
+| Filled by `duty_compute` **after** the main run | The value reaches DTC on the next main run (≤ 15 min) | Wait, or re-run just the push: `w.jobs.run_now(job_id=367710575109755, only=["wip_push"])` |
 
 ### 4.3 Re-authorizing NT Orbit
 
@@ -486,6 +486,7 @@ Things that look like "outdated" but are not:
 
 | Need | Tool |
 |---|---|
+| **Start here:** every current gap, who fixes it, what to do | Dashboard **BeProduct DTC - Data gaps** (view `lft.beproduct.v_data_gaps`). Deploy/update: `python scripts/deploy_gap_dashboard.py`. Each row names its runbook |
 | Run the whole job without writing | `python scripts/run_v2_job.py --job-id 367710575109755 dry_run=true` |
 | Run one notebook one-off | `python scripts/run_v2_task.py <notebook> key=value …` |
 | Re-run selected tasks of the job | `w.jobs.run_now(job_id=…, only=["wip_push"])` |

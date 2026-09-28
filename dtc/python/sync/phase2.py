@@ -227,6 +227,31 @@ def resolve_coo_country_name(
     return code_to_name.get(code.upper()) or code_to_name.get(code)
 
 
+def bp_field_value(value: Any) -> Any:
+    """
+    The comparable scalar of a value READ from BeProduct's `attributes_get`.
+
+    A DropDown field reads back as a dict, e.g. ``parent_vendor`` ->
+    ``{"text": "ASPGAR", "value": "SUPPLIER ASPGAR", "code": "<uuid>"}``, while
+    what we WRITE (and what DTC holds) is the plain ``"value"`` string. Before
+    2026-09-28 the dict went straight into `norm()`, became its ``str()``
+    repr, and never equalled the DTC value -- so every run re-wrote an
+    unchanged `parent_vendor` / `factory` (6 styles x 96 runs/day, live).
+
+    - dict  -> its "value" (else "text"); a dict with neither -> None
+    - list  -> one-element list (MultiSelect) unwrapped; longer lists kept
+    - anything else unchanged (Text fields read back as plain strings)
+    """
+    if isinstance(value, dict):
+        for k in ("value", "text"):
+            if value.get(k) not in (None, ""):
+                return value[k]
+        return None
+    if isinstance(value, list) and len(value) == 1:
+        return bp_field_value(value[0])
+    return value
+
+
 # ---------------------------------------------------------------------------
 # Core computation
 # ---------------------------------------------------------------------------
@@ -292,7 +317,7 @@ def build_beproduct_updates(
             new_val = norm(raw_val)
             if new_val is None and not push_blanks:
                 continue
-            cur_val = norm(bp.get(col)) if has_bp else None
+            cur_val = norm(bp_field_value(bp.get(col))) if has_bp else None
             if has_bp and cur_val == new_val:
                 plan.noops += 1
                 continue
@@ -312,7 +337,7 @@ def build_beproduct_updates(
             new_val = norm(dtc.get(col))
             if new_val is None and not push_blanks:
                 continue
-            cur_val = norm(bp.get(col)) if has_bp else None
+            cur_val = norm(bp_field_value(bp.get(col))) if has_bp else None
             if has_bp and cur_val == new_val:
                 plan.noops += 1
                 continue

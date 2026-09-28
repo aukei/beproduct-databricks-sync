@@ -161,6 +161,12 @@ check(op.image_url == "https://dtc-api.example.net/api/v1/images/existing.png",
       "copied the ALREADY-IMAGED sibling's own DTC-hosted URL, NOT bp_rows' front_image_url")
 check(op.source == "sibling_copy", "ImageUploadOp.source records the copy path")
 
+check(op.fallback_url == "https://cdn/s1-red.jpg",
+      "sibling copy carries the row's OWN BeProduct image as fallback (DTC 403s image GETs, 2026-09-28)")
+plan_nofb = compute_image_uploads(dtc_rows, [bp_rows[0]])
+check(len(plan_nofb.uploads) == 1 and plan_nofb.uploads[0].fallback_url is None,
+      "no BeProduct row for the colour -> sibling copy still planned, fallback None")
+
 print("  [15b] no sibling has an image yet -> falls back to full BeProduct extraction (unchanged path)")
 dtc_rows = [
     {"BP Style#": "S2", "Color / Wash": "Blue", "rowId": "r3", "rowIndex": 3},  # blank

@@ -313,20 +313,34 @@ for name, m in mapping.items():
             cap_reached = True
             break
 
-        # Download from BeProduct CDN.
+        # Download: the sibling's DTC-hosted copy, else the BeProduct CDN.
+        # A failed sibling copy falls back to this row's own BeProduct image:
+        # since 2026-09-28 DTC's gateway 403s every GET of /api/v1/images/*.
+        src_url = op.image_url
         try:
-            raw_bytes, ctype = download_image(op.image_url, http_timeout)
+            raw_bytes, ctype = download_image(src_url, http_timeout)
         except Exception as e:
-            log(log_rows, name, request_id, "IMAGE_UPLOAD", op.match_key, "error",
-                "download_failed", str(e)[:300], {"url": op.image_url})
-            totals["download_failed"] += 1
-            continue
+            if not op.fallback_url:
+                log(log_rows, name, request_id, "IMAGE_UPLOAD", op.match_key, "error",
+                    "download_failed", str(e)[:300], {"url": src_url})
+                totals["download_failed"] += 1
+                continue
+            print(f"  ↪ sibling copy failed ({str(e)[:80]}); using BeProduct image")
+            src_url = op.fallback_url
+            try:
+                raw_bytes, ctype = download_image(src_url, http_timeout)
+            except Exception as e2:
+                log(log_rows, name, request_id, "IMAGE_UPLOAD", op.match_key, "error",
+                    "download_failed", str(e2)[:300],
+                    {"url": src_url, "sibling_url": op.image_url, "sibling_error": str(e)[:200]})
+                totals["download_failed"] += 1
+                continue
 
         # Classify + transcode (webp/etc -> png); skip vector/unknown types.
-        img_bytes, out_ctype, fname, note = prepare_for_dtc(raw_bytes, ctype, op.image_url)
+        img_bytes, out_ctype, fname, note = prepare_for_dtc(raw_bytes, ctype, src_url)
         if img_bytes is None:
             log(log_rows, name, request_id, "IMAGE_UPLOAD", op.match_key, "skipped",
-                "unsupported_type", note, {"url": op.image_url, "content_type": ctype})
+                "unsupported_type", note, {"url": src_url, "content_type": ctype})
             totals["unsupported_type"] += 1
             continue
         converted = note.startswith("transcode")
@@ -351,14 +365,14 @@ for name, m in mapping.items():
                 f"rowId={op.row_id} rowIndex={op.row_index} "
                 f"bytes={len(img_bytes)} type={out_ctype}"
                 + (f" ({note})" if converted else ""),
-                {"url": op.image_url, "rowId": op.row_id,
+                {"url": src_url, "source": op.source if src_url == op.image_url else "sibling_fallback_beproduct", "rowId": op.row_id,
                  "rowIndex": op.row_index})
             uploaded_count += 1
             totals["uploads_ok"] += 1
         except Exception as e:
             log(log_rows, name, request_id, "IMAGE_UPLOAD", op.match_key, "error",
                 "upload_failed", str(e)[:300],
-                {"url": op.image_url, "rowId": op.row_id,
+                {"url": src_url, "source": op.source if src_url == op.image_url else "sibling_fallback_beproduct", "rowId": op.row_id,
                  "rowIndex": op.row_index})
             totals["uploads_failed"] += 1
 
