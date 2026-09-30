@@ -283,6 +283,8 @@ def build_beproduct_updates(
     """
     value_transforms = value_transforms or {}
     plan = Phase2Plan()
+    # (style_id, fieldId) -> {"col", "values" (row order), "cur", "has_bp", "key"}
+    header_candidates: Dict[Tuple[str, str], Dict[str, Any]] = {}
 
     for r in rows:
         style_id = r.get("beproduct_style_id")
@@ -309,6 +311,10 @@ def build_beproduct_updates(
                     key))
 
         # --- header fields (style-level) ---
+        # Only COLLECTED here; decided per style after the loop. A per-row
+        # decision cannot be right: rows equal to BeProduct used to be skipped
+        # BEFORE the conflict check, so the first DIFFERING row won and the
+        # value flip-flopped every run (see _decide_header_fields).
         for col, fid in REVERSE_HEADER_FIELDS.items():
             raw_val = dtc.get(col)
             transform = value_transforms.get(col)
@@ -317,20 +323,13 @@ def build_beproduct_updates(
             new_val = norm(raw_val)
             if new_val is None and not push_blanks:
                 continue
-            cur_val = norm(bp_field_value(bp.get(col))) if has_bp else None
-            if has_bp and cur_val == new_val:
-                plan.noops += 1
-                continue
-            payload_val = "" if new_val is None else new_val
-            if fid in su.fields and su.fields[fid] != payload_val:
-                # different colorway rows of the same style disagree on a
-                # style-level field -> keep first, flag conflict.
-                plan.exceptions.append(Phase2Exception(
-                    "header_value_conflict", style_id,
-                    f"{col!r}: '{su.fields[fid]}' vs '{payload_val}' within one style",
-                    key))
-                continue
-            su.fields[fid] = payload_val
+            slot = header_candidates.setdefault((style_id, fid), {
+                "col": col, "values": [], "cur": None, "has_bp": False, "key": key})
+            slot["values"].append("" if new_val is None else new_val)
+            if has_bp and not slot["has_bp"]:
+                slot["has_bp"] = True
+                cur = norm(bp_field_value(bp.get(col)))
+                slot["cur"] = "" if cur is None else cur
 
         # --- colorway fields (Lot#) ---
         for col, fid in REVERSE_COLORWAY_FIELDS.items():
@@ -350,10 +349,46 @@ def build_beproduct_updates(
             payload_val = "" if new_val is None else new_val
             su.colorways.setdefault(cw_id, {})[fid] = payload_val
 
-        if not su.is_empty():
-            plan.updates[style_id] = su
+        plan.updates[style_id] = su
 
+    _decide_header_fields(plan, header_candidates)
+    plan.updates = {k: v for k, v in plan.updates.items() if not v.is_empty()}
     return plan
+
+
+def _decide_header_fields(plan: "Phase2Plan",
+                          header_candidates: Dict[Tuple[str, str], Dict[str, Any]]) -> None:
+    """
+    One decision per (style, style-level field), over ALL the style's DTC rows.
+
+    - Every row agrees: write it unless BeProduct already holds it (NOOP).
+    - Rows disagree: flag `header_value_conflict` (one exception per extra
+      value, so the log names each pair). Then, if BeProduct's current value
+      is one of the candidates, KEEP it and write nothing. Otherwise write the
+      first value in row order (the long-standing "first wins").
+
+    Keeping the current value is what makes a conflict STABLE. Before
+    2026-09-28 rows equal to BeProduct were skipped before the conflict check,
+    so the first *differing* row always won. Every run then flipped the field
+    to another candidate (live: KTB-00024 parent_vendor ASPGAR -> TUNAPP).
+    """
+    for (style_id, fid), c in header_candidates.items():
+        distinct: List[str] = []
+        for v in c["values"]:
+            if v not in distinct:
+                distinct.append(v)
+        if c["has_bp"]:
+            plan.noops += sum(1 for v in c["values"] if v == c["cur"])
+        for other in distinct[1:]:
+            plan.exceptions.append(Phase2Exception(
+                "header_value_conflict", style_id,
+                f"{c['col']!r}: '{distinct[0]}' vs '{other}' within one style",
+                c["key"]))
+        if c["has_bp"] and c["cur"] in distinct:
+            continue  # agrees with a candidate -> nothing to write (stable)
+        su = plan.updates.get(style_id) or StyleUpdate(style_id=style_id)
+        su.fields[fid] = distinct[0]
+        plan.updates[style_id] = su
 
 
 def to_sdk_calls(plan: Phase2Plan) -> List[Dict[str, Any]]:

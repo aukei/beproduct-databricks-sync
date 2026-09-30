@@ -105,7 +105,7 @@ for _p in (_MODULE_PATH, _MODULE_PATH.replace("/DTC/", "/dtc/")):
 import json
 from datetime import datetime, timezone
 
-from pyspark.sql import functions as F
+from pyspark.sql import functions as F, Window
 from pyspark.sql.types import (
     StructType, StructField, StringType, IntegerType, TimestampType,
 )
@@ -162,12 +162,22 @@ if (dbutils.widgets.get("run_bom") or "true").strip().lower() != "true":
 # ── Step 1: styles ⋈ BOM 'latest' ⋈ BOM 'log' (INNER throughout) ────────────
 print("\nStep 1: joining ktb_styles <-> BOM …")
 
+# The season is matched on a NORMALISED key, not the literal string. Lakebase
+# changed its `style_season` from "Spring - 2028" to "Spring 2028" (found
+# 2026-09-28), and the literal `season || ' - ' || year` join then matched
+# 0 of 10 styles with no error -- bom_segments came out EMPTY and BOM
+# enrichment silently stopped. Lowercase + alphanumerics only makes
+# "Spring - 2028", "Spring 2028" and "SPRING-2028" all "spring2028".
+def _season_key(c):
+    return F.regexp_replace(F.lower(c), "[^a-z0-9]", "")
+
 styles = (spark.table(styles_table)
           .where(F.col("folder_name") == folder_name)
           .select(
               F.col("bp_style_number"),
               F.concat(F.col("season"), F.lit(" - "), F.col("year")).alias("style_season"),
           )
+          .withColumn("season_key", _season_key(F.col("style_season")))
           .where(F.col("bp_style_number").isNotNull()
                  & F.col("season").isNotNull() & F.col("year").isNotNull()))
 n_styles = styles.count()
@@ -182,7 +192,13 @@ bom_latest = (spark.table(bom_source)
               .where(F.col("latest_techpack_style_log_id").isNotNull())
               .select("style_no", "customer_department", "style_season",
                       "latest_techpack_style_log_id")
-              .dropDuplicates(["style_no", "customer_department", "style_season"]))
+              .withColumn("season_key", _season_key(F.col("style_season")))
+              # Two spellings of one season now share a key -- keep the newest
+              # log row, never both (both would duplicate every BOM segment).
+              .withColumn("_rk", F.row_number().over(
+                  Window.partitionBy("style_no", "customer_department", "season_key")
+                        .orderBy(F.col("latest_techpack_style_log_id").desc())))
+              .where(F.col("_rk") == 1).drop("_rk"))
 n_latest = bom_latest.count()
 print(f"  BOM 'latest' rows for {bom_customer_name!r}            : {n_latest}")
 
@@ -197,12 +213,12 @@ latest_with_fields = (bom_latest.join(
     on=bom_latest.latest_techpack_style_log_id == bom_log.teckpack_style_log_id,
     how="inner",
 ).select(bom_latest.style_no, bom_latest.customer_department,
-         bom_latest.style_season, bom_log.custom_fields))
+         bom_latest.style_season, bom_latest.season_key, bom_log.custom_fields))
 
 joined = (styles.join(
     latest_with_fields,
     on=(styles.bp_style_number == latest_with_fields.style_no)
-       & (styles.style_season == latest_with_fields.style_season),
+       & (styles.season_key == latest_with_fields.season_key),
     how="inner",
 ).select(styles.bp_style_number, latest_with_fields.customer_department,
          latest_with_fields.style_season, latest_with_fields.custom_fields))

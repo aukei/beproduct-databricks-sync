@@ -3,6 +3,12 @@ requests>=2.31.0
 pandas>=2.0.0
 python-dotenv>=1.0.0
 
+# Phase 3 images: Pillow transcodes webp/gif/bmp/tiff; pypdfium2 (Apache-2.0/BSD)
+# rasterises PDF-compatible Adobe Illustrator .ai / .pdf front images to PNG.
+# On Databricks the Phase 3 notebook pip-installs both if missing.
+Pillow>=10.0.0
+pypdfium2>=4.0.0
+
 # Databricks
 databricks-sql-connector>=3.0.0
 databricks-cli>=0.18.0

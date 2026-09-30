@@ -131,7 +131,61 @@ for ct in ["image/webp", "image/gif", "image/bmp", "image/tiff"]:
 
 print("\n[13] classify_image_type() - svg/unknown skipped")
 check(classify_image_type("image/svg+xml", "https://cdn/x.svg").action == "skip", "svg -> skip")
-check(classify_image_type("application/pdf", "https://cdn/x.pdf").action == "skip", "pdf -> skip")
+# CHANGED 2026-09-30: PDF-backed files are now RASTERISED, not skipped (see [13b]).
+# Previously asserted "pdf -> skip"; kept here in its new form so the rule change stays visible.
+check(classify_image_type("application/pdf", "https://cdn/x.pdf").action == "rasterize",
+      "pdf -> rasterize (was skip before 2026-09-30)")
+check(classify_image_type("text/plain", "https://cdn/readme.txt").action == "skip", "unknown -> skip")
+
+print("\n[13b] classify_image_type() - Adobe Illustrator .ai (2026-09-30)")
+PDF_HEAD = b"%PDF-1.6\r%\xe2\xe3\xcf\xd3\r\n1 0 obj"      # KTB-00033's real header
+PS_HEAD = b"%!PS-Adobe-3.0\n%%Creator: Adobe Illustrator"
+AI = "https://us-cdn.beproduct.com/storage/x/y/1/hbpants.ai?sig=abc"
+e = classify_image_type("application/octet-stream", AI, head=PDF_HEAD)
+check(e.action == "rasterize" and e.content_type == "image/png",
+      "octet-stream + .ai + %PDF header -> rasterize to png (the live KTB-00033 case)")
+e = classify_image_type("application/octet-stream", AI, head=PS_HEAD)
+check(e.action == "skip" and e.reason.startswith("unsupported_postscript_ai"),
+      "PostScript-only .ai -> skip, reason names it (needs Ghostscript)")
+e = classify_image_type("application/octet-stream", AI, head=b"\x89PNG....")
+check(e.action == "skip", ".ai whose bytes are not a PDF -> skip")
+check(classify_image_type("application/octet-stream", AI).action == "rasterize",
+      "no head supplied -> optimistic rasterize (renderer decides)")
+check(classify_image_type("application/illustrator", None, head=PDF_HEAD).action == "rasterize",
+      "Illustrator content-type -> rasterize")
+check(classify_image_type("application/octet-stream", "https://cdn/noext", head=PDF_HEAD).action == "rasterize",
+      "no useful type or extension, but %PDF header -> rasterize")
+check(classify_image_type("image/png", AI, head=PDF_HEAD).action == "upload",
+      "a real image Content-Type still wins over the extension")
+
+print("\n[13c] render_pdf_first_page_png() - rasterise page 1 (2026-09-30)")
+try:
+    import pypdfium2  # noqa: F401
+    _have_pdfium = True
+except ImportError:
+    _have_pdfium = False
+    print("  (pypdfium2 not installed -- renderer checks SKIPPED; pip install pypdfium2 to run them)")
+if _have_pdfium:
+    import io as _io
+    from PIL import Image as _Image
+    from sync.phase3 import render_pdf_first_page_png, RASTER_MAX_PX
+    _buf = _io.BytesIO()
+    _p1 = _Image.new("RGB", (600, 300), (200, 20, 20))    # red landscape page
+    _p2 = _Image.new("RGB", (300, 600), (20, 20, 200))    # blue page 2 (must NOT be used)
+    _p1.save(_buf, format="PDF", save_all=True, append_images=[_p2])
+    png, note = render_pdf_first_page_png(_buf.getvalue())
+    out = _Image.open(_io.BytesIO(png))
+    check(out.format == "PNG", "output is a real PNG")
+    check(max(out.size) == RASTER_MAX_PX and out.size[0] > out.size[1],
+          f"page 1 scaled to {RASTER_MAX_PX}px on its long side, orientation kept ({out.size})")
+    r, g, b = out.convert("RGB").getpixel((out.size[0] // 2, out.size[1] // 2))
+    check(r > 150 and b < 80, "rendered PAGE 1 (red), not page 2 (blue)")
+    check("page 1 of 2" in note, f"note records the page count: {note!r}")
+    try:
+        render_pdf_first_page_png(b"not a pdf at all")
+        check(False, "garbage input raises")
+    except ValueError as e:
+        check(str(e).startswith("pdf_open_failed"), "garbage input -> ValueError(pdf_open_failed...)")
 
 print("\n[14] classify_image_type() - falls back to URL extension when CT generic")
 e = classify_image_type("application/octet-stream", "https://cdn/pic.webp?sig=abc")

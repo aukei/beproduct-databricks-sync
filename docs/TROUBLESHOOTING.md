@@ -239,7 +239,7 @@ Material rows come from the techpack BOM (PIPELINE.md → Stage 20b and Stage 40
 **1 + the number of "Fabric" segments**.
 
 ```sql
-SELECT bp_style_number, main_fabric_count, fabric_count, error, extracted_at
+SELECT bp_style_number, style_season, main_fabric_count, fabric_count, parse_error
 FROM lft.beproduct.bom_segments WHERE bp_style_number = 'KTB-00029';
 ```
 
@@ -247,7 +247,7 @@ FROM lft.beproduct.bom_segments WHERE bp_style_number = 'KTB-00029';
 |---|---|---|
 | No row | The techpack BOM is not in Lakebase for this style. The join is `style_no` + `"<season> - <year>"` | The extraction has not landed yet. Wait, or ask the techpack team |
 | `main_fabric_count = 0` | **No "Main Fabric" segment, so zero actions for the whole style** (material gate 2). DTC keeps `Fabric Group = "NO TPM BOM"` | Fix the BOM so exactly one segment has `**MaterialCategory = Main Fabric` |
-| `error` set | Malformed payload | Fix the techpack data |
+| `parse_error` set | Malformed payload | Fix the techpack data |
 | Counts look right, rows still missing | Check the `wip_push` log for this style: `degraded` or `violations` in its exit value | See material gates 3–5. A row carrying some **other** real article # is deliberately left alone, so a changed article can look like a "missing" new row |
 
 `pull_bom` disabled (`run_bom=false`) freezes the BOM at the last value it
@@ -475,7 +475,7 @@ Things that look like "outdated" but are not:
 | `401 Unauthorized` (DTC) | The `dtc_api_key_<env>` secret is missing or expired | Replace the secret |
 | `401` / `unauthorized_client` (BeProduct) | The BeProduct refresh token expired | Update the `refresh_token` secret |
 | `NO_RESOLVED_REQUESTS` (wip_push exit value) | No staging request resolved to an active, in-scope DTC request | Runbook 1.2 |
-| DTC `400 Duplicate rowId found` | Two sheetData objects share a rowId in one call | A regression in the duty merge (PIPELINE.md → Stage 40, duty gate 4) |
+| DTC `400 Duplicate rowId found` | Two sheetData objects share a rowId in one call. Either DTC's own sheet GET returned that rowId twice (seen 2026-09-29 on a LinePlan sheet), or a regression in the duty merge | **Check first**: does a live `GET /v1/sheets/{s}/views/{v}` list the rowId twice? If so, report it to DTC; we deliberately do not merge on our side. Otherwise it is the duty merge (PIPELINE.md → Stage 40, duty gate 4) |
 | DTC `400 … is an image field` / `… is a formula field` | An INSERT copied a non-writable column | A regression in `bom.build_insert_row_payload` (Stage 40, material gate 7) |
 | Image upload `Row cannot be found by rowid` | The row was deleted between the read and the upload | The next run retries |
 | A BeProduct field went blank after a push | BeProduct silently blanks a DropDown/MultiSelect value that is not in that field's Master Data, or a MultiSelect sent as a bare string | Check the value against `lft.beproduct.beproduct_master_<field>` (refresh with `p5utl_beproduct_master_data_sync` `PULL_ONLY`); fix the value in DTC |

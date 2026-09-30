@@ -367,6 +367,48 @@ this stays true by construction; verify it stays true after any change).
 
 ## Verified discoveries log (append-dated; do not delete)
 
+**Phase 3 rasterises PDF-compatible Illustrator `.ai` front images
+(2026-09-30, DEPLOYED to the v2 root 06:53 UTC):**
+- KTB-00033's BeProduct front image is `hbpants.ai`, served as
+  `application/octet-stream`. DTC stores only jpg/png, so it was skipped
+  `unsupported_image_type`. The file is `%PDF-1.6` with Illustrator's
+  `AIPrivateData`: Illustrator's default "Create PDF Compatible File" makes an
+  `.ai` a real PDF, so page 1 renders with any PDF engine.
+- `phase3.classify_image_type(..., head=first_bytes)` gains a `rasterize`
+  action for `.ai`/`.pdf` or a PDF content type. The FIRST BYTES decide:
+  `%PDF` -> rasterize; `%!PS` (PostScript-only `.ai`, needs Ghostscript) ->
+  skip `unsupported_postscript_ai`; anything else -> skip. A bare `%PDF` header
+  with no useful type/extension also rasterises. A real image Content-Type
+  still wins. Test `[13]` changed in place ("pdf -> skip" is now "rasterize").
+- `phase3.render_pdf_first_page_png()` uses **pypdfium2** (Google PDFium,
+  Apache-2.0/BSD; pip wheels bundle the binary, so no system install).
+  Chosen over PyMuPDF (AGPL, or paid) and pdf2image/Ghostscript/ImageMagick
+  (need system binaries, GPL/AGPL). Page 1 only; long side
+  `RASTER_MAX_PX`=2000. Live file: 1546x2000 PNG, 272 KB, 0.12 s, artwork
+  correct.
+- The notebook pip-installs pypdfium2 if missing, like Pillow. If that fails,
+  PDF rows are skipped `pdf_renderer_unavailable` and nothing else is
+  affected.
+- **Open**: a multi-artboard `.ai` renders artboard 1 only. KTB-00033 has 2,
+  and page 1 is the right image. The note in the log records the page count.
+
+**DTC's sheet GET can return the SAME rowId twice (2026-09-29, open with DTC):**
+- `FW28 LINEPLAN` (sheet `6a8ebf0b52a227d715e13cf2`, view
+  `69f0788555010bb745140ac4`): `GET /v1/sheets/{s}/views/{v}` returns rowId
+  `6a550f24-edc8-4c01-90b9-6213cd041c7f` TWICE in `sheetData`. The first entry
+  holds only rowId/rowIndex, the second the full row. The DTC UI shows one
+  row. First seen after an edit at 2026-09-29 09:50:03 UTC (request
+  `updatedDate`), while the sheet went from 396 rows to 1. Still present
+  2026-09-30 02:04 UTC, so DTC STORES it; it is not transient.
+- The pull stores `sheetData` verbatim, so `dtc_lineplan_ktb` holds 2 lines
+  for that row. Harmless there: the stub has no `LinePlan ref#`, so the
+  costing join drops it. No other duplicate rowIds in any LinePlan/WIP table.
+- **Owner decision: do NOT merge duplicate rowIds client-side.** DTC is to
+  find the root cause. Consequence to watch: if this ever hits a WIP sheet,
+  `wip_push` can put one rowId twice in a PATCH and DTC rejects it with
+  `400 Duplicate rowId found`. Check the live `sheetData` for a duplicated
+  rowId FIRST, before suspecting the duty/material merge.
+
 **Data-gaps dashboard, and three live defects it surfaced on day one
 (2026-09-28):**
 - `lft.beproduct.v_data_gaps` + AI/BI dashboard "BeProduct DTC - Data gaps"
@@ -380,19 +422,63 @@ this stays true by construction; verify it stays true after any change).
   them; mirrored the same day. (SDK gotcha hit while checking: `list_runs(limit=)`
   is a PAGE size -- the iterator keeps paging, so slice it.)
 - **DTC renamed `Lineplan Ref #` -> `LinePlan ref#` on BOTH the WIP and the
-  LinePlan sheets.** 41/45 WIP rows and 36 LinePlan rows carry the new key;
-  none carry the old. The pull and build_costing read by display name, get
-  NULL everywhere, and `costing_chart` is silently EMPTY -- no error, green
-  runs. NOT fixed yet (needs owner go-ahead). The view's
-  `LINEPLAN_COLUMN_RENAMED` check exists to catch exactly this class.
-- **phase2 rewrites BeProduct every run for 6 styles with an unchanged value.**
-  `ktb_styles.parent_vendor`/`factory` hold a DropDown DICT
-  (`{'text':'ASPGAR','value':'SUPPLIER ASPGAR','code':...}`) and the no-op
-  check compares it to the plain DTC string, so it never matches. Harmless in
-  value, but 576 needless BeProduct writes/day at 15-min cadence. NOT fixed.
-- **Phase 3 sibling-copy downloads get HTTP 403** from `dtc-api.lfuat.net`
-  (4 per run) -- a regression of the 2026-09-04 401 fix, or a changed auth
-  rule on DTC image URLs. NOT investigated.
+  LinePlan sheets.** 41/45 WIP rows and 36 LinePlan rows carried the new key,
+  none the old; the pull and build_costing read by display name, got NULL, and
+  `costing_chart` was silently EMPTY on green runs. **FIXED + live-verified**:
+  both now read `sync/lineplan.LINEPLAN_REF_COLS` (new name first, old as
+  fallback). Run 289291331965293: 15 style x colours joined, 22 costing lines
+  (was 0). The view's `LINEPLAN_COLUMN_RENAMED` check catches the next rename.
+- **phase2 re-wrote unchanged DropDowns every run -- and fixing that exposed a
+  flip-flop.** `attributes_get` returns a DropDown as a dict
+  (`{'text','value','code'}`); the no-op check compared it to the DTC string,
+  so it never matched. Fixed with `phase2.bp_field_value()`. BUT with the
+  no-op working, a row EQUAL to BeProduct was skipped BEFORE the conflict
+  check, so the first DIFFERING row won and a conflicting style flipped to
+  another candidate on every run. That fired once live (04:35 UTC, 4 styles,
+  e.g. KTB-00024 parent_vendor ASPGAR -> TUNAPP) before the fix below was
+  deployed at 04:41. Style-level fields are now decided ONCE PER STYLE over
+  all rows (`_decide_header_fields`): all agree -> write unless already held;
+  disagree -> flag, and KEEP BeProduct's value if it is a candidate. The old
+  code only avoided the ping-pong by accident, because every value compared
+  as "different". Tests `[11]`/`[12]`.
+- **Phase 3 sibling copy: downloading a DTC-hosted image returns 403 FROM
+  DATABRICKS** (job log: `403 Client Error: Forbidden` on every
+  `/api/v1/images/*` URL; last successful copy 2026-09-10 07:52 UTC, first 403
+  2026-09-18 07:24 UTC). The images themselves are fine: from a local machine
+  THROUGH THE LOCAL PROXY all 34 return 200 with x-api-key (401 without, as on
+  2026-09-04). CORRECTION: a same-day local test WITHOUT the proxy reported
+  "all 34 are gateway 403s". That was the local network being refused, not
+  DTC; local DTC calls need the proxy (env only, never in tracked files). The
+  **CONFIRMED by `v2_probe_image_get` (read-only, serverless, 2026-09-28
+  08:24:38 UTC)**: from Databricks `/api/v1/views/{id}` -> 200 (Apache/
+  Express), every `/api/v1/images/*` GET -> 403 from
+  `Microsoft-Azure-Application-Gateway/v2`, WITH OR WITHOUT the key (no 401,
+  so the request never reaches the app). DNS is identical on both sides
+  (104.43.67.175). Local-without-proxy shows the same pattern; the proxy's
+  address is allowed. So it is almost certainly a source-IP allow-list on the
+  images PATH at DTC's gateway, added 09-10..09-18. Uploads (POST
+  .../sheets/{s}/views/{v}/images) are a different path and still work.
+  To raise with DTC (ask them to allow the Databricks egress). **Worked around regardless**: a
+  sibling-copy op carries the row's own BeProduct image as `fallback_url`.
+  Live: 4 uploads OK, 0 failed. KTB-00033's front image is an Adobe
+  Illustrator `.ai`, still unsupported; it needs replacing in BeProduct.
+- **Lakebase BOM join matched 0 of 10 styles -- `style_season` format changed.**
+  Lakebase now writes `"Spring 2028"`; the join built `season || ' - ' || year`
+  = `"Spring - 2028"`. No error, `bom_segments` EMPTY, BOM enrichment silently
+  off. (It only surfaced 2026-09-28: until then the v2 workspace still ran the
+  PageBomVariation notebook, although the job and owner intent were Lakebase
+  since 2026-09-22 -- a full `upload_notebooks.py` deployed the walkback.)
+  **FIXED**: the join matches a normalised `season_key` (lowercase,
+  alphanumerics only) on both sides, newest log row kept per key. Live check:
+  8/10 match; KTB-00030/00033 genuinely have no Lakebase row. The dashboard's
+  `BOM_JOIN_MATCHED_NOTHING` catches a repeat. The job still passes
+  `bom_page_id`/`bom_max_workers`, leftovers from the PageBomVariation source
+  that the Lakebase notebook ignores.
+- **Two silent renames in one day** (the LinePlan column and the Lakebase
+  season format). Both shared one shape: a join or read by a
+  human-edited label that returns NULL or empty instead of failing. Prefer
+  normalised keys, and treat a stage that yields ZERO rows from non-empty
+  input as an alert, not a success.
 
 **LinePlan join re-verified after the column/naming revision -- and the
 conflict guard was crying wolf (2026-09-23):**

@@ -213,6 +213,28 @@ plan11b = build_beproduct_updates(rows11b)
 check(plan11b.updates["K"].fields.get("parent_vendor") == "SUPPLIER TUNAPP",
       "a genuinely changed DropDown value is still written")
 
+print("\n[12] a CONFLICT is stable: BeProduct's current value is kept, never flipped (2026-09-28)")
+def _rows12(vals, cur):
+    return [{"beproduct_style_id": "F", "colorway_id": f"c{i}", "bp_style_number": "S12",
+             "color": f"col{i}", "dtc": {"Main Vendor (Sampling)": v},
+             "bp": {"Main Vendor (Sampling)": {"text": cur, "value": cur, "code": "u"}}}
+            for i, v in enumerate(vals)]
+for order in (["V_A", "V_B", "V_C"], ["V_B", "V_A", "V_C"], ["V_C", "V_B", "V_A"]):
+    p12 = build_beproduct_updates(_rows12(order, "V_A"))
+    check("F" not in p12.updates, f"rows {order}, BeProduct V_A -> no write, whatever the row order")
+    check(sum(e.reason == "header_value_conflict" for e in p12.exceptions) == 2,
+          "  ...and both extra values are still flagged")
+p12b = build_beproduct_updates(_rows12(["V_B", "V_C"], "V_A"))
+check(p12b.updates["F"].fields.get("parent_vendor") == "V_B",
+      "BeProduct holds NONE of the candidates -> first value written (unchanged rule)")
+p12c = build_beproduct_updates(_rows12(["V_B", "V_B"], "V_A"))
+check(p12c.updates["F"].fields.get("parent_vendor") == "V_B"
+      and not any(e.reason == "header_value_conflict" for e in p12c.exceptions),
+      "rows agree on a new value -> written, no conflict")
+# Simulate the next run after the write: BeProduct now holds V_B.
+p12d = build_beproduct_updates(_rows12(["V_B", "V_C"], "V_B"))
+check("F" not in p12d.updates, "the run AFTER a write keeps it -> converges, no ping-pong")
+
 print("\n" + "=" * 70)
 if _failures:
     print(f"❌ {len(_failures)} FAILURE(S):")

@@ -62,8 +62,13 @@ styles AS (
   FROM lft.beproduct.ktb_styles
 ),
 resolved AS (SELECT DISTINCT dtc_request_name AS request FROM lft.beproduct.dtc_request_mapping),
+-- bom_segments has had TWO shapes (Lakebase: parse_error; BeProduct
+-- PageBomVariation: error) and the source has been switched both ways, so the
+-- error column is read shape-agnostically through to_json(struct(*)).
 bom AS (
-  SELECT bp_style_number AS bp_style, main_fabric_count, fabric_count, error
+  SELECT bp_style_number AS bp_style, main_fabric_count, fabric_count,
+         coalesce(get_json_object(to_json(struct(*)), '$.parse_error'),
+                  get_json_object(to_json(struct(*)), '$.error')) AS error
   FROM lft.beproduct.bom_segments
 ),
 -- Costing reads ONE row per style x colour: the Main Fabric row, else the
@@ -132,11 +137,18 @@ gaps AS (
 
   UNION ALL
   SELECT 'System', 'LINEPLAN_SHEET_HAS_NO_REFS', 'blocker', 'IT', NULL, NULL, NULL, NULL,
-         'The LinePlan pull holds rows but none with a Lineplan Ref #. Either the LinePlan column was renamed or nobody has filled it in.',
-         'IT: check the LinePlan column name first; otherwise the LinePlan owner fills Lineplan Ref #.',
+         'The LinePlan pull holds rows but none with a LinePlan ref#. Either the LinePlan column was renamed or nobody has filled it in.',
+         'IT: check the LinePlan column name first; otherwise the LinePlan owner fills LinePlan ref#.',
          '3'
   WHERE EXISTS (SELECT 1 FROM lft.beproduct.dtc_lineplan_ktb)
     AND NOT EXISTS (SELECT 1 FROM lp_refs)
+
+  UNION ALL
+  SELECT 'System', 'BOM_JOIN_MATCHED_NOTHING', 'blocker', 'IT', NULL, NULL, NULL, NULL,
+         'bom_segments is EMPTY although styles are staged: the techpack BOM join matched no style at all, so BOM enrichment is off for everyone. Usually a changed key format on the Lakebase side (e.g. style_season).',
+         'IT: compare ktb_styles season/year with alb_tpm_*.customer_teckpack_style_latest.style_season (v2_pull_bom_segments).',
+         '1.8'
+  WHERE EXISTS (SELECT 1 FROM stg) AND NOT EXISTS (SELECT 1 FROM bom)
 
   UNION ALL
   SELECT 'System', 'COSTING_CHART_EMPTY', 'warning', 'IT', NULL, NULL, NULL, NULL,
@@ -204,6 +216,7 @@ gaps AS (
          'Techpack team: complete the BOM extraction for this style.',
          '1.8'
   FROM (SELECT DISTINCT bp_style FROM stg) s LEFT ANTI JOIN bom b ON b.bp_style = s.bp_style
+  WHERE EXISTS (SELECT 1 FROM bom)   -- empty table = BOM_JOIN_MATCHED_NOTHING, an IT problem
 
   UNION ALL
   SELECT 'Material rows', 'BOM_HAS_NO_MAIN_FABRIC', 'blocker', 'Techpack team', NULL, bp_style, NULL, NULL,
@@ -238,15 +251,15 @@ gaps AS (
 
   UNION ALL
   SELECT 'Costing', 'LINEPLAN_REF_MISSING', 'blocker', 'DTC user', request, bp_style, color, article,
-         'Lineplan Ref # is blank on the Main Fabric row, so no costing line can form.',
-         'DTC user: enter Lineplan Ref # on the Main Fabric row (not on the Fabric rows).',
+         'LinePlan ref# is blank on the Main Fabric row, so no costing line can form.',
+         'DTC user: enter LinePlan ref# on the Main Fabric row (not on the Fabric rows).',
          '3'
   FROM rep WHERE trim(fabric_group) = 'Main Fabric' AND nullif(trim(lineplan_ref), '') IS NULL
     AND NOT (SELECT renamed FROM lp_renamed)
 
   UNION ALL
   SELECT 'Costing', 'LINEPLAN_REF_NOT_IN_LINEPLAN', 'blocker', 'DTC user', rep.request, rep.bp_style, rep.color, rep.article,
-         concat('Lineplan Ref # "', trim(rep.lineplan_ref), '" does not exist in any active LinePlan request.'),
+         concat('LinePlan ref# "', trim(rep.lineplan_ref), '" does not exist in any active LinePlan request.'),
          'DTC user: check the ref for typos, or ask the LinePlan owner to add it.',
          '3'
   FROM rep LEFT ANTI JOIN lp_refs ON lp_refs.ref = trim(rep.lineplan_ref)
@@ -254,7 +267,7 @@ gaps AS (
 
   UNION ALL
   SELECT 'Costing', 'LINEPLAN_REF_DUPLICATED', 'warning', 'LinePlan owner', rep.request, rep.bp_style, rep.color, rep.article,
-         concat('Lineplan Ref # "', trim(rep.lineplan_ref), '" appears more than once in LinePlan with different quantity/LDP/FOB. The value used is arbitrary.'),
+         concat('LinePlan ref# "', trim(rep.lineplan_ref), '" appears more than once in LinePlan with different quantity/LDP/FOB. The value used is arbitrary.'),
          'LinePlan owner: make the ref unique, or make the duplicate rows agree.',
          '3'
   FROM rep JOIN lp_conflicts c ON c.ref = trim(rep.lineplan_ref)

@@ -41,6 +41,7 @@ __all__ = [
     "compute_image_uploads",
     "DTC_NATIVE_IMAGE_TYPES",
     "CONVERTIBLE_IMAGE_TYPES",
+    "PDF_RENDERABLE_TYPES",
     "ImageEncoding",
     "classify_image_type",
 ]
@@ -96,6 +97,22 @@ CONVERTIBLE_IMAGE_TYPES = {
 # Vector / explicitly-unsupported types: cannot rasterise in this pipeline.
 _VECTOR_TYPES = {"image/svg+xml"}
 
+# PDF-backed types that CAN be rasterised (added 2026-09-30). An Adobe
+# Illustrator `.ai` saved with "Create PDF Compatible File" -- Illustrator's
+# default -- IS a PDF (starts with `%PDF`; live: KTB-00033's `hbpants.ai` is
+# `%PDF-1.6`), so its first page renders to PNG with pypdfium2 (Apache/BSD).
+# A PostScript-only `.ai` (`%!PS`, very old Illustrator or saved without PDF
+# compatibility) would need Ghostscript and stays unsupported.
+# Content-Types BeProduct's CDN may send for these; it sent
+# application/octet-stream for the live `.ai`, hence the extension + magic.
+PDF_RENDERABLE_TYPES = {
+    "application/pdf", "application/illustrator", "application/postscript",
+    "application/vnd.adobe.illustrator",
+}
+_PDF_RENDERABLE_EXTS = {"ai", "pdf"}
+PDF_MAGIC = b"%PDF"
+POSTSCRIPT_MAGIC = b"%!PS"
+
 _EXT_TO_TYPE = {
     "jpg": "image/jpeg", "jpeg": "image/jpeg", "jpe": "image/jpeg",
     "png": "image/png",
@@ -107,7 +124,7 @@ _EXT_TO_TYPE = {
 @dataclass
 class ImageEncoding:
     """How to handle a downloaded image before upload."""
-    action: str          # 'upload' (as-is) | 'convert' (-> PNG) | 'skip'
+    action: str          # 'upload' (as-is) | 'convert' (-> PNG) | 'rasterize' (PDF page 1 -> PNG) | 'skip'
     content_type: Optional[str]  # the type to SEND (None when skip)
     reason: str = ""     # populated for skip / convert (informational)
 
@@ -121,20 +138,39 @@ def _ext_from_url(url: Optional[str]) -> Optional[str]:
     return path.rsplit(".", 1)[-1].strip().lower() or None
 
 
-def classify_image_type(content_type: Any, url: Optional[str] = None) -> ImageEncoding:
+def _classify_pdf_like(head: Optional[bytes], what: str) -> ImageEncoding:
+    """A PDF-backed file (by type or extension): the first bytes decide."""
+    if head is not None and head.lstrip()[:4] == POSTSCRIPT_MAGIC:
+        return ImageEncoding("skip", None, f"unsupported_postscript_ai:{what}")
+    if head is not None and PDF_MAGIC not in head[:1024]:
+        return ImageEncoding("skip", None, f"unsupported_image_type:{what}")
+    return ImageEncoding("rasterize", "image/png", f"rasterize {what} page 1 -> png")
+
+
+def classify_image_type(content_type: Any, url: Optional[str] = None,
+                        head: Optional[bytes] = None) -> ImageEncoding:
     """
     Decide whether a downloaded image can be uploaded as-is, must be transcoded
-    to PNG, or should be skipped.
+    to PNG, rasterised from a PDF, or should be skipped.
 
     Resolution order: trust the HTTP Content-Type first; if it is missing or
-    generic (e.g. application/octet-stream), fall back to the URL/file extension.
+    generic (e.g. application/octet-stream), fall back to the URL/file extension,
+    and finally to the file's own first bytes (`head`).
+
+    `head` (optional, the first bytes of the download) decides PDF-backed files:
+    `%PDF` -> rasterize, `%!PS` -> skip (needs Ghostscript), anything else ->
+    skip. Without `head` a PDF-like type/extension is optimistically rasterised
+    and the renderer has the last word.
 
     Returns an ImageEncoding:
-      * action='upload'  -> send as-is with content_type (jpg/png)
-      * action='convert' -> transcode to PNG before sending (content_type=image/png)
-      * action='skip'    -> unsupported (vector/unknown); content_type=None
+      * action='upload'    -> send as-is with content_type (jpg/png)
+      * action='convert'   -> transcode to PNG before sending (content_type=image/png)
+      * action='rasterize' -> render PDF page 1 to PNG (.ai / .pdf; content_type=image/png)
+      * action='skip'      -> unsupported (vector/unknown); content_type=None
     """
     ct = (str(content_type or "").split(";")[0].strip().lower()) or None
+    if ct in PDF_RENDERABLE_TYPES:
+        return _classify_pdf_like(head, ct)
     if ct in DTC_NATIVE_IMAGE_TYPES:
         return ImageEncoding("upload", ct)
     if ct in CONVERTIBLE_IMAGE_TYPES:
@@ -150,8 +186,59 @@ def classify_image_type(content_type: Any, url: Optional[str] = None) -> ImageEn
         return ImageEncoding("convert", "image/png", f"transcode {ext_type} -> png")
     if ext_type in _VECTOR_TYPES:
         return ImageEncoding("skip", None, f"unsupported_vector_image:{ext_type}")
+    ext = _ext_from_url(url)
+    if ext in _PDF_RENDERABLE_EXTS:
+        return _classify_pdf_like(head, ext)
 
-    return ImageEncoding("skip", None, f"unsupported_image_type:{ct or ext_type or 'unknown'}")
+    # Nothing else identifies it: a PDF header still does.
+    if head is not None and head.startswith(PDF_MAGIC):
+        return ImageEncoding("rasterize", "image/png", "rasterize pdf (by header) page 1 -> png")
+
+    return ImageEncoding("skip", None, f"unsupported_image_type:{ct or ext or 'unknown'}")
+
+
+# Longest side of a rasterised PDF/.ai page, in pixels. The Style Image cell
+# is a thumbnail; 2000 px keeps drawings legible at ~0.1 s / ~300 KB per file
+# (live: KTB-00033's 612x792 pt page -> 1546x2000 PNG, 273 KB, 0.12 s).
+RASTER_MAX_PX = 2000
+
+
+def render_pdf_first_page_png(data: bytes, max_px: int = RASTER_MAX_PX) -> Tuple[bytes, str]:
+    """
+    Render page 1 of a PDF (incl. a PDF-compatible Illustrator `.ai`) to PNG.
+
+    Returns (png_bytes, note). The note records the page count, because a
+    multi-artboard `.ai` renders only its FIRST artboard -- usually the front
+    view, but a designer could order them differently.
+
+    Uses pypdfium2 (Google PDFium; Apache-2.0/BSD), imported lazily so the
+    rest of this module stays importable without it. Raises ImportError when
+    it is not installed and ValueError for a file PDFium cannot open, so the
+    caller can log the row as skipped instead of failing the run.
+    """
+    import io
+    import pypdfium2 as pdfium  # lazy: only the rasterize path needs it
+
+    try:
+        pdf = pdfium.PdfDocument(data)
+    except Exception as e:  # pdfium.PdfiumError; broad on purpose, logged by caller
+        raise ValueError(f"pdf_open_failed:{str(e)[:80]}") from e
+    try:
+        n_pages = len(pdf)
+        if n_pages < 1:
+            raise ValueError("pdf_has_no_pages")
+        page = pdf[0]
+        w, h = page.get_size()
+        # Scale to max_px on the long side, but never above 4x (tiny pages)
+        # and never below a legible floor.
+        scale = max(0.5, min(max_px / max(w, h, 1.0), 4.0))
+        img = page.render(scale=scale).to_pil().convert("RGB")  # white background
+        buf = io.BytesIO()
+        img.save(buf, format="PNG", optimize=True)
+    finally:
+        pdf.close()
+    note = f"rasterized page 1 of {n_pages} -> {img.size[0]}x{img.size[1]} png"
+    return buf.getvalue(), note
 
 
 # ---------------------------------------------------------------------------

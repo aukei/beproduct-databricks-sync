@@ -170,7 +170,7 @@ def build_dashboard():
         "- **info** - by design; listed so you are not surprised\n",
         "\n",
         "Refreshed by every main run (every 15 min). A fix you make shows here after the **next** run, "
-        "so allow up to ~20 min. *Costing* and *Duty* inputs (Lineplan Ref #, vendor, factory) must be on the **Main Fabric** row.",
+        "so allow up to ~20 min. *Costing* and *Duty* inputs (LinePlan ref#, vendor, factory) must be on the **Main Fabric** row.",
     ])
     layout = [
         (intro, 0, 0, 6, 3),

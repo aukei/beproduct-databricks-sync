@@ -66,6 +66,18 @@ try:
 except Exception:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "Pillow"])
 
+# pypdfium2 rasterises PDF-compatible Adobe Illustrator `.ai` front images
+# (and PDFs) to PNG -- DTC stores neither (2026-09-30, KTB-00033). A failed
+# install is NOT fatal: those rows are then skipped as before
+# (`pdf_renderer_unavailable`), and every other image still uploads.
+try:
+    import pypdfium2  # noqa: F401
+except Exception:
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "pypdfium2"])
+    except Exception as _e:  # noqa: BLE001
+        print(f"⚠️  pypdfium2 install failed ({_e}); .ai/.pdf images will be skipped")
+
 # ── Python module root ──────────────────────────────────────────────────────
 # Parameterized rather than hardcoded so v2 can deploy the modules under its own
 # workspace root without the v2 branch ever changing what the live v1 job
@@ -237,11 +249,23 @@ def prepare_for_dtc(img_bytes, content_type, url):
 
     Returns (out_bytes, out_content_type, filename, note) on success, or
     (None, None, None, reason) to SKIP. DTC accepts jpg/png natively; webp/gif/
-    bmp/tiff are transcoded to PNG; vector/unknown are skipped.
+    bmp/tiff are transcoded to PNG; a PDF-compatible .ai / .pdf has its first
+    page rasterised to PNG; svg, PostScript-only .ai and unknown are skipped.
     """
-    enc = phase3.classify_image_type(content_type, url)
+    # The first bytes decide PDF-backed files (.ai with %PDF -> rasterize,
+    # PostScript-only .ai -> skip) -- BeProduct serves .ai as octet-stream.
+    enc = phase3.classify_image_type(content_type, url, head=img_bytes[:1024])
     if enc.action == "skip":
         return None, None, None, enc.reason
+
+    if enc.action == "rasterize":
+        try:
+            png, note = phase3.render_pdf_first_page_png(img_bytes)
+        except ImportError:
+            return None, None, None, "pdf_renderer_unavailable"
+        except Exception as e:  # noqa: BLE001 -- ValueError or a PDFium error
+            return None, None, None, f"rasterize_failed:{str(e)[:80]}"
+        return png, "image/png", "image.png", note
 
     if enc.action == "upload":
         # Trust classification but guard against a mislabeled/corrupt payload.
@@ -343,7 +367,7 @@ for name, m in mapping.items():
                 "unsupported_type", note, {"url": src_url, "content_type": ctype})
             totals["unsupported_type"] += 1
             continue
-        converted = note.startswith("transcode")
+        converted = note.startswith(("transcode", "rasterized"))
         if converted:
             totals["converted"] += 1
 
