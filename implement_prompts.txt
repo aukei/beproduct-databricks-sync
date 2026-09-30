@@ -915,3 +915,9 @@ why there are 2 lines of request id 6a8ebf0b52a227d715e13cf1 in lft.beproduct.dt
 
 this issue is fixed by DTC backend - in any case user move the LinePlan Ref# to another value  & request.
 separately, there is an issue that some BeProduct Style use adobe illustrator image (.ai) that DTC doesn't accept. I remember there is some image convertor code in the image download part - say webp. Is there free library availabe that can convert .ai to .jpg or .png?
+
+# 30/9/26 demo
+Fit sample status: there will be at most 2 submits. Ignore any further submits just in case.
+1st submit status should goes to DTC WIP col "1st Fit Sample Approval Status", and 2nd submit status text goes to "2nd Fit Sample Approval Status"
+Then in these 2 fields, just need the request status and timestamp.
+There could be update of the status text.

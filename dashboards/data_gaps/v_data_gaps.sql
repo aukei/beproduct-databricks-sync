@@ -8,7 +8,7 @@
 -- per-row drop reason, so this cannot drift from the real gates. Until then,
 -- ANY change to a gate in PIPELINE.md must be mirrored here.
 --
--- Freshness: every input is rewritten by the main job (every 15 min), so the
+-- Freshness: every input is rewritten by the main job (every 8 min), so the
 -- view is as fresh as the last main run. `as_of` is the DTC snapshot time.
 --
 -- Columns: area, gap_code, severity (blocker|warning|info), owner, request,
@@ -195,7 +195,7 @@ gaps AS (
   UNION ALL
   SELECT 'WIP record', 'NOT_YET_IN_DTC', 'warning', 'Wait / IT', stg.request, stg.bp_style, stg.color, NULL,
          'In BeProduct and routed to a request, but no DTC row yet.',
-         'Wait for the next main run (15 min). If it is still missing after 30 min, contact IT.',
+         'Wait for the next main run (8 min). If it is still missing after 30 min, contact IT.',
          '1.3'
   FROM stg
   JOIN resolved r ON r.request = stg.request
@@ -235,7 +235,7 @@ gaps AS (
   UNION ALL
   SELECT 'Material rows', 'MATERIAL_ROWS_MISSING', 'warning', 'Wait / IT', w.request, w.bp_style, w.color, NULL,
          concat('DTC has ', count(*), ' material row(s) for this colour; the BOM implies ', 1 + b.fabric_count, '.'),
-         'Wait for the next main run (15 min). If it persists, contact IT.',
+         'Wait for the next main run (8 min). If it persists, contact IT.',
          '1.8'
   FROM wip w JOIN bom b ON b.bp_style = w.bp_style AND b.main_fabric_count = 1
   GROUP BY w.request, w.bp_style, w.color, b.fabric_count
@@ -310,7 +310,7 @@ gaps AS (
                   CASE WHEN c.duty_rate_mx IS NULL THEN 'duty MX' END,
                   CASE WHEN c.tariff_rate IS NULL THEN 'tariff' END),
                 ' still blank.'),
-         'Wait: the duty lookup runs every 15 min, and each new line takes ~1-2 min. If it is still blank after 1 hour, contact IT.',
+         'Wait: the duty lookup runs every 8 min, and each new line takes ~1-2 min. If it is still blank after 1 hour, contact IT.',
          '4.1'
   FROM lft.beproduct.costing_chart c
   WHERE nullif(trim(c.production_country), '') IS NOT NULL
@@ -320,7 +320,7 @@ gaps AS (
   UNION ALL
   SELECT 'Duty', 'DUTY_NOT_YET_IN_DTC', 'info', 'Wait / IT', s.request, s.bp_style, s.color, s.article,
          concat('Slot ', s.slot, ': HTS ', c.hts_code, ' is computed but not yet in the DTC sheet.'),
-         'Wait for the next main run (15 min). If it persists, contact IT.',
+         'Wait for the next main run (8 min). If it persists, contact IT.',
          '4.2'
   FROM lft.beproduct.costing_chart c
   JOIN slots s ON s.bp_style = c.bp_style_no AND s.color = c.color_name AND s.slot = c.supplier_type

@@ -17,9 +17,9 @@ Why v2 exists and how it differs from v1 — see [MIGRATION_V1_V2.md](MIGRATION_
 Systems, repo layout and the Delta data model — see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 > **Status: LIVE since 2026-09-15.** `BeProduct_DTC_sync_v2` (job
-> 367710575109755) runs serverless every 15 min at :05/:20/:35/:50 HKT (since 2026-09-28; was
-> every 2 h); the companion `BeProduct_DTC_sync_duty_compute` (1026599988408090)
-> every 15 min at :12/:27/:42/:57 HKT. The v1 jobs `BeProduct_DTC_sync_dag` and `BeProduct_DTC_sync_images`
+> 367710575109755) runs serverless every 8 min on a periodic trigger (since 2026-09-30; was
+> every 15 min from 2026-09-28, every 2 h before that); the companion
+> `BeProduct_DTC_sync_duty_compute` (1026599988408090) also every 8 min. The v1 jobs `BeProduct_DTC_sync_dag` and `BeProduct_DTC_sync_images`
 > are PAUSED, kept only for rollback. `folder_name` is still `TEST KTB` until
 > go-live.
 
@@ -805,7 +805,7 @@ assignment" means. The write always uses the GUID `materialId`.
 ### `BeProduct_DTC_sync_duty_compute` — NT Orbit lookups
 
 Single task `compute_duty_rates` (`p9b1_compute_duty_rates`), job
-1026599988408090, serverless, **every 15 min at :12/:27/:42/:57 HKT**. NT Orbit →
+1026599988408090, serverless, **every 8 min (periodic trigger, since 2026-09-30)**. NT Orbit →
 `nt_orbit_duty_cache` + `costing_chart` (MERGE). **Zero DTC contact** — no API
 key, no read, no write — so it is free to run on its own schedule with its own
 latency. Its results reach DTC through the next main run: Stage 30 refills

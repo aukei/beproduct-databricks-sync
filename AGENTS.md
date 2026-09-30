@@ -63,7 +63,8 @@ sheets), staged through **Databricks/Delta**.
   2026-08-28; `phase1.norm()` preserves embedded newlines so the multi-line
   structure survives to the actual DTC push).
   Proto → "Proto Sample - Sample Status", PreLine → "Pre-line Sample - Status",
-  SMS → "SMS - Sample Status", Fit → "2nd Fit Sample Approval Status",
+  SMS → "SMS - Sample Status", Fit → "1st"/"2nd Fit Sample Approval Status"
+  (ONE column PER SUBMIT since 2026-09-30, see the verified-discoveries log),
   PP → "PP Sample Submission Approval Status", TOP → "TOP Sample Approval Status".
   All 6 DTC columns confirmed in the 204-field view
   (2026-08-28; Fit/PP destinations changed from the original 2026-07-07 mapping
@@ -342,9 +343,10 @@ this stays true by construction; verify it stays true after any change).
    `**SupplierRefNo` via `customer_teckpack_style_log.custom_fields` —
    corrected 2026-09-09 "2nd revision", was `bom_unified.material_name`
    before that and `material_no` before that), `Proto Sample - Sample
-   Status`, `Pre-line Sample - Status`, `SMS - Sample Status`, `2nd Fit
-   Sample Approval Status`, `PP Sample Submission Approval Status`, `TOP
-   Sample Approval Status`. `Style Image` is explicitly EXCLUDED from every
+   Status`, `Pre-line Sample - Status`, `SMS - Sample Status`, `1st Fit
+   Sample Approval Status` (since 2026-09-30), `2nd Fit Sample Approval
+   Status`, `PP Sample Submission Approval Status`, `TOP Sample Approval
+   Status`. `Style Image` is explicitly EXCLUDED from every
    sheetData PATCH (image cells can ONLY be set via Phase 3's separate
    multipart `/images` endpoint — DTC rejects any sheetData write to it).
    **`Content` IS a Phase 1/10 PATCH key** (REINSTATED 2026-09-09 "2nd
@@ -366,6 +368,53 @@ this stays true by construction; verify it stays true after any change).
    `"Factory 3 - Tariff"` (no `rate` suffix; ` - ` for numbered slots).
 
 ## Verified discoveries log (append-dated; do not delete)
+
+**Both v2 jobs now run on an 8-MINUTE periodic trigger (2026-09-30, deployed):**
+- `BeProduct_DTC_sync_v2` and `BeProduct_DTC_sync_duty_compute`:
+  `trigger.periodic = {interval: 8, unit: MINUTES}`, UNPAUSED, no cron,
+  `max_concurrent_runs=1` (a tick during a run is skipped, never overlapped).
+  Set on the live jobs first, then mirrored in `deploy_job.py`
+  (`PERIODIC_8_MIN`, a spec `"trigger"` key that wins over `"schedule"`).
+- **databricks-sdk 0.55 cannot express this**: its
+  `PeriodicTriggerConfigurationTimeUnit` has only DAYS/HOURS/WEEKS, and it
+  parses the live `MINUTES` as `unit=None`. `deploy_job.py` therefore sends a
+  trigger spec as raw JSON to `/api/2.2/jobs/reset` / `jobs/create`. Read job
+  triggers through the raw API (`api_client.do("GET", "/api/2.2/jobs/get")`),
+  not `w.jobs.get()`, or MINUTES is invisible.
+- `deploy_job.py` does NOT read `.env`: `set -a; . ./.env; set +a` first, or it
+  exits at its credential check having deployed nothing.
+- The same deploy made two live-vs-repo drifts consistent: dropped the unused
+  PageBomVariation params (`bom_page_id`/`bom_max_workers`) and passed the
+  Lakebase notebook its real `bom_*` inputs; and **`run_customer_code_push`
+  is now `true` in the repo** (it had been enabled live; owner chose to keep
+  it on). The earlier "false until the resolver is proven" note is superseded.
+- No offset between the two 8-minute triggers. `build_costing` (main)
+  overwrites `costing_chart` while `duty_compute` MERGEs it, so if the two
+  collide, a Delta write conflict fails one run. It self-heals next tick; watch
+  duty_compute for a conflict failure.
+
+**Fit sample split per submit -- 1st/2nd Fit columns (owner spec 2026-09-30,
+BUILT, NOT YET DEPLOYED):**
+- Fit has at most 2 submits. Submit 1 -> `"1st Fit Sample Approval Status"`,
+  submit 2 -> `"2nd Fit Sample Approval Status"`; each value is only
+  `"submitStatus","submitStatusDate"` (first size, no submit name). Submits 3+
+  are ignored. Supersedes 2026-08-28, when all Fit history went to `2nd Fit ...`.
+- `sync/samples.py`: Fit left `SAMPLE_SUBMIT_FIELDS` (the other 5 apps are
+  unchanged) for `FIT_SUBMIT_FIELDS` + `format_submit_status(raw, n)`. The
+  transform builds one UDF per submit via a factory, so each column binds its
+  own n (a loop lambda would late-bind all to the last).
+- **First columns this pipeline CLEARS**: `phase1.CLEAR_WHEN_BLANK_COLS`.
+  "The status text can change" means a REMOVED submit must not leave stale
+  text. Everywhere else, blank never overwrites
+  (`build_target_payload` drops blanks). `diff_updatable_fields` emits `None`
+  (JSON null) only when DTC holds a value; `wip_plan` keeps it because
+  `values_equal(non-blank, None)` is False, and drops it when DTC is already
+  blank -- zero-diff-zero-write holds (`test_wip_plan [9]`).
+- Both columns live-checked in the view (string, not formula/read-only).
+  First deploy will rewrite KTB-00029 (the only style with Fit history):
+  `2nd Fit` from the 2-line history to `"Requested","2026-09-23T16:02:25.877Z"`,
+  and fill `1st Fit` with `"Requested","2026-09-23T11:16:14.37Z"`, on all 9 of
+  its rows. One write window.
 
 **Phase 3 rasterises PDF-compatible Illustrator `.ai` front images
 (2026-09-30, DEPLOYED to the v2 root 06:53 UTC):**
@@ -391,6 +440,9 @@ this stays true by construction; verify it stays true after any change).
   affected.
 - **Open**: a multi-artboard `.ai` renders artboard 1 only. KTB-00033 has 2,
   and page 1 is the right image. The note in the log records the page count.
+- **LIVE-VERIFIED 2026-09-30 06:59:10 UTC**: first run after the deploy
+  uploaded KTB-00033 (`converted`, page 1 of 2 -> 1546x2000 PNG, 272 KB); the
+  DTC cell now holds a DTC-hosted `.png`.
 
 **DTC's sheet GET can return the SAME rowId twice (2026-09-29, open with DTC):**
 - `FW28 LINEPLAN` (sheet `6a8ebf0b52a227d715e13cf2`, view

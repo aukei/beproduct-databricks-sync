@@ -169,7 +169,7 @@ def build_dashboard():
         "- **warning** - synced, but something is wrong or still pending\n",
         "- **info** - by design; listed so you are not surprised\n",
         "\n",
-        "Refreshed by every main run (every 15 min). A fix you make shows here after the **next** run, "
+        "Refreshed by every main run (every 8 min). A fix you make shows here after the **next** run, "
         "so allow up to ~20 min. *Costing* and *Duty* inputs (LinePlan ref#, vendor, factory) must be on the **Main Fabric** row.",
     ])
     layout = [

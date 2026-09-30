@@ -28,7 +28,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "python"))
 
 from sync import samples
-from sync.samples import format_sample_field, SAMPLE_SUBMIT_FIELDS
+from sync.samples import (format_sample_field, format_submit_status, SAMPLE_SUBMIT_FIELDS,
+                          FIT_SUBMIT_FIELDS, FIT_MAX_SUBMITS)
 from sync import phase1
 
 _failures = []
@@ -137,21 +138,21 @@ out = format_sample_field(raw)
 check(out == '"Submit ""A""","Approved","2026-05-01T00:00:00Z"',
       f"embedded quote doubled, not backslash-escaped  (got {out})")
 
-print("\n[9] SAMPLE_SUBMIT_FIELDS has exactly 6 entries (all apps)")
-check(len(SAMPLE_SUBMIT_FIELDS) == 6, "6 entries in SAMPLE_SUBMIT_FIELDS")
+# CHANGED 2026-09-30: Fit left SAMPLE_SUBMIT_FIELDS for FIT_SUBMIT_FIELDS (one
+# DTC column per submit). [9]-[12] were "all 6 apps"; they now cover the 5 others.
+print("\n[9] SAMPLE_SUBMIT_FIELDS has the 5 non-Fit apps")
 expected_raw_cols = {
     "proto_sample_json", "preline_sample_json", "sms_sample_json",
-    "fit_sample_json", "pp_sample_json", "top_sample_json",
+    "pp_sample_json", "top_sample_json",
 }
 check(set(SAMPLE_SUBMIT_FIELDS.keys()) == expected_raw_cols,
-      "raw column keys match all 6 sample prefixes")
+      "raw column keys = the 5 non-Fit sample prefixes (Fit moved to FIT_SUBMIT_FIELDS)")
 
-print("\n[10] SAMPLE_SUBMIT_FIELDS -> correct DTC column names (all 6, post 2026-08-28 restructure)")
+print("\n[10] SAMPLE_SUBMIT_FIELDS -> correct DTC column names")
 EXPECTED_DTC = {
     "proto_sample_json":   "Proto Sample - Sample Status",
     "preline_sample_json": "Pre-line Sample - Status",
     "sms_sample_json":     "SMS - Sample Status",
-    "fit_sample_json":     "2nd Fit Sample Approval Status",
     "pp_sample_json":      "PP Sample Submission Approval Status",
     "top_sample_json":     "TOP Sample Approval Status",
 }
@@ -160,19 +161,21 @@ for raw_col, expected_dtc in EXPECTED_DTC.items():
     check(actual == expected_dtc,
           f"{raw_col} -> DTC={actual!r}  (expected {expected_dtc!r})")
 
-print("\n[11] all 6 staging columns present in phase1.FIELD_MAPPING")
+print("\n[11] every sample staging column (incl. both Fit columns) is in phase1.FIELD_MAPPING")
 for raw_col, spec in SAMPLE_SUBMIT_FIELDS.items():
-    staging = spec["staging"]
-    dtc     = spec["dtc"]
-    check(phase1.FIELD_MAPPING.get(staging) == dtc,
-          f"phase1.FIELD_MAPPING[{staging!r}] == {dtc!r}")
+    check(phase1.FIELD_MAPPING.get(spec["staging"]) == spec["dtc"],
+          f"phase1.FIELD_MAPPING[{spec['staging']!r}] == {spec['dtc']!r}")
+for staging, spec in FIT_SUBMIT_FIELDS.items():
+    check(phase1.FIELD_MAPPING.get(staging) == spec["dtc"],
+          f"phase1.FIELD_MAPPING[{staging!r}] == {spec['dtc']!r}")
+check("fit_sample_status" not in phase1.FIELD_MAPPING,
+      "old single Fit column (full history) is gone from FIELD_MAPPING")
 
 print("\n[12] staging column names are correct")
 EXPECTED_STAGING = {
     "proto_sample_json":   "proto_sample_status",
     "preline_sample_json": "preline_sample_status",
     "sms_sample_json":     "sms_sample_status",
-    "fit_sample_json":     "fit_sample_status",
     "pp_sample_json":      "pp_sample_status",
     "top_sample_json":     "top_sample_status",
 }
@@ -185,13 +188,70 @@ print("\n[13] 'Pre-line Sample - Status' uses lowercase 'l' and dash (DTC exact 
 check(SAMPLE_SUBMIT_FIELDS["preline_sample_json"]["dtc"] == "Pre-line Sample - Status",
       "Pre-line uses lowercase 'l' and dash — matches DTC view exactly")
 
-print("\n[14] Fit and PP no longer collide on the old '1st/2nd Fit' pair")
-check(SAMPLE_SUBMIT_FIELDS["fit_sample_json"]["dtc"] != "1st Fit Sample Approval Status",
-      "Fit no longer maps to '1st Fit Sample Approval Status'")
-check(SAMPLE_SUBMIT_FIELDS["pp_sample_json"]["dtc"] != "2nd Fit Sample Approval Status",
-      "PP no longer maps to '2nd Fit Sample Approval Status'")
-check(SAMPLE_SUBMIT_FIELDS["fit_sample_json"]["dtc"] != SAMPLE_SUBMIT_FIELDS["pp_sample_json"]["dtc"],
-      "Fit and PP map to two distinct DTC columns")
+print("\n[14] Fit and PP never collide")
+fit_cols = {spec["dtc"] for spec in FIT_SUBMIT_FIELDS.values()}
+check(SAMPLE_SUBMIT_FIELDS["pp_sample_json"]["dtc"] not in fit_cols,
+      "PP's column is not one of the Fit columns")
+
+print("\n[15] FIT_SUBMIT_FIELDS -- submit 1 -> '1st Fit', submit 2 -> '2nd Fit' (owner spec 2026-09-30)")
+check(FIT_MAX_SUBMITS == 2, "at most 2 Fit submits")
+check(FIT_SUBMIT_FIELDS["fit_1st_sample_status"] ==
+      {"raw": "fit_sample_json", "submit": 1, "dtc": "1st Fit Sample Approval Status"},
+      "submit 1 -> 1st Fit Sample Approval Status")
+check(FIT_SUBMIT_FIELDS["fit_2nd_sample_status"] ==
+      {"raw": "fit_sample_json", "submit": 2, "dtc": "2nd Fit Sample Approval Status"},
+      "submit 2 -> 2nd Fit Sample Approval Status")
+check(len(FIT_SUBMIT_FIELDS) == FIT_MAX_SUBMITS, "one column per allowed submit, no more")
+check(fit_cols <= phase1.CLEAR_WHEN_BLANK_COLS, "both Fit columns follow BeProduct to blank")
+
+print("\n[16] format_submit_status() -- status + timestamp only, one submit")
+# Live shape: KTB-00029's Fit history (2 submits, each with several sizes).
+fit_raw = json.dumps([
+    {"submit_id": "s1", "submit_name": "1ST Submit", "size": "M",
+     "submit_status": "Requested", "submit_status_date": "2026-09-23T11:16:14.37Z"},
+    {"submit_id": "s1", "submit_name": "1ST Submit", "size": "L",
+     "submit_status": "IGNORED-2nd-size", "submit_status_date": "x"},
+    {"submit_id": "s2", "submit_name": "2ND Submit", "size": "M",
+     "submit_status": "Approved", "submit_status_date": "2026-09-23T16:02:25.877Z"},
+    {"submit_id": "s3", "submit_name": "3RD Submit", "size": "M",
+     "submit_status": "Approved", "submit_status_date": "2026-10-01T00:00:00Z"},
+])
+check(format_submit_status(fit_raw, 1) == '"Requested","2026-09-23T11:16:14.37Z"',
+      "submit 1 -> first size's status + date, NO submit name")
+check(format_submit_status(fit_raw, 2) == '"Approved","2026-09-23T16:02:25.877Z"',
+      "submit 2 -> its own status + date")
+check(format_submit_status(fit_raw, 3) != "" and 3 > FIT_MAX_SUBMITS,
+      "a 3rd submit exists in the data, but no column maps it (ignored by config, not by the formatter)")
+one_submit = json.dumps([json.loads(fit_raw)[0]])
+check(format_submit_status(one_submit, 2) == "", "missing 2nd submit -> '' (phase1 clears the cell)")
+check(format_submit_status("[]", 1) == "" and format_submit_status(None, 1) == "", "no history -> ''")
+check(format_submit_status(fit_raw, 0) == "", "submit 0 is invalid -> ''")
+with_none = json.dumps([{"submit_id": "s1", "submit_name": "1ST", "submit_status": "Requested",
+                         "submit_status_date": None}])
+check(format_submit_status(with_none, 1) == '"Requested",""', "missing date -> empty quotes")
+
+print("\n[17] phase1: Fit columns update when the status text changes, and CLEAR when gone")
+base = {"BP Style#": "S1", "Color / Wash": "Red"}
+dtc_now = dict(base, **{"1st Fit Sample Approval Status": '"Requested","t1"',
+                        "2nd Fit Sample Approval Status": '"Requested","t2"'})
+bp_row = {"bp_style_number": "S1", "color": "Red",
+          "fit_1st_sample_status": '"Approved","t3"', "fit_2nd_sample_status": ""}
+changed = phase1.diff_updatable_fields(dtc_now, bp_row)
+check(changed.get("1st Fit Sample Approval Status") == '"Approved","t3"',
+      "status text changed in BeProduct -> DTC updated")
+check("2nd Fit Sample Approval Status" in changed and changed["2nd Fit Sample Approval Status"] is None,
+      "2nd submit removed in BeProduct -> DTC cell CLEARED (null)")
+dtc_blank = dict(base)
+changed = phase1.diff_updatable_fields(dtc_blank, {"bp_style_number": "S1", "color": "Red",
+                                                   "fit_1st_sample_status": "", "fit_2nd_sample_status": ""})
+check(not any(c in changed for c in fit_cols), "blank in both -> nothing written (zero-diff)")
+changed = phase1.diff_updatable_fields(
+    dict(base, **{"Proto Sample - Sample Status": '"1ST","Approved","t"'}),
+    {"bp_style_number": "S1", "color": "Red", "proto_sample_status": ""})
+check("Proto Sample - Sample Status" not in changed,
+      "other sample columns keep the old rule: a blank never clears")
+changed = phase1.diff_updatable_fields(dtc_now, bp_row, allowed_cols={"1st Fit Sample Approval Status"})
+check("2nd Fit Sample Approval Status" not in changed, "a clear respects allowed_cols")
 
 print("\n" + "=" * 70)
 if _failures:

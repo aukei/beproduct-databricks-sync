@@ -76,7 +76,7 @@ _MODULE_PATH = (dbutils.widgets.get("module_path") or "").strip() or _DEFAULT_MO
 for _p in (_MODULE_PATH, _MODULE_PATH.replace("/DTC/", "/dtc/")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
-from sync.samples import format_sample_field, SAMPLE_SUBMIT_FIELDS
+from sync.samples import format_sample_field, format_submit_status, SAMPLE_SUBMIT_FIELDS, FIT_SUBMIT_FIELDS
 from sync import lifecycle
 from sync.phase1 import DUMMY_COLOR
 from sync.bom import DUMMY_FABRIC_GROUP, DUMMY_FABRIC_ARTICLE
@@ -416,8 +416,8 @@ try:
 
     # Phase 7: format each sample app's raw submit history (ktb_styles
     # {prefix}_sample_json) into the DTC status string via the pure-Python UDF.
-    # SAMPLE_SUBMIT_FIELDS maps raw column -> {staging, dtc}; only the 4 active
-    # apps (PreLine / SMS / Fit / PP) are produced here.
+    # SAMPLE_SUBMIT_FIELDS maps raw column -> {staging, dtc} for the 5 apps other
+    # than Fit (full history, one line per submit); Fit follows below.
     for _raw_col, _spec in SAMPLE_SUBMIT_FIELDS.items():
         _staging_col = _spec["staging"]
         if _raw_col in df_with_request_name.columns:
@@ -427,6 +427,21 @@ try:
         else:
             # Raw column absent (older ktb_styles) -> emit empty so schema is stable.
             print(f"   ⚠️  {_raw_col} not in source; {_staging_col} set to '' ")
+            df_with_request_name = df_with_request_name.withColumn(_staging_col, lit(""))
+
+    # Fit (owner spec 2026-09-30): one column PER SUBMIT, status + timestamp
+    # only, submits beyond sync.samples.FIT_MAX_SUBMITS ignored. The UDF is
+    # built by a factory so each column binds ITS OWN submit number (a lambda
+    # in the loop would late-bind every column to the last one).
+    def _submit_udf(n):
+        return udf(lambda raw: format_submit_status(raw, n), StringType())
+
+    for _staging_col, _spec in FIT_SUBMIT_FIELDS.items():
+        if _spec["raw"] in df_with_request_name.columns:
+            df_with_request_name = df_with_request_name.withColumn(
+                _staging_col, _submit_udf(_spec["submit"])(col(_spec["raw"])))
+        else:
+            print(f"   ⚠️  {_spec['raw']} not in source; {_staging_col} set to '' ")
             df_with_request_name = df_with_request_name.withColumn(_staging_col, lit(""))
 
     # Show unique request names
@@ -539,7 +554,8 @@ try:
         col("proto_sample_status"),        # -> "Proto Sample - Sample Status"
         col("preline_sample_status"),      # -> "Pre-line Sample - Status"
         col("sms_sample_status"),          # -> "SMS - Sample Status"
-        col("fit_sample_status"),          # -> "2nd Fit Sample Approval Status" (was "1st Fit ...")
+        col("fit_1st_sample_status"),      # -> "1st Fit Sample Approval Status" (submit 1, 2026-09-30)
+        col("fit_2nd_sample_status"),      # -> "2nd Fit Sample Approval Status" (submit 2, 2026-09-30)
         col("pp_sample_status"),           # -> "PP Sample Submission Approval Status" (was "2nd Fit ...")
         col("top_sample_status"),          # -> "TOP Sample Approval Status"
 

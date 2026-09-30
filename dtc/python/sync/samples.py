@@ -42,7 +42,8 @@ confirmed 2026-07-07):
     Proto Sample    proto_sample_status     →  "Proto Sample - Sample Status"
     PreLine Sample  preline_sample_status   →  "Pre-line Sample - Status"
     SMS Sample      sms_sample_status       →  "SMS - Sample Status"
-    Fit Sample      fit_sample_status       →  "2nd Fit Sample Approval Status"    (was "1st Fit ...")
+    Fit Sample      fit_1st_sample_status   →  "1st Fit Sample Approval Status"   (submit 1 only; 2026-09-30)
+                    fit_2nd_sample_status   →  "2nd Fit Sample Approval Status"   (submit 2 only; 2026-09-30)
     PP Sample       pp_sample_status        →  "PP Sample Submission Approval Status"  (was "2nd Fit ...")
     TOP Sample      top_sample_status       →  "TOP Sample Approval Status"
 
@@ -50,6 +51,14 @@ confirmed 2026-07-07):
     "PP Sample Submission Approval Status" confirmed correct by the project team
     2026-08-28 (the originally requested "PP Sample Approval Status" does not exist
     as a field in the live view).
+
+**Fit is different (owner spec 2026-09-30, see FIT_SUBMIT_FIELDS):** it has at
+most 2 submits, and each goes to its OWN column holding only that submit's
+status and timestamp -- ``"submitStatus","submitStatusDate"``, no submit name.
+Submit 1 -> "1st Fit Sample Approval Status", submit 2 -> "2nd Fit Sample
+Approval Status", any further submit is ignored. The status text can change, so
+both columns follow BeProduct on every run -- including being CLEARED when the
+submit no longer exists (phase1.CLEAR_WHEN_BLANK_COLS).
 
 The DTC column mapping (staging → DTC) lives in phase1.FIELD_MAPPING; this module
 owns the raw-column names and the deterministic formatter so it can be unit-tested
@@ -63,7 +72,10 @@ from typing import Any, Dict, List, Optional
 
 __all__ = [
     "SAMPLE_SUBMIT_FIELDS",
+    "FIT_SUBMIT_FIELDS",
+    "FIT_MAX_SUBMITS",
     "format_sample_field",
+    "format_submit_status",
 ]
 
 # Phase 7 mappings — all 6 sample apps.
@@ -97,10 +109,7 @@ SAMPLE_SUBMIT_FIELDS: Dict[str, Dict[str, str]] = {
         "staging": "sms_sample_status",
         "dtc": "SMS - Sample Status",
     },
-    "fit_sample_json": {
-        "staging": "fit_sample_status",
-        "dtc": "2nd Fit Sample Approval Status",   # changed 2026-08-28, was "1st Fit Sample Approval Status"
-    },
+    # Fit is NOT here since 2026-09-30 -- it splits per submit, see FIT_SUBMIT_FIELDS.
     "pp_sample_json": {
         "staging": "pp_sample_status",
         "dtc": "PP Sample Submission Approval Status",  # confirmed 2026-08-28, was "2nd Fit Sample Approval Status"
@@ -108,6 +117,21 @@ SAMPLE_SUBMIT_FIELDS: Dict[str, Dict[str, str]] = {
     "top_sample_json": {
         "staging": "top_sample_status",
         "dtc": "TOP Sample Approval Status",
+    },
+}
+
+
+# Fit sample (owner spec 2026-09-30): at most 2 submits, one DTC column each,
+# holding only that submit's status + timestamp. Submits beyond FIT_MAX_SUBMITS
+# are ignored. Both DTC columns were confirmed present in the view 2026-08-28.
+FIT_MAX_SUBMITS = 2
+#   staging column    ->   (raw ktb_styles column, submit number (1-based), DTC column)
+FIT_SUBMIT_FIELDS: Dict[str, Dict[str, Any]] = {
+    "fit_1st_sample_status": {
+        "raw": "fit_sample_json", "submit": 1, "dtc": "1st Fit Sample Approval Status",
+    },
+    "fit_2nd_sample_status": {
+        "raw": "fit_sample_json", "submit": 2, "dtc": "2nd Fit Sample Approval Status",
     },
 }
 
@@ -172,13 +196,26 @@ def format_sample_field(raw: Any) -> str:
             '"1ST Submit","Requested","2026-05-14T00:00:00Z"\\n'
             '"2ND Submit","Approved","2026-06-20T00:00:00Z"'
     """
-    records = _load_records(raw)
-    if not records:
-        return ""
+    lines: List[str] = []
+    for r in _first_record_per_submit(raw):
+        triple = [r.get("submit_name"), r.get("submit_status"), r.get("submit_status_date")]
+        lines.append(",".join(_quote(v) for v in triple))
 
+    if not lines:
+        return ""
+    return "\n".join(lines)
+
+
+def _first_record_per_submit(raw: Any) -> List[Dict[str, Any]]:
+    """One record per distinct submit (its FIRST size), in BeProduct's order.
+
+    Records are ordered submit-by-submit, size-by-size (see
+    p1p7_beproduct_style_sync.extract_sample_submits), so the first record per
+    submit_id is that submit's first size.
+    """
     first_by_submit: Dict[Any, Dict[str, Any]] = {}
     order: List[Any] = []
-    for r in records:
+    for r in _load_records(raw):
         # Key on submit_id; fall back to submit_name so records without an id
         # still group sensibly (one line per distinct submit).
         sid = r.get("submit_id")
@@ -187,13 +224,29 @@ def format_sample_field(raw: Any) -> str:
         if sid not in first_by_submit:
             first_by_submit[sid] = r
             order.append(sid)
+    return [first_by_submit[sid] for sid in order]
 
-    lines: List[str] = []
-    for sid in order:
-        r = first_by_submit[sid]
-        triple = [r.get("submit_name"), r.get("submit_status"), r.get("submit_status_date")]
-        lines.append(",".join(_quote(v) for v in triple))
 
-    if not lines:
+def format_submit_status(raw: Any, submit_no: int) -> str:
+    """
+    ONE submit's status and timestamp, for the per-submit Fit columns
+    (owner spec 2026-09-30)::
+
+        "submitStatus","submitStatusDate"
+
+    `submit_no` is 1-based, in BeProduct's submit order (first size of each
+    submit, as format_sample_field uses). A submit that does not exist -> ``""``,
+    which phase1 turns into a CLEAR of the DTC cell for these columns, so a
+    removed submit does not leave stale text behind.
+
+    Examples:
+        submit 1 of two:  '"Requested","2026-09-23T11:16:14.37Z"'
+        submit 3 of two:  ''
+    """
+    if submit_no < 1:
         return ""
-    return "\n".join(lines)
+    submits = _first_record_per_submit(raw)
+    if submit_no > len(submits):
+        return ""
+    r = submits[submit_no - 1]
+    return ",".join(_quote(v) for v in (r.get("submit_status"), r.get("submit_status_date")))

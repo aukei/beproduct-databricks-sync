@@ -29,8 +29,8 @@ rationale. You should not need it to fix a production issue.
 
 | Job | Id | Schedule (HKT) | Does |
 |---|---|---|---|
-| `BeProduct_DTC_sync_v2` | 367710575109755 | every **15 min** at :05 / :20 / :35 / :50 (~3.5 min per run) | everything except NT Orbit |
-| `BeProduct_DTC_sync_duty_compute` | 1026599988408090 | every **15 min** at :12 / :27 / :42 / :57 (~30 s in steady state) | NT Orbit lookups → `nt_orbit_duty_cache` + `costing_chart`. Never touches DTC |
+| `BeProduct_DTC_sync_v2` | 367710575109755 | every **8 min**, periodic trigger (~3.5 min per run; a tick during a run is skipped) | everything except NT Orbit |
+| `BeProduct_DTC_sync_duty_compute` | 1026599988408090 | every **8 min**, periodic trigger (~30 s in steady state) | NT Orbit lookups → `nt_orbit_duty_cache` + `costing_chart`. Never touches DTC |
 
 `BeProduct_DTC_sync_dag` (v1) and `BeProduct_DTC_sync_images` are **paused**.
 If either is running, someone un-paused it. Pause it again.
@@ -50,9 +50,9 @@ flowchart LR
 
 | Change made | Earliest it shows up |
 |---|---|
-| Style edited in BeProduct | the next main run (≤ 15 min, plus ~4 min run time) |
+| Style edited in BeProduct | the next main run (≤ 8 min, plus ~4 min run time) |
 | Value typed into DTC (vendor, factory, Lineplan Ref #, Lot# …) | the next main run. `pull_master_dtc` takes its snapshot at the start of the run, so a save made mid-run waits for the run after |
-| A new costing line that needs an NT Orbit lookup | the next `duty_compute` (:12 / :27 / :42 / :57), then the next main run. Allow ~30 min end to end |
+| A new costing line that needs an NT Orbit lookup | the next `duty_compute` (every 8 min), then the next main run. Allow ~20 min end to end |
 | Techpack / BOM extraction updated | the next main run, provided the Lakebase row is already there |
 
 ### 0.3 Check these first — they explain most reports
@@ -382,7 +382,7 @@ FROM lft.beproduct.costing_chart WHERE bp_style_no = 'KTB-00029';
 | Check | Cause | Fix |
 |---|---|---|
 | `production_country` blank | **No lookup is ever made for a blank origin, and no error is logged.** Either `Factory` / `Factory N` is blank on the row, or the country lookup was not materialized (2.2, the view-at-save rule) | Enter the factory, and make sure the country column is on the Full view. Country follows the **factory**, not the vendor |
-| Line is new since the last `duty_compute` | Lookups only happen in `duty_compute`, every 15 min | Wait, or run `BeProduct_DTC_sync_duty_compute` now, then the main job |
+| Line is new since the last `duty_compute` | Lookups only happen in `duty_compute`, every 8 min | Wait, or run `BeProduct_DTC_sync_duty_compute` now, then the main job |
 | `duty_compute` failed or reported `failed: N` | NT Orbit error or timeout (calls take ~30–60 s each) | Re-run. Failed markets are retried next time |
 | `duty_compute` fails with `NT Orbit /api/v1/health check failed`, or an Entra `AADSTS…` error | The refresh token is dead: the job has not run for ~90 days, or the signed-in account lost access | See 4.3 |
 | Only `tariff_rate` blank | Tariff only comes from the **US** call | Same as the rows above. US is re-queried whenever tariff is blank |
@@ -398,7 +398,7 @@ need a call".
 |---|---|---|
 | `wip_push` exit value: `run_duty_push`, or `duty_rows_matched` low | Duty push disabled, or the costing line did not find its WIP row | The join is **(BP Style#, colour, Mill Fabric Article #)**. An article # changed in DTC after costing breaks it until the next rebuild |
 | `columns_not_seen_in_view` lists the duty column | Column missing or renamed in the DTC view. The value is dropped by the allow-list | Check the exact names in SYNC_CONTRACT.md → "Costing/duty → DTC". They are **not symmetric**: `Factory 1 - HTS code`, `Factory 1 - Tariff`, `Main Factory Tariff` |
-| Filled by `duty_compute` **after** the main run | The value reaches DTC on the next main run (≤ 15 min) | Wait, or re-run just the push: `w.jobs.run_now(job_id=367710575109755, only=["wip_push"])` |
+| Filled by `duty_compute` **after** the main run | The value reaches DTC on the next main run (≤ 8 min) | Wait, or re-run just the push: `w.jobs.run_now(job_id=367710575109755, only=["wip_push"])` |
 
 ### 4.3 Re-authorizing NT Orbit
 

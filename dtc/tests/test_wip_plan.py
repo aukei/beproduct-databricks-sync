@@ -766,6 +766,32 @@ check("[8d] run 3 is still empty (no oscillation)", run3.is_empty())
 
 
 # ---------------------------------------------------------------------------
+print("\n[9] Fit per-submit columns reach the PATCH -- update, clear, and stay lean (2026-09-30)")
+# ---------------------------------------------------------------------------
+F1, F2 = "1st Fit Sample Approval Status", "2nd Fit Sample Approval Status"
+check("[9a] both Fit columns are in the PATCH allow-list", {F1, F2} <= ALLOWED)
+settled_fit = dtc_row("r1", 1, **{FG: "Main Fabric", MA: "WV-0003", PL: "BODICE",
+                                  CT: "Cotton 100%", F1: '"Requested","t1"', F2: '"Requested","t2"'})
+p9 = wip_plan.compute_request_plan(
+    SCOPE, [settled_fit],
+    [bp_row(fit_1st_sample_status='"Approved","t3"', fit_2nd_sample_status="")],
+    bom_by_style={"KTB-1": MAIN_ONLY}, allowed_cols=ALLOWED)
+body = p9.update_sheet_data()
+check("[9b] one UPDATE for the row", len(body) == 1, p9.explain())
+check("[9c] changed status text is pushed", body and body[0].get(F1) == '"Approved","t3"', str(body))
+check("[9d] removed 2nd submit is CLEARED (null in the PATCH)",
+      body and F2 in body[0] and body[0][F2] is None, str(body))
+check("[9e] nothing else leaks into the PATCH",
+      body and set(body[0]) == {"rowId", F1, F2}, str(body))
+p9s = wip_plan.compute_request_plan(
+    SCOPE, [dtc_row("r1", 1, **{FG: "Main Fabric", MA: "WV-0003", PL: "BODICE",
+                                CT: "Cotton 100%", F1: '"Approved","t3"'})],
+    [bp_row(fit_1st_sample_status='"Approved","t3"', fit_2nd_sample_status="")],
+    bom_by_style={"KTB-1": MAIN_ONLY}, allowed_cols=ALLOWED)
+check("[9f] settled Fit state (2nd already blank) => zero writes", p9s.is_empty(), p9s.explain())
+
+
+# ---------------------------------------------------------------------------
 print("\n" + "=" * 70)
 total = _passed + len(_failed)
 if _failed:

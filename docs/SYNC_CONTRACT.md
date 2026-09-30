@@ -54,7 +54,7 @@ Then update the tests: `test_phase1.py`, `test_phase2.py`, `test_phase3.py`,
    inconsistently cased and carry trailing spaces.
 3. **Every WIP PATCH body must be lean** — only fields from the allow-list below,
    a subset per call is fine, nothing outside it ever. This is explicit
-   DTC-developer guidance, and in v2 it is also what keeps a 15-minute cadence
+   DTC-developer guidance, and in v2 it is also what keeps an 8-minute cadence
    tolerable. Each payload builder is the sole source of its own keys, so the
    property holds by construction; verify it still does after any change.
 4. **Batch every change for one row into one PATCH object.** Never two calls for
@@ -101,7 +101,8 @@ or `]` at all), with multiple submits stacked on newline-separated lines.
 | `proto_sample` | `Proto Sample - Sample Status` |
 | `preline_sample` | `Pre-line Sample - Status` — lowercase `l`, dash |
 | `sms_sample` | `SMS - Sample Status` |
-| `fit_sample` | `2nd Fit Sample Approval Status` |
+| `fit_sample` submit **1** | `1st Fit Sample Approval Status` — **Fit rule below** |
+| `fit_sample` submit **2** | `2nd Fit Sample Approval Status` — **Fit rule below** |
 | `pp_sample` | `PP Sample Submission Approval Status` |
 | `top_sample` | `TOP Sample Approval Status` |
 
@@ -110,6 +111,15 @@ All 6 confirmed present in the view (204 fields then; 205 since 2026-09-22). Fit
 destination originally requested, `PP Sample Approval Status`, does not exist live
 — `PP Sample Submission Approval Status` was the only plausible match and has since
 been confirmed correct by the project team.
+
+**Fit is the exception (owner spec 2026-09-30).** Fit has at most 2 submits, and
+each goes to its own column holding ONLY that submit's status and timestamp:
+`"submitStatus","submitStatusDate"` (no submit name, one line). Submit 1 →
+`1st Fit …`, submit 2 → `2nd Fit …`, a 3rd or later submit is ignored. The status
+text can change, so both columns follow BeProduct every run, and they are the
+only columns this pipeline **clears**: if BeProduct has no such submit while DTC
+holds a value, the cell is set to null (`phase1.CLEAR_WHEN_BLANK_COLS`).
+Blank-vs-blank is never a diff, so this costs no writes in steady state.
 
 ### BOM → DTC (material fields)
 
@@ -296,7 +306,8 @@ Gender                  Supplier                Fabric Group
 Placement               Mill Fabric Article #   Content
 LF Fabric ID
 Proto Sample - Sample Status                    Pre-line Sample - Status
-SMS - Sample Status                             2nd Fit Sample Approval Status
+SMS - Sample Status                             1st Fit Sample Approval Status
+2nd Fit Sample Approval Status
 PP Sample Submission Approval Status            TOP Sample Approval Status
 ```
 

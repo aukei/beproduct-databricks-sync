@@ -183,7 +183,11 @@ FIELD_MAPPING: Dict[str, str] = {
     "proto_sample_status":   "Proto Sample - Sample Status",
     "preline_sample_status": "Pre-line Sample - Status",      # note: lowercase 'l', dash
     "sms_sample_status":     "SMS - Sample Status",
-    "fit_sample_status":     "2nd Fit Sample Approval Status",           # was "1st Fit Sample Approval Status"
+    # Fit splits per submit (owner spec 2026-09-30): each column holds ONE
+    # submit's "status","timestamp" and is CLEARED when BeProduct has no such
+    # submit (CLEAR_WHEN_BLANK_COLS). Was one column with the full history.
+    "fit_1st_sample_status": "1st Fit Sample Approval Status",
+    "fit_2nd_sample_status": "2nd Fit Sample Approval Status",
     "pp_sample_status":      "PP Sample Submission Approval Status",     # was "2nd Fit Sample Approval Status"
     "top_sample_status":     "TOP Sample Approval Status",
     # --- default-fill (only written when DTC cell is blank; see DEFAULT_FILL_COLS) ---
@@ -206,6 +210,18 @@ FIELD_MAPPING: Dict[str, str] = {
 # "Mill Fabric Article #" added 2026-09-11 (WIP = style x color x material) --
 # Phase 1 stages the DUMMY_FABRIC_ARTICLE constant at INSERT only; Phase 10 is
 # the sole ongoing owner, same write-once pattern as Fabric Group/Placement.
+# Columns that FOLLOW BeProduct all the way to blank: when BeProduct has no value
+# and DTC does, the DTC cell is CLEARED on UPDATE (sent as null). Everything else
+# is never blanked by this pipeline ("Phase 1 sets indicated fields").
+# The per-submit Fit columns (2026-09-30) need it: if a 2nd Fit submit is
+# removed in BeProduct, its old status must not stay in DTC forever. A blank
+# never triggers an INSERT value, and blank-vs-blank is never a diff, so this
+# costs zero writes in steady state.
+CLEAR_WHEN_BLANK_COLS: frozenset = frozenset({
+    "1st Fit Sample Approval Status",
+    "2nd Fit Sample Approval Status",
+})
+
 DEFAULT_FILL_COLS: frozenset = frozenset(
     {"Supplier", "Fabric Group", "Placement", "Mill Fabric Article #"})
 
@@ -433,6 +449,14 @@ def diff_updatable_fields(
             continue  # DTC already has a value; never overwrite a default-fill col
         if norm(dtc_row.get(col)) != norm(new_val):
             changed[col] = new_val
+    # CLEAR_WHEN_BLANK_COLS: BeProduct blank (so absent from `target`) but DTC
+    # holds a value -> clear it. None is sent as JSON null, which DTC accepts
+    # as "empty the cell" (live-verified on the duty columns, 2026-09-07).
+    for col in CLEAR_WHEN_BLANK_COLS:
+        if col in target or (allowed_cols is not None and col not in allowed_cols):
+            continue
+        if norm(dtc_row.get(col)) is not None:
+            changed[col] = None
     return changed
 
 

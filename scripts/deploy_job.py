@@ -284,6 +284,18 @@ JOB_SCHEDULE_DUTY = jobs.CronSchedule(
     pause_status=jobs.PauseStatus.UNPAUSED,
 )
 
+# ── 8-minute periodic trigger (owner spec 2026-09-30) ───────────────────────
+# Supersedes JOB_SCHEDULE_V2 / JOB_SCHEDULE_DUTY for the v2 main job and
+# duty_compute. It was set on the live jobs first and is mirrored here so a
+# --reset-existing does not bring back the old crons.
+#
+# Written as RAW API JSON, not an SDK object: databricks-sdk 0.55's
+# PeriodicTriggerConfigurationTimeUnit only knows DAYS/HOURS/WEEKS, while the
+# API accepts MINUTES (live-confirmed). A job with a `trigger` has no cron
+# `schedule`; build_settings() drops it. max_concurrent_runs=1 means a tick
+# that lands while a run is still going is skipped, never overlapped.
+PERIODIC_8_MIN = {"pause_status": "UNPAUSED", "periodic": {"interval": 8, "unit": "MINUTES"}}
+
 JOB_TAGS = {"userpurpose": "lft-job-bpsync"}
 JOB_QUEUE = jobs.QueueSettings(enabled=True)
 
@@ -381,7 +393,9 @@ JOB_PARAMS = {
     # `writes: 0`. That reads as success and is not.
     # Flip back to "true" only once the LF-Material-Code -> materialId resolver
     # is proven live (see AGENTS.md, and the probe in v2_probe_material_code).
-    "run_customer_code_push": "false",
+    # ON since 2026-09-30 (owner decision): it had been enabled on the live
+    # jobs, and the owner chose to keep it on rather than let a redeploy revert it.
+    "run_customer_code_push": "true",
     # Unqualified output table name for build_costing. Routine runs write the
     # real table; override it to build a comparison copy without replacing what
     # duty_compute reads and MERGEs. (The old `costing_chart_kei` scratch table
@@ -1058,6 +1072,7 @@ JOB_SPECS = {
         "display_name": "BeProduct_DTC_sync_duty_compute",
         "build_tasks": build_duty_compute_tasks,
         "schedule": JOB_SCHEDULE_DUTY,
+        "trigger": PERIODIC_8_MIN,   # wins over "schedule" (2026-09-30)
         # Serverless as of 2026-09-15: once the main DAG moved off the classic
         # cluster, this was the only remaining job using the Instance Pool, so
         # keeping it on classic meant paying for warm VMs to serve two runs a
@@ -1106,6 +1121,7 @@ JOB_SPECS = {
         # build_v2_tasks() and docs/MIGRATION_V1_V2.md.
         "param_overrides": {"module_path": NB_PY_V2, "delta_only": "false"},
         "schedule": JOB_SCHEDULE_V2,
+        "trigger": PERIODIC_8_MIN,   # wins over "schedule" (2026-09-30)
     },
 }
 
@@ -1119,6 +1135,10 @@ def build_settings(job_key: str, schedule=_SCHEDULE_SENTINEL) -> jobs.JobSetting
     # An explicit `schedule=` argument still wins, so --no-schedule works.
     if schedule is _SCHEDULE_SENTINEL:
         schedule = spec.get("schedule", JOB_SCHEDULE)
+    # A periodic trigger replaces the cron (see PERIODIC_8_MIN); it is applied
+    # as raw JSON by apply_settings(), so the SDK settings carry no schedule.
+    if spec.get("trigger") and schedule is not None:
+        schedule = None
     # A fully-serverless job declares no job clusters. The SPEC FLAG IS
     # AUTHORITATIVE: any job_cluster_key a build_tasks() helper set is stripped
     # here, rather than trusting every task to pass serverless=True itself.
@@ -1149,11 +1169,16 @@ def build_settings(job_key: str, schedule=_SCHEDULE_SENTINEL) -> jobs.JobSetting
     )
 
 
-def _preview(settings: jobs.JobSettings):
+def _preview(settings: jobs.JobSettings, trigger=None):
     sched = settings.schedule
-    sched_str = (f"{sched.quartz_cron_expression} ({sched.timezone_id}) "
-                 f"pause={sched.pause_status.value if sched.pause_status else 'n/a'}"
-                 if sched else "none (deploy manually)")
+    if trigger:
+        _p = trigger.get("periodic", {})
+        sched_str = (f"periodic trigger every {_p.get('interval')} {str(_p.get('unit')).lower()} "
+                     f"pause={trigger.get('pause_status')}")
+    else:
+        sched_str = (f"{sched.quartz_cron_expression} ({sched.timezone_id}) "
+                     f"pause={sched.pause_status.value if sched.pause_status else 'n/a'}"
+                     if sched else "none (deploy manually)")
     print(f"Job name : {settings.name}")
     print(f"Schedule : {sched_str}")
     if settings.job_clusters:
@@ -1197,13 +1222,14 @@ def main():
             sys.exit("--reset-existing requires a single --job (not 'all').")
         for key in JOB_SPECS:
             settings = build_settings(key, schedule=schedule)
-            _preview(settings)
+            _preview(settings, None if args.no_schedule else JOB_SPECS[key].get("trigger"))
             print()
         print("Dry run — nothing applied. Pass --job <name> to deploy a specific job.")
         return
 
     settings = build_settings(args.job, schedule=schedule)
-    _preview(settings)
+    trigger = None if args.no_schedule else JOB_SPECS[args.job].get("trigger")
+    _preview(settings, trigger)
 
     if args.dry_run:
         print("\nDry run — nothing applied.")
@@ -1216,10 +1242,25 @@ def main():
         os.environ["DATABRICKS_TOKEN"] = os.environ["DATABRICKS_PAT"]
 
     w = WorkspaceClient()
-    if args.reset_existing:
+    if args.reset_existing and trigger:
+        # Raw endpoint: the SDK cannot serialise a MINUTES trigger (see PERIODIC_8_MIN).
+        body = settings.as_dict()
+        body.pop("schedule", None)
+        body["trigger"] = trigger
+        w.api_client.do("POST", "/api/2.2/jobs/reset",
+                        body={"job_id": args.reset_existing, "new_settings": body})
+        job_id = args.reset_existing
+        print(f"\nReset existing job {job_id} ({args.job}) with trigger {trigger}.")
+    elif args.reset_existing:
         w.jobs.reset(job_id=args.reset_existing, new_settings=settings)
         job_id = args.reset_existing
         print(f"\nReset existing job {job_id} ({args.job}) to the current task graph.")
+    elif trigger:
+        body = settings.as_dict()
+        body.pop("schedule", None)
+        body["trigger"] = trigger
+        job_id = w.api_client.do("POST", "/api/2.2/jobs/create", body=body)["job_id"]
+        print(f"\nCreated job {job_id} ({settings.name}) with trigger {trigger}.")
     else:
         created = w.jobs.create(
             name=settings.name,
