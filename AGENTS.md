@@ -390,6 +390,12 @@ pool (2026-10-06, owner spec, applied live + read back):**
   deleted right away, because deleting a job also deletes its run history.
   Live-verified with the smoke check: job 59238247618719, tag dev, SUCCESS
   12/12.
+- **The two Lakebase synced-table pipelines** that copy `costing_chart` into
+  `alb_tpm_{uat,prd}.public.ref_beproduct_ktb_costing_chart` (`cb4fc20a-…`
+  uat, `a65e4df7-…` prd) carry their OWN value, `userpurpose =
+  lft-kontoor-costing`. The owner set it in the pipeline settings UI; the API
+  read-back shows it in `spec.tags`. Do not "normalise" it to `-sync`. The
+  same tag also sits on both synced tables as a UC table tag (governance only).
 - **Any new one-off launcher must go through `run_adhoc()`, never
   `jobs.submit`.** `run_v2_job.py` is different: it calls `run_now` on a
   PRODUCTION job, so those runs carry the sync tag. Cloning that job to tag
