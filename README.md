@@ -5,7 +5,7 @@ Bi-directional synchronization between **BeProduct** (style PLM) and **DTC**
 schema `lft.beproduct`. Each field syncs **one way only** (no loops).
 
 > **v2 is live (since 2026-09-15).** One serverless job writes each DTC request
-> at most once per run, every 2 hours. v1 is paused and kept only for rollback.
+> at most once per run, every 8 minutes (periodic trigger since 2026-09-30). v1 is paused and kept only for rollback.
 > Design record: [docs/MIGRATION_V1_V2.md](docs/MIGRATION_V1_V2.md).
 
 ## Something is missing or wrong?
@@ -37,10 +37,10 @@ Every runbook needs at most two other documents:
 | **50** | DTC → BeProduct | Vendor, factory, customer factory ID, COO, Lot# |
 | **55** | DTC → BeProduct | Customer material code → material master (**disabled**) |
 
-| Job | ID | Schedule (HKT) | Status |
+| Job | ID | Schedule | Status |
 |---|---|---|---|
-| `BeProduct_DTC_sync_v2` | 367710575109755 | every 2 h at :05, odd hours | **live**, serverless |
-| `BeProduct_DTC_sync_duty_compute` | 1026599988408090 | 10:00, 15:00 | **live**, serverless. NT Orbit → cache + `costing_chart`, no DTC contact |
+| `BeProduct_DTC_sync_v2` | 367710575109755 | every 8 min (periodic) | **live**, serverless |
+| `BeProduct_DTC_sync_duty_compute` | 1026599988408090 | every 8 min (periodic) | **live**, serverless. NT Orbit → cache + `costing_chart`, no DTC contact |
 | `BeProduct_DTC_sync_dag` | 294837488757511 | — | v1, **paused** (rollback only) |
 | `BeProduct_DTC_sync_images` | 847087837807970 | — | v1, **paused** (superseded by Stage 45) |
 
@@ -100,7 +100,7 @@ for t in dtc/tests/test_{phase1,phase2,phase3,samples,bom,bom_push,duty,wip_plan
 
 # Run the job with no DTC / BeProduct writes (Delta is still rebuilt), collecting every task's exit JSON
 python scripts/run_v2_job.py --job-id 367710575109755 dry_run=true
-python scripts/run_v2_task.py v2_wip_push dry_run=true            # one notebook, one-off
+python scripts/run_v2_task.py v2_wip_push dry_run=true            # one notebook, one-off (dev-tagged throwaway job)
 
 # Deploy notebooks + modules to the v2 workspace root
 python scripts/upload_notebooks.py --root /Workspace/Repos/beproduct-sync-v2

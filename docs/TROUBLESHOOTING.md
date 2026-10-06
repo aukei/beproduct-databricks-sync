@@ -51,7 +51,7 @@ flowchart LR
 | Change made | Earliest it shows up |
 |---|---|
 | Style edited in BeProduct | the next main run (≤ 8 min, plus ~4 min run time) |
-| Value typed into DTC (vendor, factory, Lineplan Ref #, Lot# …) | the next main run. `pull_master_dtc` takes its snapshot at the start of the run, so a save made mid-run waits for the run after |
+| Value typed into DTC (vendor, factory, LinePlan ref#, Lot# …) | the next main run. `pull_master_dtc` takes its snapshot at the start of the run, so a save made mid-run waits for the run after |
 | A new costing line that needs an NT Orbit lookup | the next `duty_compute` (every 8 min), then the next main run. Allow ~20 min end to end |
 | Techpack / BOM extraction updated | the next main run, provided the Lakebase row is already there |
 
@@ -221,7 +221,7 @@ INSERTs the row into the new request and marks the old one
 ### 1.6 A user deleted it
 
 The next run re-INSERTs it, because the key is missing from DTC. The
-DTC-owned values the user had typed (vendor, factory, Lineplan Ref #) do
+DTC-owned values the user had typed (vendor, factory, LinePlan ref#) do
 **not** come back. Recover them from
 `dtc_wip_ktb VERSION AS OF <version before the delete>`.
 
@@ -351,7 +351,7 @@ Walk the gates **in order**. The first one that fails is your answer:
 | 7 | At least one vendor slot filled | `dropped_no_vendor_slot` | Enter `Main Vendor (Sampling)` or `Vendor 1–3` on the Main Fabric row |
 
 Rules of thumb:
-- All DTC-owned inputs (Lineplan Ref #, vendors, factories) belong on the
+- All DTC-owned inputs (LinePlan ref#, vendors, factories) belong on the
   **Main Fabric** row. Costing reads one representative row per style ×
   colour, and prefers Main Fabric.
 - If a request was emptied or rebuilt, **these DTC-owned values are gone** and
@@ -478,6 +478,8 @@ Things that look like "outdated" but are not:
 | DTC `400 Duplicate rowId found` | Two sheetData objects share a rowId in one call. Either DTC's own sheet GET returned that rowId twice (seen 2026-09-29 on a LinePlan sheet), or a regression in the duty merge | **Check first**: does a live `GET /v1/sheets/{s}/views/{v}` list the rowId twice? If so, report it to DTC; we deliberately do not merge on our side. Otherwise it is the duty merge (PIPELINE.md → Stage 40, duty gate 4) |
 | DTC `400 … is an image field` / `… is a formula field` | An INSERT copied a non-writable column | A regression in `bom.build_insert_row_payload` (Stage 40, material gate 7) |
 | Image upload `Row cannot be found by rowid` | The row was deleted between the read and the upload | The next run retries |
+| Image skipped `unsupported_postscript_ai` / `unsupported_vector_image` / `unsupported_image_type` | The BeProduct front image is a format DTC cannot store and Phase 3 cannot convert (PostScript-only `.ai`, SVG, …). A PDF-compatible `.ai` IS converted | Replace the front image in BeProduct with jpg/png (or re-save the `.ai` with "Create PDF Compatible File") |
+| Image skipped `pdf_renderer_unavailable` | pypdfium2 failed to pip-install on the task | Check the `phase3_images` task's install cell; other images are unaffected |
 | A BeProduct field went blank after a push | BeProduct silently blanks a DropDown/MultiSelect value that is not in that field's Master Data, or a MultiSelect sent as a bare string | Check the value against `lft.beproduct.beproduct_master_<field>` (refresh with `p5utl_beproduct_master_data_sync` `PULL_ONLY`); fix the value in DTC |
 
 ---
@@ -488,7 +490,7 @@ Things that look like "outdated" but are not:
 |---|---|
 | **Start here:** every current gap, who fixes it, what to do | Dashboard **BeProduct DTC - Data gaps** (view `lft.beproduct.v_data_gaps`). Deploy/update: `python scripts/deploy_gap_dashboard.py`. Each row names its runbook |
 | Run the whole job without writing | `python scripts/run_v2_job.py --job-id 367710575109755 dry_run=true` |
-| Run one notebook one-off | `python scripts/run_v2_task.py <notebook> key=value …` |
+| Run one notebook one-off | `python scripts/run_v2_task.py <notebook> key=value …` (a throwaway job tagged `lft-kontoor-dev`; never `jobs.submit`, which cannot be tagged) |
 | Re-run selected tasks of the job | `w.jobs.run_now(job_id=…, only=["wip_push"])` |
 | List DTC requests and why each is in or out of scope | `dtc/notebooks/v2_inspect_requests.py` (read-only) |
 | Set **one** DTC cell safely | `dtc/notebooks/v2_set_dtc_cell.py` (matches BP Style# + colour + article; refuses on ambiguity; reads the value back) |

@@ -431,6 +431,10 @@ class DTCConnector:
         """
         Insert a single new row via the validated PATCH/sheetData contract.
 
+        v1 LEGACY. New code inserts with `append_rows()`, where DTC assigns
+        rowId/rowIndex. A caller-chosen `row_index` goes stale as soon as anyone
+        else inserts, deletes or re-orders rows.
+
         Args:
             sheet_id: DTC sheet ID
             view_id: DTC view ID (e.g. the WIP_ITS_USE view)
@@ -468,6 +472,10 @@ class DTCConnector:
     ) -> Dict[str, Any]:
         """
         Batch insert/update rows in one call (the native shape of the API).
+
+        Use it for UPDATES (rowId). For INSERTS use `append_rows()`: the
+        rowIndex-insert form below is the v1 path and relies on a client-computed
+        index (`get_max_row_index() + 1`) that a concurrent edit can invalidate.
 
         Args:
             sheet_id: DTC sheet ID
@@ -1014,6 +1022,9 @@ class DTCConnector:
     def get_max_row_index(self, sheet_id: str, view_id: str) -> int:
         """
         Get maximum rowIndex for a sheet.
+
+        v1 LEGACY: only the rowIndex-insert path needs this. `append_rows()`
+        makes the server assign indexes, so new code should not call it.
         
         Args:
             sheet_id: DTC sheet ID
@@ -1044,6 +1055,8 @@ class DTCConnector:
     ) -> Dict:
         """
         Update existing row (row_id) or insert a new row (row_index).
+
+        Inserting via `row_index` is the v1 path; prefer `append_rows()`.
 
         Backwards-compatible single-row wrapper around patch_rows() using the
         validated PATCH/sheetData contract (see patch_rows docstring).

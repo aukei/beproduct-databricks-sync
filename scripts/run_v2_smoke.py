@@ -6,9 +6,9 @@ Validates, on real serverless compute, the two assumptions the v2 port rests on
 (Workspace Files import via `module_path`, and scalar Python UDFs) plus the
 other Spark Connect surfaces v2 uses. See dtc/notebooks/v2_smoke_check.py.
 
-Why a one-off `jobs.submit` rather than a deployed job: it creates NOTHING
-persistent -- no job, no schedule, nothing to clean up or accidentally leave
-running. The v2 job proper is only created once its notebooks exist.
+Runs as a small throwaway job tagged `userpurpose = lft-kontoor-dev` (see
+scripts/_adhoc.py: `runs/submit` cannot carry tags), with no schedule; such
+jobs are pruned after 7 days.
 
 SAFETY: the smoke notebook writes nothing. No Delta write, no DTC or BeProduct
 API call, no secret value printed. Safe to run while the v1 job is running.
@@ -45,12 +45,14 @@ load_dotenv(_ROOT / ".env")
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service import jobs
 
+from scripts._adhoc import ADHOC_TAGS, run_adhoc
+
 DEFAULT_WS_ROOT = "/Workspace/Repos/beproduct-sync-v2"
 RUN_NAME = "v2_serverless_smoke_check"
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Run the v2 serverless smoke check (one-off, no job created).")
+    ap = argparse.ArgumentParser(description="Run the v2 serverless smoke check (one-off, dev-tagged).")
     ap.add_argument("--root", default=DEFAULT_WS_ROOT,
                     help=f"Workspace root the v2 notebooks/modules were uploaded to (default: {DEFAULT_WS_ROOT})")
     ap.add_argument("--catalog", default="lft")
@@ -74,7 +76,7 @@ def main() -> int:
     }
 
     print("=" * 78)
-    print("v2 SERVERLESS SMOKE CHECK -- one-off run (nothing persistent is created)")
+    print("v2 SERVERLESS SMOKE CHECK -- one-off run (dev-tagged throwaway job)")
     print("=" * 78)
     print(f"  notebook    : {notebook}")
     print(f"  module_path : {module_path}")
@@ -96,17 +98,16 @@ def main() -> int:
 
     # Omitting new_cluster / existing_cluster_id / job_cluster_key => serverless,
     # the same mechanism nb_task(serverless=True) uses in deploy_job.py.
-    task = jobs.SubmitTask(
+    task = jobs.Task(
         task_key="v2_smoke_check",
         notebook_task=jobs.NotebookTask(notebook_path=notebook, base_parameters=params),
         timeout_seconds=args.timeout,
     )
 
-    print("\nSubmitting …")
-    waiter = w.jobs.submit(run_name=RUN_NAME, tasks=[task])
-    run_id = waiter.run_id
+    print(f"\nSubmitting (tags {ADHOC_TAGS}) …")
+    job_id, run_id = run_adhoc(w, RUN_NAME, [task])
     print(f"  run_id: {run_id}")
-    print(f"  {host}/jobs/runs/{run_id}")
+    print(f"  {host}/jobs/{job_id}/runs/{run_id}")
 
     deadline = time.time() + args.timeout
     state = None

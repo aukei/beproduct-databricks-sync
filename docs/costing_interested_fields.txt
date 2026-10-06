@@ -29,7 +29,7 @@ Input tables (v2 "intent" mode)
 -------------------------------
   lft.beproduct.dtc_wip_ktb                WIP start-of-run snapshot (data_json) --
                                            base row + every DTC-OWNED column
-                                           (Lineplan Ref #, vendor/factory slots,
+                                           (LinePlan ref#, vendor/factory slots,
                                            production country, existing HTS/duty/tariff)
   lft.beproduct.beproduct_to_dtc_staging   overlaid onto the WIP row: style
                                            identity, Class, Sub Class, Gender, ...
@@ -48,10 +48,10 @@ Join key
   sync/lineplan.py LINEPLAN_REF_COLS (new name first, old as fallback) --
   a name missing from the sheet reads as NULL and empties costing_chart
   silently. Add any future rename there, at the front.
-  NOTE: WIP column is plain "Lineplan Ref #" (no "(GC)" suffix — the spec
+  NOTE: the WIP column has no "(GC)" suffix (old or new name) — the spec
   annotation "(GC)" is not the literal DTC column name).
   INNER JOIN (changed from LEFT 2026-09-01, owner decision): a WIP row with
-  a blank/unmatched "Lineplan Ref #" is dropped entirely, not surfaced with
+  a blank/unmatched "LinePlan ref#" is dropped entirely, not surfaced with
   null LinePlan fields. The per-slot vendor-presence filter (below) still
   applies independently — a WIP row can match LinePlan and still produce
   zero costing rows if no vendor is assigned yet.
@@ -197,7 +197,7 @@ LinePlan field names (exact DTC column names — all UPPERCASE, confirmed 2026-0
 
 LinePlan grouping note
 -----------------------
-LinePlan may have multiple rows per "Lineplan Ref #" (different colors / regions,
+LinePlan may have multiple rows per "LinePlan ref#" (different colors / regions,
 or -- per project team decision 2026-09-01 -- different requests, since LinePlan
 requests have no naming-convention filter and ref# uniqueness across all of them
 is a human-enforced invariant). The join uses the FIRST non-null value per ref#

@@ -81,10 +81,10 @@ INSERT INTO lft.beproduct.dtc_seasoncode_mapping (CUSTOMER, BPSEASON, DTCCODE) V
 
 Production is two jobs (full detail: [docs/PIPELINE.md](docs/PIPELINE.md)):
 
-| Job | ID | Schedule (HKT) |
+| Job | ID | Schedule |
 |---|---|---|
-| `BeProduct_DTC_sync_v2` | 367710575109755 | every 2 h at :05 on odd hours |
-| `BeProduct_DTC_sync_duty_compute` | 1026599988408090 | 10:00 and 15:00 |
+| `BeProduct_DTC_sync_v2` | 367710575109755 | every 8 min (periodic trigger; a tick during a run is skipped) |
+| `BeProduct_DTC_sync_duty_compute` | 1026599988408090 | every 8 min (periodic trigger) |
 
 Key job parameters (defaults in `scripts/deploy_job.py` → `JOB_PARAMS`):
 
@@ -106,6 +106,11 @@ python scripts/run_v2_job.py --job-id 367710575109755 dry_run=true
 # One notebook as a one-off serverless run (dry_run defaults to the notebook's own default: true)
 python scripts/run_v2_task.py v2_wip_push dry_run=true
 ```
+
+`run_v2_task.py` / `run_v2_smoke.py` run as a throwaway job tagged
+`userpurpose = lft-kontoor-dev` (`scripts/_adhoc.py`; pruned after 7 days).
+`run_v2_job.py` runs the production job itself, so its runs carry the
+production tag `lft-kontoor-sync`.
 
 Serverless runs return **no stdout** through the API — only each notebook's exit
 value, which these scripts print. In the Databricks UI, a task's cell output is

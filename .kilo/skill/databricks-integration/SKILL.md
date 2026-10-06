@@ -197,60 +197,37 @@ upload_notebooks_to_databricks(
 )
 ```
 
-### Executing Notebooks
+### Executing Notebooks (one-off / ad-hoc runs)
 
-**Run notebook and get result:**
+**Every ad-hoc run must carry `userpurpose = lft-kontoor-dev`** (owner rule
+2026-10-06). Production jobs carry `lft-kontoor-sync`. **Do not use
+`w.jobs.submit`**: `runs/submit` has no `tags` field, so a submitted run is
+untagged in billing. Go through `scripts/_adhoc.py`. It creates a throwaway
+job named `kontoor_adhoc_<name>_<utc>`, tagged dev with no schedule, and
+triggers it once. Jobs older than 7 days are pruned on the next launch.
+
 ```python
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service import jobs
+from scripts._adhoc import run_adhoc
 
 w = WorkspaceClient()
-
-# Create one-time run
-run = w.jobs.submit(
-    run_name="Ad-hoc notebook run",
-    tasks=[
-        jobs.SubmitTask(
-            task_key="notebook_task",
-            notebook_task=jobs.NotebookTask(
-                notebook_path="/Workspace/path/to/notebook",
-                base_parameters={"param1": "value1", "param2": "value2"}
-            ),
-            new_cluster=jobs.ClusterSpec(
-                spark_version="13.3.x-scala2.12",
-                node_type_id="Standard_DS3_v2",
-                num_workers=2
-            )
-        )
-    ]
+task = jobs.Task(            # no cluster spec => serverless
+    task_key="notebook_task",
+    notebook_task=jobs.NotebookTask(
+        notebook_path="/Workspace/Repos/beproduct-sync-v2/DTC/notebooks/v2_inspect_requests",
+        base_parameters={"module_path": "/Workspace/Repos/beproduct-sync-v2/DTC/python"},
+    ),
+    timeout_seconds=1800,
 )
-
-# Wait for completion
-run_result = w.jobs.wait_get_run_job_terminated_or_skipped(run.run_id)
-print(f"Run status: {run_result.state.result_state}")
+job_id, run_id = run_adhoc(w, "inspect_requests", [task])
+run = w.jobs.wait_get_run_job_terminated_or_skipped(run_id)
 ```
 
-**Run on existing cluster:**
-```python
-from databricks.sdk import WorkspaceClient
-
-w = WorkspaceClient()
-
-# Run notebook on existing cluster
-run = w.jobs.submit(
-    run_name="Quick notebook run",
-    tasks=[
-        {
-            "task_key": "main",
-            "notebook_task": {
-                "notebook_path": "/Workspace/path/to/notebook",
-                "base_parameters": {"environment": "prod"}
-            },
-            "existing_cluster_id": "1234-567890-abc123"
-        }
-    ]
-)
-```
+Ready-made launchers: `scripts/run_v2_task.py <notebook> key=value …` (any
+v2 notebook) and `scripts/run_v2_smoke.py`. `scripts/run_v2_job.py` is
+different: it calls `run_now` on a PRODUCTION job, so its runs carry the sync
+tag. Serverless runs return no stdout, only the `dbutils.notebook.exit` value.
 
 ## Delta Lake Tables
 
@@ -413,6 +390,18 @@ spark.sql("DESCRIBE HISTORY lft.beproduct.ktb_styles").display()
 ## Databricks Jobs
 
 ### Creating Jobs
+
+> **This project's jobs are defined ONLY in `scripts/deploy_job.py`.** Edit the
+> spec there, then deploy. Every job, job cluster and instance pool carries the
+> cost tag `userpurpose = lft-kontoor-sync` (`JOB_TAGS` / `CLUSTER_TAGS`).
+> Ad-hoc jobs carry `lft-kontoor-dev` (see above). The generic examples below
+> show SDK shape only; if you adapt one, add `tags=` to it.
+>
+> To change ONE live setting (tags, a parameter), prefer a partial
+> `POST /api/2.2/jobs/update` over `deploy_job.py --reset-existing`. A reset
+> rewrites the whole definition from this branch and can revert live-only
+> changes. Read job triggers with the raw API: databricks-sdk 0.55 parses the
+> live 8-MINUTE periodic trigger as `unit=None`.
 
 **Using Python SDK:**
 ```python

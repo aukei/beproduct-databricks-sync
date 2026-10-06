@@ -1,760 +1,226 @@
 # DTC Integration Skill
 
-Guide for connecting to DTC (Data Collaboration Tool) and reading worksheet data.
+How to read from and write to DTC (Data Collab sheets) through this repo's
+connector, `dtc/python/connectors/dtc.py` (`DTCConnector`).
 
-> ⚠️ **Partially superseded.** The DTC **connector** usage below is current, but
-> the snapshot / change-detection / `dtc_master_chart_uat` change-log examples
-> describe a **removed** pipeline. The current model pulls the `WIP_ITS_USE` view
-> of registry-discovered requests into `lft.beproduct.dtc_wip_<customer>` and syncs
-> through the v2 stages (job `BeProduct_DTC_sync_v2`): `request_manager` (create +
-> share), `wip_push` (the single `sheetData` write window), `phase3_images`
-> (Style Image) and `phase2_push` (DTC→BeProduct). Authoritative docs — they win
-> over this file: `docs/PIPELINE.md`, `docs/SYNC_CONTRACT.md`,
-> `docs/TROUBLESHOOTING.md`, then `docs/DTC_GUIDE.md` and `AGENTS.md`.
->
-> **Current DTC write contracts** (validated live, see `AGENTS.md`):
-> - **Update** `PATCH /v1/sheets/{sheetId}/views/{viewId}` body
->   `{"sheetData":[{..., "rowId": ...}]}` → 204 (`patch_rows`).
-> - **Insert** `POST /v1/sheets/{sheetId}/views/{viewId}/rows` body
->   `{"sheetData":[{...}]}` → 201 with `{"rows":[{"rowId","rowIndex"}]}` in send
->   order (`append_rows`). DTC assigns the locators; a row carrying
->   `rowId`/`rowIndex` gets the whole request rejected. Do not compute rowIndexes.
-> - **Image** `POST /v1/sheets/{sheetId}/views/{viewId}/images?rowid={rowId}&columnname=Style Image`
->   (multipart, file part `file`; webp rejected → transcode to PNG). The param is
->   lowercase **`rowid`** (camelCase `rowId` is silently ignored). Never address by
->   `rowindex`: a stale/non-existent index returns 201 and **silently creates a
->   row** instead of failing.
-> - **Delete** `DELETE /v1/sheets/{sheetId}/views/{viewId}/rows` body
->   `{"rowIndexes":[...]}` → 204, but removes **at most ~11 rows per call** and
->   renumbers the rest — loop: re-read, delete, repeat until empty.
-> - **Create request** `POST /v1/sheets` (201; `requestReference` + non-empty
->   `requestDescription` + array fields); **share**
->   `POST /v1/requests/{id}/shares/{userEmail}` and `.../shares/usergroups/{group}` (201).
+> **Authoritative docs win over this file:** `docs/PIPELINE.md` (what runs, every
+> gate), `docs/SYNC_CONTRACT.md` (field directions, keys, PATCH allow-list),
+> `docs/TROUBLESHOOTING.md`, then `docs/DTC_GUIDE.md` and `AGENTS.md` (verified
+> discoveries, dated). Rewritten 2026-10-06. The old snapshot / change-log
+> examples (`dtc_master_chart_uat`) described a pipeline removed on 2026-06-17
+> and are gone.
 
-## When to Use This Skill
+## When to use this skill
 
-Use this skill when you need to:
-- Connect to DTC API (UAT or Production environment)
-- Fetch DTC requests and their metadata
-- Read worksheets/sheets from DTC
-- Extract data from specific views
-- Parse DTC request names for business logic
-- Convert DTC sheet data to Pandas or Spark DataFrames
-- Implement change tracking for DTC data
-- Push updates back to DTC sheets
+- Reading DTC requests, views, view definitions or sheet rows.
+- Writing to a DTC sheet: **update** rows, **append (add) rows**, upload a cell
+  image, delete rows.
+- Creating or sharing a DTC request.
+- Debugging a DTC write that "succeeded" but did not do what you expected.
 
-## DTC API Overview
+## Concepts
 
-DTC provides a REST API for accessing worksheet data with the following key concepts:
-- **Request**: A DTC request contains metadata and links to sheets
-- **Sheet**: Contains the actual tabular data
-- **View**: Different perspectives/filters on a sheet (e.g., "WIP_ITS_USE", "Summary")
-- **Rows**: Individual data rows with row_id for updates
-- **Columns**: Named columns, may contain HTML or special formatting
+| Thing | Meaning |
+|---|---|
+| **Workspace / document** | e.g. workspace `KTB`, documents `KTB WIP`, `KTB LinePlan`, `XTS Master` |
+| **Request** | one sheet's worth of work inside a document, named by `requestReference` (e.g. `KTB SS28 Collaborations`). Has a `sheetId` |
+| **View** | a column subset of the sheet. The pipeline uses `WIP_ITS_USE`; users mostly work in `Full` |
+| **Row** | `rowId` (UUID, **stable**) + `rowIndex` (int, **shifts** on every insert/delete/re-order) + cells keyed by column **display name** |
 
-## Prerequisites
+Address rows by **`rowId`** wherever the API allows it. `rowIndex` is
+unsafe as an address (see the image and delete gotchas below).
 
-Before connecting to DTC:
-1. Obtain DTC API key (UAT or Production)
-2. Know the DTC workspace name (e.g., "KTB")
-3. Have request IDs or sheet IDs to query
-4. Understand the environment (uat or prod)
+## Connect
 
-## Authentication
-
-### API Key Setup
-
-**Environment variables:**
-```bash
-# For UAT
-export DTC_API_KEY_UAT="your-uat-api-key"
-
-# For Production
-export DTC_API_KEY_PROD="your-prod-api-key"
-```
-
-**In Databricks (recommended):**
-```bash
-# Create secret scope
-databricks secrets create-scope --scope beproduct
-
-# Add DTC API keys
-databricks secrets put --scope beproduct --key dtc_api_key_uat
-databricks secrets put --scope beproduct --key dtc_api_key_prod
-```
-
-**Access in notebook:**
-```python
-# Get API key from Databricks secrets
-api_key = dbutils.secrets.get(scope="beproduct", key="dtc_api_key_uat")
-```
-
-## Connecting to DTC
-
-### Initialize DTCConnector
-
-**Basic connection:**
-```python
-from dtc.python.connectors.dtc import DTCConnector
-
-# UAT environment
-dtc = DTCConnector(
-    api_key="your-api-key",
-    environment="uat",  # or "prod"
-    workspace_name="KTB"
-)
-```
-
-**In Databricks notebook:**
 ```python
 import sys
-sys.path.append("/Workspace/Repos/beproduct-sync/DTC/python")
-
+sys.path.append(MODULE_PATH)   # the `module_path` job parameter; v2 root:
+                               # /Workspace/Repos/beproduct-sync-v2/DTC/python
 from connectors.dtc import DTCConnector
 
-# Get API key from secrets
-api_key = dbutils.secrets.get(scope="beproduct", key="dtc_api_key_uat")
-
-# Initialize connector
-dtc = DTCConnector(
-    api_key=api_key,
-    environment="uat",
-    workspace_name="KTB"
-)
-
-print("✅ Connected to DTC UAT")
+api_key = dbutils.secrets.get(scope="beproduct", key="dtc_api_key_uat")  # or _prod
+dtc = DTCConnector(api_key=api_key, environment="uat", workspace_name="KTB")
+# uat  -> https://dtc-api.lfuat.net/api
+# prod -> https://dtc-api.lfapps.net/api
 ```
 
-**Environment mapping:**
+Auth is an `x-api-key` header, added by `client/rest_client.py`. Calls from a
+local machine to `dtc-api.lfuat.net` must go through the proxy (environment
+only, never in tracked files). A gateway 403 seen locally without the proxy
+is the local network being refused, not a DTC finding.
+
+## Read
+
 ```python
-# DTCConnector automatically maps environments to URLs:
-# "uat"  -> https://dtc-api.lfuat.net/api
-# "prod" -> https://dtc-api.lfapps.net/api
+# List ACTIVE requests in a document (workspaceName + filters go in the BODY)
+reqs = dtc.search_requests("KTB", document_name="KTB WIP",
+                           filters={"requestIsActive": "Y"})
+
+req   = dtc.get_request(request_id)          # -> sheetId, requestReference, ...
+views = dtc.get_views(request_id)            # -> [{viewId, viewName}, ...]
+sheet = dtc.get_sheet(req["sheetId"], view_id)
+rows  = sheet["sheetData"]                   # [{rowId, rowIndex, "<col>": value, ...}]
+
+# Which columns EXIST: always the view definition, never sheetData
+cols  = dtc.get_view_column_names(view_id)   # GET /v1/views/{viewId} -> dynamicFields
+vdef  = dtc.get_view_definition(view_id)     # type, formula, lookup, allowInsertRow ...
+
+df, meta = dtc.pull_request_to_dataframe(request_id, view_id)  # pandas + doc metadata
 ```
 
-## Reading DTC Data
+- `sheetData` omits empty cells, so a blank column is invisible there. Use the
+  view definition to check whether a column exists.
+- In-scope request names and parsing: `sync.phase1.parse_request_reference()` /
+  `is_in_scope()`. Excluded: `-SUPPLIER` requests and any name containing
+  cancel / backup / archiv / delet.
+- `dtc_request_registry` can hold several rows with the same
+  `request_reference`. Always filter `request_is_active='Y' AND in_scope` and
+  refuse on ambiguity.
 
-### 1. Get Request Metadata
+## Write
 
-**Fetch a request by ID:**
+DTC write contracts, all live-validated (dates in `AGENTS.md`):
+
+### Update rows: `patch_rows`
+
 ```python
-# Get request details
-request = dtc.get_request("REQ_12345")
-
-print(f"Request Name: {request['name']}")
-print(f"Request Reference: {request['requestReference']}")
-print(f"Sheet ID: {request['sheetId']}")
-print(f"Status: {request['status']}")
-print(f"Created: {request['createdAt']}")
-
-# Access nested data
-brand = request.get('brand', 'Unknown')
-season = request.get('season', 'Unknown')
-```
-
-**Parse request name for business logic:**
-```python
-# In-scope DTC request reference format: "<customer> <seasonCode> <brand>"
-#   seasonCode = 2 letters + 2 digits (e.g. FW26); brand = everything after it.
-# Authoritative parsing / in-scope test: dtc/python/sync/phase1.py
-from sync.phase1 import parse_request_reference, is_in_scope
-
-parsed = parse_request_reference(request['requestReference'])
-# Example: "KTB FW26 Wrangler Western"
-# Returns: {'customer': 'KTB', 'season_code': 'FW26', 'brand': 'Wrangler Western'}
-
-in_scope = is_in_scope(request['requestReference'], customer="KTB")  # True/False
-```
-
-### 2. Get Available Views
-
-**List all views for a request:**
-```python
-# Get views
-views = dtc.get_views(request_id="REQ_12345")
-
-for view in views:
-    print(f"View ID: {view['viewId']}")
-    print(f"View Name: {view['viewName']}")
-    print(f"Default: {view.get('isDefault', False)}")
-    print("---")
-
-# Find specific view by name
-full_version_view = next(
-    (v for v in views if v['viewName'] == 'WIP_ITS_USE'),
-    None
-)
-
-if full_version_view:
-    view_id = full_version_view['viewId']
-    print(f"Found 'WIP_ITS_USE' view: {view_id}")
-```
-
-### 3. Read Sheet Data
-
-**Get raw sheet data:**
-```python
-# Fetch sheet data for a specific view
-sheet_data = dtc.get_sheet(
-    sheet_id="sheet_abc123",
-    view_id="view_xyz789"
-)
-
-# Access sheet metadata
-print(f"Total Rows: {sheet_data['totalRows']}")
-print(f"Total Columns: {sheet_data['totalColumns']}")
-
-# Access column definitions
-columns = sheet_data['columnDefinitions']
-for col in columns:
-    print(f"Column: {col['columnName']} (Type: {col['columnType']})")
-
-# Access row data
-rows = sheet_data['sheetData']
-for row in rows[:5]:  # First 5 rows
-    print(f"Row ID: {row['rowId']}")
-    print(f"Data: {row['columnValues']}")
-```
-
-**Convert to Pandas DataFrame:**
-```python
-# Convert sheet data to Pandas DataFrame
-df = dtc.to_dataframe(
-    sheet_id="sheet_abc123",
-    view_id="view_xyz789"
-)
-
-print(f"DataFrame shape: {df.shape}")
-print(f"Columns: {df.columns.tolist()}")
-print(df.head())
-
-# DataFrame includes:
-# - All data columns from the sheet
-# - row_id column (for updates)
-# - Normalized column names (HTML tags removed)
-```
-
-**Convert to Spark DataFrame (in Databricks):**
-```python
-# Get Pandas DataFrame first
-pandas_df = dtc.to_dataframe(
-    sheet_id=request['sheetId'],
-    view_id=view_id
-)
-
-# Convert to Spark DataFrame
-spark_df = spark.createDataFrame(pandas_df)
-
-# Display in Databricks
-spark_df.display()
-
-# Or use spark.createDataFrame with schema
-from pyspark.sql.types import StructType, StructField, StringType
-
-# DTC data is typically all strings initially
-columns = pandas_df.columns.tolist()
-schema = StructType([
-    StructField(col, StringType(), True) for col in columns
+dtc.patch_rows(sheet_id, view_id, [
+    {"rowId": "6a55…", "Sub Class": "Jacket", "Product Status": "Active"},
 ])
-
-spark_df = spark.createDataFrame(pandas_df, schema=schema)
+# PATCH /v1/sheets/{sheetId}/views/{viewId}  body {"sheetData":[…]}  -> 204
 ```
 
-## Working with DTC Sheet Data
+- **204 means stored** (proven 2026-09-15; an earlier "204 but not stored"
+  claim was retracted).
+- **Lean bodies only:** send just the changed fields, all from the PATCH
+  allow-list in `docs/SYNC_CONTRACT.md` (AGENTS ground rule #6). Merge every
+  change for one row into one object; a duplicated `rowId` in one body gets
+  400 `Duplicate rowId found`.
+- A body cannot mix `rowId` and `rowIndex` keys. Use PATCH for updates only.
 
-### Column Normalization
-
-DTC columns may contain HTML or special characters. The connector automatically normalizes them:
+### Add rows: `append_rows` (server-assigned locators, since 2026-09-23)
 
 ```python
-# Original DTC column names might be:
-# - "Style #"
-# - "<b>Brand</b>"
-# - "Season Code"
-# - "Delivery Date (Target)"
-
-# Normalized to valid Python/Delta column names:
-# - "Style_"
-# - "Brand"
-# - "Season_Code"
-# - "Delivery_Date_Target"
-
-# The normalization happens in to_dataframe() method
-# Access original names in sheet_data['columnDefinitions']
+assigned = dtc.append_rows(sheet_id, view_id, [
+    {"BP Style#": "KTB-00040", "Color / Wash": "Black", "Fabric Group": "NO TPM BOM"},
+    {"BP Style#": "KTB-00040", "Color / Wash": "Indigo", "Fabric Group": "NO TPM BOM"},
+])
+# POST /v1/sheets/{sheetId}/views/{viewId}/rows  body {"sheetData":[…]}
+# -> 201 {"rows":[{"rowId":…,"rowIndex":…}, …]}   IN SEND ORDER
+for sent, loc in zip(rows_sent, assigned):
+    ...  # the new row's real rowId, without re-reading the sheet
 ```
 
-### Handling Row IDs
+- **Use this for every new row. Do NOT compute a `rowIndex`.** The old insert
+  path (`patch_rows` / `create_row` / `patch_row(row_index=…)` from
+  `get_max_row_index() + 1`) is v1-only. Any concurrent insert, delete or
+  re-order after your read made the computed index wrong.
+- **Never send `rowId` / `rowIndex` / `rowStatus`**. The connector raises
+  `ValueError`, and DTC rejects the whole request. When copying a live row
+  forward (the BOM fan-out), strip them first with
+  `bom.INSERT_EXCLUDE_COLS` / `bom.build_insert_row_payload()`. That also
+  drops image (`contact`) and `formula` columns, which DTC refuses to accept
+  as data.
+- The view must allow inserts (`allowInsertRow="Y"`), and **every mandatory
+  field must be supplied**. `WIP_ITS_USE` has zero mandatory fields today;
+  re-check if the view changes.
+- Image cells cannot be set here. Append first, then upload against the
+  returned `rowId`.
+- Row limit: 3000 per request. If an append would exceed it, nothing is saved.
+- v2 order inside the one write window: PATCH (updates), then POST (inserts),
+  back to back (`dtc/notebooks/v2_wip_push.py`).
 
-Every DTC row has a unique `row_id` that's essential for updates:
+### Upload a cell image: `upload_row_image`
 
 ```python
-# DataFrame includes row_id column
-df = dtc.to_dataframe(sheet_id="...", view_id="...")
-
-# Row ID is preserved for later updates
-print(df[['row_id', 'lf_style', 'Brand']].head())
-
-# Example output:
-#     row_id    lf_style       Brand
-# 0   row_123   STY001        Wrangler
-# 1   row_124   STY002        Lee
+dtc.upload_row_image(sheet_id, view_id, row_id=row_id, image_bytes=png,
+                     column_name="Style Image", filename="x.png",
+                     content_type="image/png")
+# POST …/images?rowid={rowId}&columnname=Style Image   multipart, part "file"
 ```
 
-### Data Type Handling
+- **Always pass `row_id`.** A stale or non-existent `rowindex` returns **201
+  and CREATES a row** holding the image. A bad `rowid` fails loudly (400).
+- The query param is lowercase `rowid`. CamelCase `rowId` is silently ignored.
+- DTC stores jpg/png only. Phase 3 transcodes webp/gif/bmp/tiff to PNG, and
+  rasterises page 1 of a PDF-compatible `.ai`/PDF (pypdfium2). It skips SVG
+  and PostScript-only `.ai`.
+- `Style Image` can never be written through `sheetData` (400).
+
+### Delete rows: `delete_rows`
 
 ```python
-# DTC returns all data as strings
-# Convert data types as needed
-from pyspark.sql.functions import col, to_date, to_timestamp
-
-df = spark_df \
-    .withColumn("delivery_date", to_date(col("Delivery_Date"), "yyyy-MM-dd")) \
-    .withColumn("quantity", col("Quantity").cast("integer")) \
-    .withColumn("price", col("Price").cast("decimal(10,2)"))
+dtc.delete_rows(sheet_id, view_id, [row_index, ...])
+# DELETE …/rows  body {"rowIndexes":[…]}  -> 204
 ```
 
-## Complete Workflow: DTC to Delta Lake
+- Keyed by `rowIndex` (there is no delete-by-rowId).
+- **A single-row delete is exact.** A bulk delete processes **at most ~11 rows
+  per call**, renumbers the survivors, and still returns 204. To empty a sheet,
+  LOOP: re-read, delete the indexes it reports, repeat until empty.
+- Nothing in the pipeline deletes rows.
 
-### End-to-End Pull Example
+### Create and share a request
 
 ```python
-# ============================================================================
-# Pull DTC data to Delta Lake with change tracking
-# ============================================================================
-
-import sys
-sys.path.append("/Workspace/Repos/beproduct-sync/DTC/python")
-
-from connectors.dtc import DTCConnector
-from pyspark.sql.functions import current_timestamp, current_date, lit
-from datetime import datetime
-
-# Configuration
-DTC_REQUEST_ID = "REQ_12345"
-DTC_ENVIRONMENT = "uat"
-TARGET_TABLE = "lft.beproduct.dtc_master_chart_uat"
-
-# Step 1: Initialize connector
-api_key = dbutils.secrets.get(scope="beproduct", key="dtc_api_key_uat")
-dtc = DTCConnector(api_key=api_key, environment=DTC_ENVIRONMENT)
-
-# Step 2: Get request metadata
-request = dtc.get_request(DTC_REQUEST_ID)
-print(f"📋 Request: {request['requestReference']}")
-
-# Step 3: Parse business logic
-parsed = dtc.parse_request_name(request['requestReference'])
-brand_from_request = parsed.get('brand', 'Unknown')
-print(f"🏷️  Brand (from request): {brand_from_request}")
-
-# Step 4: Get views
-views = dtc.get_views(DTC_REQUEST_ID)
-full_version_view = next(
-    (v for v in views if v['viewName'] == 'WIP_ITS_USE'),
-    views[0]  # Fallback to first view
-)
-view_id = full_version_view['viewId']
-
-# Step 5: Fetch sheet data
-pandas_df = dtc.to_dataframe(
-    sheet_id=request['sheetId'],
-    view_id=view_id
-)
-
-# Step 6: Convert to Spark DataFrame
-df = spark.createDataFrame(pandas_df)
-
-# Step 7: Apply business logic
-# Override Brand column with brand from request name (source of truth)
-df = df.withColumn("Brand", lit(brand_from_request))
-df = df.withColumn("Brand_modified", lit(True))  # Track modification
-
-# Step 8: Add metadata
-extraction_time = datetime.now()
-df = df.withColumn("extracted_time", lit(extraction_time))
-df = df.withColumn("last_modified", current_timestamp())
-df = df.withColumn("sync_date", current_date())
-
-# Step 9: Write to Delta Lake
-df.write.format("delta") \
-    .mode("overwrite") \
-    .option("mergeSchema", "true") \
-    .option("overwriteSchema", "true") \
-    .saveAsTable(TARGET_TABLE)
-
-row_count = df.count()
-print(f"✅ Synced {row_count} rows to {TARGET_TABLE}")
-
-# Step 10: Query results
-spark.sql(f"""
-    SELECT row_id, lf_style, Brand, Brand_modified, last_modified
-    FROM {TARGET_TABLE}
-    LIMIT 10
-""").display()
+r = dtc.create_sheet("KTB", "KTB WIP", "KTB SS28 Wrangler Western",
+                     request_description="Created by sync")   # MUST be non-empty
+# POST /v1/sheets -> 201, normalised to {requestId, sheetId, raw}
+dtc.share_request_with_user(r["requestId"], "aiagentwip@lifung.com", view_names, send_email="N")
+dtc.share_request_with_usergroup(r["requestId"], "Kontoor Project Team", ["Full Version"])
 ```
 
-## Change Tracking
+A new request is visible only to the API identity until it is shared. There
+is no delete-request in the connector, so `create_sheet` is effectively
+irreversible.
 
-> **REMOVED / legacy (2026-06-17).** The `dtc_master_chart_uat` snapshot and change-log tables below no longer exist; kept only as a Spark pattern example. The same applies to the `_change_log` reads in "Batch Update Multiple Rows" and "Pattern 2".
+## Gotchas that have cost real time
 
-### Tracking Modified Fields
-
-```python
-# Create change log table for audit trail
-from pyspark.sql.functions import explode, array, struct, lit
-
-# Detect changes by comparing old and new values
-old_df = spark.table("lft.beproduct.dtc_master_chart_uat")
-new_df = # ... new data from DTC
-
-# Create change log entries
-change_log = old_df.alias("old").join(
-    new_df.alias("new"),
-    on="row_id",
-    how="inner"
-).where(
-    (col("old.Brand") != col("new.Brand"))
-).select(
-    col("new.row_id"),
-    col("new.lf_style"),
-    lit("brand_overwrite").alias("modification_type"),
-    col("old.Brand").alias("old_value"),
-    col("new.Brand").alias("new_value"),
-    current_timestamp().alias("modified_at"),
-    current_date().alias("sync_date")
-)
-
-# Append to change log table
-change_log.write.format("delta") \
-    .mode("append") \
-    .saveAsTable("lft.beproduct.dtc_master_chart_uat_change_log")
-
-print(f"📝 Logged {change_log.count()} changes")
-```
-
-### Query Change History
-
-```python
-# Find all modified rows
-modified_rows = spark.sql("""
-    SELECT DISTINCT row_id, lf_style, new_value as Brand, modified_at
-    FROM lft.beproduct.dtc_master_chart_uat_change_log
-    WHERE modification_type = 'brand_overwrite'
-      AND sync_date >= current_date() - INTERVAL 7 DAYS
-    ORDER BY modified_at DESC
-""")
-
-modified_rows.display()
-
-# View change history for specific style
-spark.sql("""
-    SELECT * FROM lft.beproduct.dtc_master_chart_uat_change_log
-    WHERE lf_style = 'STYLE123'
-    ORDER BY modified_at DESC
-""").display()
-```
-
-## Pushing Updates to DTC
-
-### Update Single Row
-
-```python
-# Use RestClient directly for PATCH operations
-from client.rest_client import RestClient
-
-# Initialize client
-client = RestClient(
-    base_url="https://dtc-api.lfuat.net/api",
-    api_key=api_key,
-    timeout=30
-)
-
-# Update a single cell
-response = client.patch(
-    f"/v1/sheets/{sheet_id}/rows/{row_id}",
-    json={
-        "columnValues": {
-            "Brand": "Wrangler"
-        }
-    }
-)
-
-print(f"✅ Updated row {row_id}")
-```
-
-### Batch Update Multiple Rows
-
-```python
-# Get rows that need to be pushed back to DTC
-rows_to_push = spark.sql("""
-    SELECT row_id, lf_style, Brand
-    FROM lft.beproduct.dtc_master_chart_uat_change_log
-    WHERE modification_type = 'brand_overwrite'
-      AND sync_date = current_date()
-""").collect()
-
-# Push each row
-from client.rest_client import RestClient
-
-client = RestClient(
-    base_url="https://dtc-api.lfuat.net/api",
-    api_key=api_key
-)
-
-for row in rows_to_push:
-    try:
-        client.patch(
-            f"/v1/sheets/{sheet_id}/rows/{row.row_id}",
-            json={"columnValues": {"Brand": row.Brand}}
-        )
-        print(f"✅ Updated {row.lf_style}")
-    except Exception as e:
-        print(f"❌ Failed to update {row.lf_style}: {e}")
-```
-
-## Common Patterns
-
-### Pattern 1: Full Sync with Brand Override
-
-```python
-def sync_dtc_to_delta(request_id: str, environment: str = "uat"):
-    """
-    Full DTC sync with brand override business logic.
-    
-    Business Rule: Brand column = Brand parsed from request name
-    """
-    # Get API key
-    api_key = dbutils.secrets.get(scope="beproduct", key=f"dtc_api_key_{environment}")
-    
-    # Initialize
-    dtc = DTCConnector(api_key=api_key, environment=environment)
-    
-    # Fetch request
-    request = dtc.get_request(request_id)
-    parsed = dtc.parse_request_name(request['requestReference'])
-    brand = parsed.get('brand', 'Unknown')
-    
-    # Get WIP_ITS_USE view
-    views = dtc.get_views(request_id)
-    view = next((v for v in views if v['viewName'] == 'WIP_ITS_USE'), views[0])
-    
-    # Fetch data
-    df = dtc.to_dataframe(sheet_id=request['sheetId'], view_id=view['viewId'])
-    spark_df = spark.createDataFrame(df)
-    
-    # Apply business logic
-    spark_df = spark_df \
-        .withColumn("Brand", lit(brand)) \
-        .withColumn("Brand_modified", lit(True)) \
-        .withColumn("extracted_time", lit(datetime.now())) \
-        .withColumn("sync_date", current_date())
-    
-    # Write to Delta
-    table_name = f"lft.beproduct.dtc_master_chart_{environment}"
-    spark_df.write.format("delta") \
-        .mode("overwrite") \
-        .option("mergeSchema", "true") \
-        .saveAsTable(table_name)
-    
-    return spark_df.count()
-
-# Usage
-row_count = sync_dtc_to_delta("REQ_12345", "uat")
-print(f"✅ Synced {row_count} rows")
-```
-
-### Pattern 2: Incremental Sync with Change Detection
-
-```python
-from delta.tables import DeltaTable
-
-def incremental_sync_dtc(request_id: str, environment: str = "uat"):
-    """
-    Incremental sync: only update changed rows.
-    """
-    # Fetch new data
-    api_key = dbutils.secrets.get(scope="beproduct", key=f"dtc_api_key_{environment}")
-    dtc = DTCConnector(api_key=api_key, environment=environment)
-    
-    request = dtc.get_request(request_id)
-    views = dtc.get_views(request_id)
-    view = next((v for v in views if v['viewName'] == 'WIP_ITS_USE'), views[0])
-    
-    new_df = dtc.to_dataframe(sheet_id=request['sheetId'], view_id=view['viewId'])
-    new_df = spark.createDataFrame(new_df)
-    new_df = new_df.withColumn("last_modified", current_timestamp())
-    
-    # Load existing table
-    table_name = f"lft.beproduct.dtc_master_chart_{environment}"
-    delta_table = DeltaTable.forName(spark, table_name)
-    
-    # Merge (upsert)
-    delta_table.alias("target").merge(
-        new_df.alias("source"),
-        "target.row_id = source.row_id"
-    ).whenMatchedUpdateAll() \
-     .whenNotMatchedInsertAll() \
-     .execute()
-    
-    print("✅ Incremental sync completed")
-
-# Usage
-incremental_sync_dtc("REQ_12345", "uat")
-```
-
-### Pattern 3: Multi-Request Sync
-
-```python
-def sync_multiple_requests(request_ids: list, environment: str = "uat"):
-    """
-    Sync multiple DTC requests to the same Delta table.
-    """
-    api_key = dbutils.secrets.get(scope="beproduct", key=f"dtc_api_key_{environment}")
-    dtc = DTCConnector(api_key=api_key, environment=environment)
-    
-    all_dfs = []
-    
-    for request_id in request_ids:
-        print(f"Processing {request_id}...")
-        
-        request = dtc.get_request(request_id)
-        views = dtc.get_views(request_id)
-        view = next((v for v in views if v['viewName'] == 'WIP_ITS_USE'), views[0])
-        
-        df = dtc.to_dataframe(sheet_id=request['sheetId'], view_id=view['viewId'])
-        spark_df = spark.createDataFrame(df)
-        spark_df = spark_df.withColumn("request_id", lit(request_id))
-        
-        all_dfs.append(spark_df)
-    
-    # Union all DataFrames
-    from functools import reduce
-    from pyspark.sql import DataFrame
-    
-    combined_df = reduce(DataFrame.union, all_dfs)
-    
-    # Write to Delta
-    combined_df.write.format("delta") \
-        .mode("overwrite") \
-        .saveAsTable("lft.beproduct.dtc_combined_requests")
-    
-    return combined_df.count()
-
-# Usage
-request_ids = ["REQ_001", "REQ_002", "REQ_003"]
-total_rows = sync_multiple_requests(request_ids, "uat")
-```
-
-## Troubleshooting
-
-### Common Issues
-
-**Authentication errors:**
-```python
-# Test API connection
-try:
-    dtc = DTCConnector(api_key=api_key, environment="uat")
-    request = dtc.get_request("REQ_12345")
-    print("✅ Connection successful")
-except Exception as e:
-    print(f"❌ Connection failed: {e}")
-    # Check API key validity
-    # Verify environment setting
-```
-
-**Request not found:**
-```python
-# Verify request ID exists
-try:
-    request = dtc.get_request("REQ_12345")
-except Exception as e:
-    if "404" in str(e):
-        print("Request not found. Check request ID.")
-    else:
-        print(f"Error: {e}")
-```
-
-**View not found:**
-```python
-# List all available views
-views = dtc.get_views("REQ_12345")
-print("Available views:")
-for v in views:
-    print(f"  - {v['viewName']} (ID: {v['viewId']})")
-
-# Use exact view name or viewId
-```
-
-**Column name issues:**
-```python
-# DTC columns may have special characters
-# Use backticks in Spark SQL
-spark.sql("""
-    SELECT `Style #`, `<b>Brand</b>`, row_id
-    FROM temp_table
-""")
-
-# Or use normalized names from to_dataframe()
-df = dtc.to_dataframe(...)  # Columns are normalized
-```
-
-**Empty data:**
-```python
-# Check if view has data
-sheet_data = dtc.get_sheet(sheet_id, view_id)
-if sheet_data['totalRows'] == 0:
-    print("⚠️ View has no data")
-else:
-    print(f"Found {sheet_data['totalRows']} rows")
-```
-
-## Best Practices
-
-1. **Use secrets for API keys** - Never hardcode credentials
-2. **Parse request names** - Extract brand/season from request reference
-3. **Use WIP_ITS_USE view** - For complete data extraction
-4. **Track row_id** - Essential for updates/push operations
-5. **Add metadata** - Include `extracted_time`, `sync_date`, `batch_id`
-6. **Handle column normalization** - DTC columns may have HTML/special chars
-7. **Implement change tracking** - Log all modifications for audit
-8. **Use mergeSchema** - Handle schema evolution gracefully
-9. **Test with limits** - Use `.limit(10)` during development
-10. **Monitor API limits** - Be aware of rate limiting
+- **Lookup/formula fields are only materialised if they are on the view the
+  user SAVES through.** A cell can be NULL in storage while looking correct in
+  the UI. Example: the `Factory Production Country for …` lookups. Writing a
+  lookup field is accepted (204) and silently ignored.
+- `isReadOnly` is unreliable. Use `type == "contact"` (images) and a truthy
+  `formula` to decide what cannot be written (`bom.compute_non_writable_cols()`).
+- DTC renames columns silently (e.g. `Lineplan Ref #` became `LinePlan ref#`
+  on 2026-09-28). Read keys through a fallback list
+  (`sync/lineplan.LINEPLAN_REF_COLS`), and treat zero rows from non-empty
+  input as an alert.
+- `GET` can return the **same rowId twice** (seen on a LinePlan sheet,
+  2026-09-29). If a PATCH 400s with `Duplicate rowId found`, check the live
+  `sheetData` before anything else.
+- DTC-hosted image URLs (`/api/v1/images/*`) need `x-api-key`, and from
+  Databricks they currently get 403 from DTC's gateway (source-IP allow-list).
+  Uploads are unaffected.
+- **Locking:** every WRITE moves the request's server-side `last_read` and can
+  silently discard an open user's save. Reads are free. So: zero diff means
+  zero write, and all writes happen in one window per run.
 
 ## Reference
 
-### DTCConnector Methods
+### `DTCConnector` methods
 
-```python
-class DTCConnector:
-    def __init__(api_key, environment, workspace_name)
-    def get_request(request_id) -> Dict
-    def get_views(request_id) -> List[Dict]
-    def get_sheet(sheet_id, view_id, filters=None) -> Dict
-    def to_dataframe(sheet_id, view_id) -> pd.DataFrame
-    
-    @staticmethod
-    def parse_request_name(request_reference) -> Dict
-```
+| Method | Endpoint |
+|---|---|
+| `search_requests(workspace, document_name, filters)` | `GET /v1/requests` (body) |
+| `get_request(id)` / `get_views(id)` / `get_request_scope(id)` | `GET /v1/requests/{id}[/views]` |
+| `get_sheet(sheet_id, view_id)` | `GET /v1/sheets/{s}/views/{v}` |
+| `get_view_definition(view_id)` / `get_view_column_names(view_id)` | `GET /v1/views/{v}` |
+| `pull_request_to_dataframe(request_id, view_id)` | read helper, returns `(DataFrame, metadata)` |
+| `patch_rows(s, v, sheet_data)` | `PATCH /v1/sheets/{s}/views/{v}`: **update** |
+| `append_rows(s, v, sheet_data)` | `POST /v1/sheets/{s}/views/{v}/rows`: **add rows** |
+| `upload_row_image(s, v, row_id=…, image_bytes=…)` | `POST /v1/sheets/{s}/views/{v}/images` |
+| `delete_rows(s, v, row_indexes)` / `delete_row` | `DELETE /v1/sheets/{s}/views/{v}/rows` |
+| `create_sheet(...)` | `POST /v1/sheets` |
+| `share_request_with_user` / `share_request_with_usergroup` | `POST /v1/requests/{id}/shares/...` |
+| `get_request_shares` / `get_request_share_usergroups` | `GET /v1/requests/{id}/shares[/usergroups]` |
+| `create_row`, `patch_row(row_index=…)`, `get_max_row_index` | **v1 legacy insert path. Do not use for new code** |
 
-### DTC API Endpoints
+### Project files
 
-- `GET /v1/requests/{request_id}` - Get request details
-- `GET /v1/requests/{request_id}/views` - List views
-- `GET /v1/sheets/{sheet_id}/views/{view_id}` - Get sheet data
-- `PATCH /v1/sheets/{sheet_id}/views/{view_id}` - Update rows (body `sheetData[]` keyed by `rowId`)
-- `POST /v1/sheets/{sheet_id}/views/{view_id}/rows` - Append rows (server assigns `rowId`/`rowIndex`)
-- `POST /v1/sheets/{sheet_id}/views/{view_id}/images?rowid=..&columnname=..` - Upload a cell image
-- `DELETE /v1/sheets/{sheet_id}/views/{view_id}/rows` - Delete rows (~11 per call max)
-
-### Environment URLs
-
-- UAT: `https://dtc-api.lfuat.net/api`
-- Production: `https://dtc-api.lfapps.net/api`
-
-### Project Files
-
-- Connector: `dtc/python/connectors/dtc.py`
-- REST Client: `dtc/python/client/rest_client.py`
-- Notebook: `dtc/notebooks/p1_pull_masters_to_delta.py` (+ `00_init_request_registry.py`)
-- Documentation: `docs/DTC_GUIDE.md`, `docs/ARCHITECTURE.md`, `docs/PIPELINE.md`, `docs/SYNC_CONTRACT.md`
+- Connector: `dtc/python/connectors/dtc.py`; REST client: `dtc/python/client/rest_client.py`
+- Write planner (allow-list, zero-diff-zero-write): `dtc/python/sync/wip_plan.py`
+- The write window: `dtc/notebooks/v2_wip_push.py`; images: `beproduct/p3_beproduct_to_dtc_images.py`
+- Pull: `dtc/notebooks/p1_pull_masters_to_delta.py` (+ `sync/registry.py`)
+- One-cell utility: `dtc/notebooks/v2_set_dtc_cell.py`. Run notebooks ad hoc
+  with `scripts/run_v2_task.py`, which creates a dev-tagged job.

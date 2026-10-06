@@ -43,8 +43,8 @@ distinct moments at which a given request is written, packed into the shortest
 possible window**. v1 writes each request at up to 5 moments scattered across the
 whole DAG. v2 writes it at exactly one point, in ≤2 back-to-back calls.
 
-This is what makes the target cadence (a run every ~2 hours during active style
-development) viable at all:
+This is what makes the target cadence viable at all. The design target was a
+run every ~2 hours; production now runs every 8 minutes (2026-09-30):
 
 | | Write windows/day | User-visible exposure |
 |---|---|---|
@@ -141,7 +141,7 @@ standalone images job is paused and superseded. Only one companion job remains:
 
 ```mermaid
 flowchart LR
-    duty["BeProduct_DTC_sync_duty_compute<br/>compute_duty_rates · 10:00 / 15:00 HKT"]
+    duty["BeProduct_DTC_sync_duty_compute<br/>compute_duty_rates · every 8 min"]
     orbit[(NT Orbit API)]
     cache[(nt_orbit_duty_cache)]
     chart[(costing_chart)]
@@ -261,7 +261,7 @@ request here removes its rows from every stage below.
 **Exception:** `pull_lineplan_dtc` has its own independent, *unfiltered* discovery
 loop and never calls `is_in_scope()` — the project team has not settled a LinePlan
 naming convention and explicitly wants backup-named LinePlan requests included
-(2026-09-01). Uniqueness of `Lineplan Ref #` across LinePlan requests is therefore
+(2026-09-01). Uniqueness of `LinePlan ref#` across LinePlan requests is therefore
 a human-enforced invariant; Stage 30 only warns on conflict, never blocks.
 
 ---
@@ -391,7 +391,7 @@ joins **LinePlan**:
 
 **One representative row per style × colour** feeds costing: the row whose
 `Fabric Group` is `Main Fabric`, else the lowest `rowIndex`. So every DTC-owned
-input (Lineplan Ref #, vendors, factories) must be entered **on the Main Fabric
+input (LinePlan ref#, vendors, factories) must be entered **on the Main Fabric
 row** — values typed on a "Fabric" segment row are not read.
 
 `fabric_type` remains DTC-trigger-only but is traceability-only, never a filter
@@ -679,12 +679,21 @@ blank-vs-populated Style Image state). Logs to `beproduct_to_dtc_sync_log` with
 4. Source, in priority order: **(a) sibling copy** — any other row for the same BP
    Style# in this request that already has a real image, reusing that DTC-hosted
    URL (downloaded with the DTC `x-api-key`) rather than re-downloading from
-   BeProduct; **(b)** BeProduct's `front_image_url`, which must be non-blank and
-   `http(s)://`; **(c)** neither → skipped `no_source_image`.
-5. Content type (`classify_image_type()`): `jpeg`/`png` as-is; `webp`/`gif`/`bmp`/
-   `tiff` transcoded to PNG; `svg+xml` skipped (`unsupported_vector_image`);
-   anything else skipped (`unsupported_image_type`). Some BeProduct CDN URLs
-   return 403 on download (per-file SAS issue on the BeProduct side).
+   BeProduct. Since 2026-09-18 DTC's gateway answers that download with 403
+   from Databricks, so a sibling copy carries the row's own BeProduct image
+   as `fallback_url` and uses it instead. **(b)** BeProduct's `front_image_url`,
+   which must be non-blank and `http(s)://`. **(c)** Neither → skipped
+   `no_source_image`.
+5. Content type (`classify_image_type()`, which also reads the first bytes):
+   `jpeg`/`png` as-is; `webp`/`gif`/`bmp`/`tiff` transcoded to PNG;
+   **`.ai` / `.pdf` whose bytes start `%PDF`** (Illustrator's default
+   PDF-compatible save) → page 1 rasterised to PNG with pypdfium2, long side
+   ≤ 2000 px (since 2026-09-30; a multi-artboard `.ai` gives artboard 1 only).
+   Skipped: a PostScript-only `.ai` (`%!PS`, `unsupported_postscript_ai`),
+   `svg+xml` (`unsupported_vector_image`), anything else
+   (`unsupported_image_type`), and PDF rows when pypdfium2 cannot be installed
+   (`pdf_renderer_unavailable`). Some BeProduct CDN URLs return 403 on download
+   (per-file SAS issue on the BeProduct side).
 
 Flag: `run_phase3`.
 

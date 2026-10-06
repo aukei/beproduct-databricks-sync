@@ -2,9 +2,9 @@
 """
 Run ONE v2 notebook as a one-off serverless Databricks run.
 
-Creates nothing persistent -- no job, no schedule, nothing to clean up. Used to
-validate each v2 task against real data before the `BeProduct_DTC_sync_v2` job
-is ever scheduled.
+Runs as a small throwaway job tagged `userpurpose = lft-kontoor-dev` (see
+scripts/_adhoc.py: `runs/submit` cannot carry tags), with no schedule; such jobs
+are pruned after 7 days. Used to validate each v2 task against real data.
 
 The Jobs API returns NO notebook stdout for serverless runs (live-confirmed
 2026-09-14) -- only the `dbutils.notebook.exit` value. Every v2 notebook
@@ -47,6 +47,8 @@ load_dotenv(_ROOT / ".env")
 
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service import jobs
+
+from scripts._adhoc import ADHOC_TAGS, run_adhoc
 
 DEFAULT_WS_ROOT = "/Workspace/Repos/beproduct-sync-v2"
 
@@ -114,15 +116,15 @@ def main() -> int:
 
     w = WorkspaceClient()
     # No new_cluster / existing_cluster_id / job_cluster_key => serverless.
-    task = jobs.SubmitTask(
+    task = jobs.Task(
         task_key=args.notebook,
         notebook_task=jobs.NotebookTask(notebook_path=path, base_parameters=params),
         timeout_seconds=args.timeout,
     )
 
-    print("\nSubmitting …")
-    run_id = w.jobs.submit(run_name=f"v2_oneoff_{args.notebook}", tasks=[task]).run_id
-    print(f"  run_id: {run_id}\n  {host}/jobs/runs/{run_id}")
+    print(f"\nSubmitting (tags {ADHOC_TAGS}) …")
+    job_id, run_id = run_adhoc(w, f"v2_oneoff_{args.notebook}", [task])
+    print(f"  run_id: {run_id}\n  {host}/jobs/{job_id}/runs/{run_id}")
 
     deadline = time.time() + args.timeout
     state = None

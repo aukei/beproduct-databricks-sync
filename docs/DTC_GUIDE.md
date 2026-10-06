@@ -69,7 +69,7 @@ connector = DTCConnector(api_key=api_key, environment=environment, workspace_nam
 | **Share (user)** | `POST /v1/requests/{requestId}/shares/{userEmail}` | body `{"viewNames":[…],"message":"…","sendEmail":"Y\|N"}` → 201. |
 | **Share (group)** | `POST /v1/requests/{requestId}/shares/usergroups/{userGroupName}` | path segment URL-encoded (group names have spaces). |
 | Read shares | `GET …/shares`, `GET …/shares/usergroups` | used for idempotency. |
-| **Image upload** | `POST /v1/sheets/{sheetId}/views/{viewId}/images?rowid={uuid}&columnname=Style Image` | `multipart/form-data`, file part named `file`. Parameter is lowercase **`rowid`** (camelCase is ignored). Never use `rowindex`: a non-existent index returns 201 and **creates a row**. DTC **rejects webp (400)** → transcode to PNG first. |
+| **Image upload** | `POST /v1/sheets/{sheetId}/views/{viewId}/images?rowid={uuid}&columnname=Style Image` | `multipart/form-data`, file part named `file`. Parameter is lowercase **`rowid`** (camelCase is ignored). Never use `rowindex`: a non-existent index returns 201 and **creates a row**. DTC stores **jpg/png only** (webp → 400). Phase 3 transcodes webp/gif/bmp/tiff to PNG and rasterises page 1 of a PDF-compatible `.ai`/PDF. |
 
 Connector methods: `search_requests`, `get_request`, `get_views`,
 `get_view_definition`/`get_view_column_names`, `get_sheet`, `patch_rows`,
@@ -171,7 +171,7 @@ View: "Full" (id `69f0788555010bb745140ac4`, 30 fields). Exact DTC field names
 Style × colour × material × vendor slot, Main Fabric rows only. Columns, key and
 gates: [PIPELINE.md](PIPELINE.md) → Stage 30 and
 [ARCHITECTURE.md](ARCHITECTURE.md) § 5. A WIP row with no matching
-`Lineplan Ref #` is dropped (INNER join), not surfaced with nulls.
+`LinePlan ref#` is dropped (INNER join), not surfaced with nulls.
 
 ### `dtc_request_mapping` — resolved requests (overwritten each run)
 

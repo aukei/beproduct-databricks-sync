@@ -369,6 +369,32 @@ this stays true by construction; verify it stays true after any change).
 
 ## Verified discoveries log (append-dated; do not delete)
 
+**Cost tag is now `userpurpose = lft-kontoor-sync` on every job, cluster and
+pool (2026-10-06, owner spec, applied live + read back):**
+- Replaces `lft-job-bpsync`. Applied to all 5 jobs (`v2`, `duty_compute`,
+  `images`, `dag`, `orchestrate_sync`), to the `custom_tags` of the 3 classic
+  job-cluster specs, and to the instance pool `beproduct-dtc-sync-pool-v5`
+  (pool settings otherwise unchanged, `min_idle=0`).
+- Repo: `deploy_job.JOB_TAGS` + `CLUSTER_TAGS` (into `_build_cluster()`).
+- Applied via partial `jobs/update` touching only `tags` and `job_clusters`,
+  NOT `--reset-existing`. That kept the paused v1 definitions and the 8-min
+  triggers as they were (both confirmed after the update).
+- Serverless runs are attributed through the JOB tag.
+- **One-off / ad-hoc runs carry `userpurpose = lft-kontoor-dev`** (owner
+  spec, same day). `runs/submit` has NO `tags` field, and the workspace
+  exposes no budget-policy API, so a `jobs.submit` run cannot be tagged at all.
+  `scripts/_adhoc.py` therefore creates a throwaway job named
+  `kontoor_adhoc_<name>_<utc>`, with no schedule and tagged dev, and triggers
+  it once. Both `run_v2_smoke.py` and `run_v2_task.py` use it. Jobs older than
+  7 days with no active run are pruned on the next launch. They are not
+  deleted right away, because deleting a job also deletes its run history.
+  Live-verified with the smoke check: job 59238247618719, tag dev, SUCCESS
+  12/12.
+- **Any new one-off launcher must go through `run_adhoc()`, never
+  `jobs.submit`.** `run_v2_job.py` is different: it calls `run_now` on a
+  PRODUCTION job, so those runs carry the sync tag. Cloning that job to tag
+  the run as dev would bypass its `max_concurrent_runs=1` guard.
+
 **Both v2 jobs now run on an 8-MINUTE periodic trigger (2026-09-30, deployed):**
 - `BeProduct_DTC_sync_v2` and `BeProduct_DTC_sync_duty_compute`:
   `trigger.periodic = {interval: 8, unit: MINUTES}`, UNPAUSED, no cron,
@@ -394,7 +420,7 @@ this stays true by construction; verify it stays true after any change).
   duty_compute for a conflict failure.
 
 **Fit sample split per submit -- 1st/2nd Fit columns (owner spec 2026-09-30,
-BUILT, NOT YET DEPLOYED):**
+DEPLOYED to the v2 root 09:29 UTC):**
 - Fit has at most 2 submits. Submit 1 -> `"1st Fit Sample Approval Status"`,
   submit 2 -> `"2nd Fit Sample Approval Status"`; each value is only
   `"submitStatus","submitStatusDate"` (first size, no submit name). Submits 3+
@@ -415,6 +441,10 @@ BUILT, NOT YET DEPLOYED):**
   `2nd Fit` from the 2-line history to `"Requested","2026-09-23T16:02:25.877Z"`,
   and fill `1st Fit` with `"Requested","2026-09-23T11:16:14.37Z"`, on all 9 of
   its rows. One write window.
+- **LIVE-VERIFIED** run 367163729420837 (09:29:59 UTC): exactly as predicted --
+  9 updates in 1 PATCH call, `columns_changed` = both Fit columns x 9 and
+  nothing else, 0 violations; live DTC sheet read back shows all 9 rows with
+  the new per-submit values.
 
 **Phase 3 rasterises PDF-compatible Illustrator `.ai` front images
 (2026-09-30, DEPLOYED to the v2 root 06:53 UTC):**

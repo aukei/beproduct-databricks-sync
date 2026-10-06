@@ -106,6 +106,7 @@ scripts/
 ├── upload_notebooks.py               # Deploy notebooks + modules (--root selects v1 / v2 workspace root)
 ├── deploy_job.py                     # Create / reset jobs (--job main|duty_compute|images|v2)
 ├── run_v2_job.py / run_v2_task.py    # Run the v2 job / one notebook and collect exit JSON
+├── _adhoc.py                         # One-off runs as a dev-tagged throwaway job (never jobs.submit)
 ├── check_dtc_view.py                 # DTC view column check
 └── nt_orbit_oauth_setup.py           # One-time Entra delegated-OAuth seeding
 docs/                                 # This documentation set (docs/v1/ = archived v1 phase docs)
@@ -125,13 +126,19 @@ The pipeline runs as **independent Databricks jobs**, all defined in
 
 | Job | Contents | Compute |
 |---|---|---|
-| `BeProduct_DTC_sync_v2` (367710575109755) | The main DAG — Stages 00–55, **including `phase3_images`** (folded in 2026-09-15); every 2 h at :05 on odd hours HKT | serverless |
-| `BeProduct_DTC_sync_duty_compute` (1026599988408090) | NT Orbit lookups → `nt_orbit_duty_cache` + `costing_chart`; zero DTC contact; 10:00 / 15:00 HKT | serverless (moved off classic 2026-09-15) |
+| `BeProduct_DTC_sync_v2` (367710575109755) | The main DAG — Stages 00–55, **including `phase3_images`** (folded in 2026-09-15); every 8 min, periodic trigger (since 2026-09-30) | serverless |
+| `BeProduct_DTC_sync_duty_compute` (1026599988408090) | NT Orbit lookups → `nt_orbit_duty_cache` + `costing_chart`; zero DTC contact; every 8 min, periodic trigger | serverless (moved off classic 2026-09-15) |
 | `BeProduct_DTC_sync_images` (847087837807970) | Style Image upload — **superseded and PAUSED**; its task now runs inside the v2 DAG | classic |
 | `BeProduct_DTC_sync_dag` (294837488757511) | **v1 main job** — PAUSED after the v2 cutover; kept for rollback | classic + pool |
 
 **Two live jobs, not four.** The instance pool is kept at `min_idle_instances=0`
 — only the two paused rollback jobs still reference it.
+
+**Cost tags (2026-10-06).** Every job, job-cluster spec and the instance pool
+carries `userpurpose = lft-kontoor-sync` (`deploy_job.JOB_TAGS` /
+`CLUSTER_TAGS`). One-off and ad-hoc runs carry `lft-kontoor-dev`.
+`runs/submit` cannot be tagged, so `scripts/_adhoc.py` runs them as a
+throwaway tagged job named `kontoor_adhoc_*`, pruned after 7 days.
 
 > **The task graph, every stage and every gate live in [PIPELINE.md](PIPELINE.md).**
 > This section covers only the architectural shape; that document is
@@ -191,7 +198,7 @@ flowchart TD
     wip -->|50| bpback["BeProduct style<br/>vendor · factory · customer ID · COO · Lot#"]
     wip -.->|55 disabled| bpmat["BeProduct material master"]
 
-    duty["duty_compute job<br/>10:00 / 15:00 HKT"]
+    duty["duty_compute job<br/>every 8 min"]
     cc --> duty <--> orbit[(NT Orbit API)]
     duty --> cache & cc
 ```

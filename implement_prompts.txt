@@ -921,3 +921,9 @@ Fit sample status: there will be at most 2 submits. Ignore any further submits j
 1st submit status should goes to DTC WIP col "1st Fit Sample Approval Status", and 2nd submit status text goes to "2nd Fit Sample Approval Status"
 Then in these 2 fields, just need the request status and timestamp.
 There could be update of the status text.
+
+# 6/10/26 checking
+does the jobs / cluster etc have tag?
+userpurpose=lft-kontoor-sync for main jobs
+userpurpose=lft-kontoor-dev for one off / adhoc jobs
+do a doc checks.

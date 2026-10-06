@@ -19,7 +19,9 @@ Comprehensive guide for Databricks operations:
 - **Connect** to Databricks workspace with various auth methods (PAT, Azure AD, OAuth)
 - **Notebooks** - Read, write, upload, and execute Databricks notebooks
 - **Tables** - Query, create, write to Delta Lake tables with Unity Catalog
-- **Jobs** - Create, configure, run, and manage Databricks jobs
+- **Jobs** - Create, configure, run, and manage Databricks jobs. Cost tags:
+  `lft-kontoor-sync` on production, `lft-kontoor-dev` on ad-hoc runs, which go
+  through `scripts/_adhoc.py` and never `jobs.submit`
 - **Secrets** - Manage Databricks secrets and credentials
 - **Common Patterns** - API to Delta Lake sync, multi-environment configs
 
@@ -37,12 +39,15 @@ Guide for DTC (Data Collaboration Tool) integration:
 - **Read Sheets** - Fetch worksheets and views from DTC
 - **Parse Data** - Extract business logic from request names
 - **DataFrames** - Convert to Pandas/Spark DataFrames
-- **Push Updates** - Send changes back to DTC
+- **Write** - update rows (`patch_rows`, by rowId), **add rows (`append_rows`,
+  DTC assigns rowId/rowIndex)**, upload images (by `rowid`), delete rows
+  (~11 per call), create and share requests
+- **Gotchas** - lookup/formula fields, silent column renames, duplicate rowIds
 
 **When to use:**
 - Pulling data from DTC API to Delta Lake
 - Working with DTC requests, sheets, or views
-- Pushing updates back to DTC
+- Writing to DTC (update / add rows / images / delete)
 
 ### 3. beproduct-integration
 **File:** `.kilo/skill/beproduct-integration/SKILL.md`

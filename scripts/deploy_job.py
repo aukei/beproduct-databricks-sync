@@ -296,7 +296,12 @@ JOB_SCHEDULE_DUTY = jobs.CronSchedule(
 # that lands while a run is still going is skipped, never overlapped.
 PERIODIC_8_MIN = {"pause_status": "UNPAUSED", "periodic": {"interval": 8, "unit": "MINUTES"}}
 
-JOB_TAGS = {"userpurpose": "lft-job-bpsync"}
+# Cost-attribution tag (owner spec 2026-10-06). The SAME tag goes on every job,
+# on the classic job-cluster spec (CLUSTER_TAGS -> custom_tags) and on the
+# instance pool, so classic AND serverless usage lands under one value in
+# system.billing. Was "lft-job-bpsync" before 2026-10-06.
+JOB_TAGS = {"userpurpose": "lft-kontoor-sync"}
+CLUSTER_TAGS = dict(JOB_TAGS)
 JOB_QUEUE = jobs.QueueSettings(enabled=True)
 
 # ── Job-level parameters (mirror the old orchestrate_sync widgets) ───────────
@@ -1042,6 +1047,7 @@ def _build_cluster() -> compute.ClusterSpec:
         data_security_mode=compute.DataSecurityMode.DATA_SECURITY_MODE_DEDICATED,
         spark_conf=SPARK_CONF,
         cluster_log_conf=log_conf,
+        custom_tags=CLUSTER_TAGS,
     )
 
     # CLUSTER_EXTRA fields (is_single_node, kind, enable_elastic_disk,

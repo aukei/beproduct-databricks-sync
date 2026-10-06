@@ -295,7 +295,7 @@ multi-task job (294837488757511) and pause the old one.
 
 ### Step 1 sample-app enrichment cost (added 2026-06-19) — still relevant in v2
 
-> Scales linearly with styles and runs on every 2-hourly v2 run; splitting it onto
+> Scales linearly with styles and runs on every v2 run (every 8 min since 2026-09-30); splitting it onto
 > its own slower schedule is a go-live item in
 > [MIGRATION_V1_V2.md](MIGRATION_V1_V2.md#remaining-go-live-items).
 
