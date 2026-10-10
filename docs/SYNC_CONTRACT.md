@@ -40,6 +40,7 @@ file owns direction, keys and the allow-list.
 | **Canonical allow-list (derived)** | `allowed_patch_columns()` | `dtc/python/sync/wip_plan.py` |
 | Duty value columns | `DUTY_VALUE_FIELDS` | `dtc/python/sync/duty.py` |
 | Staging denormalization | `FIELD_MAPPING` + staging `select` | `beproduct/p1p7_beproduct_to_dtc_transform.py` |
+| BeProduct color palette → DTC Color Palette (Stage 60) | `OWNED_COLS` + `flatten_palettes()` | `dtc/python/sync/color_palette.py` |
 
 Then update the tests: `test_phase1.py`, `test_phase2.py`, `test_phase3.py`,
 `test_samples.py`, `test_bom.py`, `test_duty.py`, and `test_wip_plan.py` *(NEW)*.
@@ -261,6 +262,29 @@ PATCH — uploaded through the multipart `/images` endpoint by Stage 45
 blank and a source exists (a sibling row's image, else BeProduct's URL). One-directional:
 never read back, never in `phase2.REVERSE_*`.
 
+### BeProduct color palettes → DTC "KTB Color Palette" (Stage 60, Phase 11)
+
+A SEPARATE document and request (`KTB Color Palette` / `Color Palette`), not the
+WIP sheet. One-way, and every column is BeProduct-owned. So, unlike WIP, a
+value blanked in BeProduct is **cleared** in DTC, and nothing is ever read back.
+One DTC row per palette × color × brand.
+
+| DTC column | BeProduct source (KTB **color** folder) |
+|---|---|
+| `Season Brand` | `season` + `year` + one `brands_multi` entry → `"Fall 2028 - Collaborations"` |
+| `Palette Number` | `colorPaletteNumber` (= `header_number`, e.g. `APP-S32027-00005`) |
+| `Palette Name` | `colorPaletteName` (= `header_name`) |
+| `Palette Type` | `palette_type` (`SEASONAL` / `CORE`) |
+| `Product Category` | `product_category` |
+| `Active` | `active` → **`"YES"` / `"NO"` exactly**: the checkbox rejects anything else, even lowercase. Also set `"NO"` when the row's key disappears from BeProduct |
+| `Color Number` | `colors[].color_number` |
+| `Color Name` | `colors[].color_name` |
+| `Color Category` | `colors[].Schema.color_category`, a per-color custom field. It only appears on colors edited since it was added |
+| `Color Reference` | `colors[].color_reference` |
+
+Key: `(Palette Number, Color Number, Season Brand)`. BeProduct `sold_to_customer`
+has no DTC column, so it is not synced.
+
 ---
 
 ## Keys
@@ -275,6 +299,7 @@ never read back, never in `phase2.REVERSE_*`.
 | `duty.COSTING_KEY` | `[customer, season_code, brand, bp_style_no, lf_style_no, color_name, lineplan_ref, material_no, supplier_type, supplier, factory]` | `costing_chart` identity and MERGE |
 | NT Orbit cache key | `(product_description, origin_country, import_country)` | Cross-run duty cache; no style/color/vendor identity at all |
 | Directory key | `(name, partner_type)` | Stage 00 upsert. Not `id`, not `name` alone |
+| Color palette row key | `(Palette Number, Color Number, Season Brand)` | Stage 60. A change to any part = new row + old row `Active = "NO"` |
 
 `product_description` concatenates `duty.PRODUCT_DESCRIPTION_COLS`:
 `style_description`, `color_name`, `fabric_content`, `gender`, `class_name`,

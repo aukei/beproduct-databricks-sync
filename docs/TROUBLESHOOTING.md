@@ -1,6 +1,6 @@
 # Troubleshooting — BeProduct ⇄ DTC sync (v2)
 
-For IT support. Five runbooks, one per reported symptom. Each runbook assumes
+For IT support. One runbook per reported symptom. Each runbook assumes
 you have **at most three documents open**:
 
 | Doc | What you use it for |
@@ -20,6 +20,7 @@ rationale. You should not need it to fix a production issue.
 4. [A duty rate is missing](#4-a-duty-rate-is-missing)
 5. [A tariff (or duty rate / HTS) is outdated](#5-a-tariff-or-duty-rate--hts-is-outdated)
 6. [The job itself fails](#6-the-job-itself-fails)
+7. [A color is missing or wrong in the DTC Color Palette](#7-a-color-is-missing-or-wrong-in-the-dtc-color-palette)
 
 ---
 
@@ -481,6 +482,39 @@ Things that look like "outdated" but are not:
 | Image skipped `unsupported_postscript_ai` / `unsupported_vector_image` / `unsupported_image_type` | The BeProduct front image is a format DTC cannot store and Phase 3 cannot convert (PostScript-only `.ai`, SVG, …). A PDF-compatible `.ai` IS converted | Replace the front image in BeProduct with jpg/png (or re-save the `.ai` with "Create PDF Compatible File") |
 | Image skipped `pdf_renderer_unavailable` | pypdfium2 failed to pip-install on the task | Check the `phase3_images` task's install cell; other images are unaffected |
 | A BeProduct field went blank after a push | BeProduct silently blanks a DropDown/MultiSelect value that is not in that field's Master Data, or a MultiSelect sent as a bare string | Check the value against `lft.beproduct.beproduct_master_<field>` (refresh with `p5utl_beproduct_master_data_sync` `PULL_ONLY`); fix the value in DTC |
+
+---
+
+## 7. A color is missing or wrong in the DTC Color Palette
+
+Stage 60 `color_palette` (PIPELINE.md → Stage 60; columns in SYNC_CONTRACT.md →
+"BeProduct color palettes"). It mirrors the BeProduct **color** folder `KTB` into
+DTC `KTB Color Palette` / `Color Palette` on every main run (≤ 8 min). One row
+per palette × color × brand. BeProduct is the only source: **an edit made in the
+DTC sheet is overwritten on the next run.**
+
+Find the run's decisions:
+
+```sql
+SELECT log_time, operation, status, reason, match_key, payload
+FROM lft.beproduct.beproduct_to_dtc_sync_log
+WHERE stage = 'color_palette' ORDER BY log_time DESC LIMIT 100;
+-- what BeProduct held at the last run:
+SELECT * FROM lft.beproduct.beproduct_color_palette;
+```
+
+| Symptom | Check | Cause → fix |
+|---|---|---|
+| Color not in DTC at all | Is it in `beproduct_color_palette`? | **No:** it is not in the `KTB` color folder, its palette is deleted, or it has no Color Number (`no_color_number` in the log). Fix it in BeProduct. **Yes:** look for an `INSERT` row with `status = error` |
+| Color shows `Active = NO` | Its key is no longer produced by BeProduct (log `untick_removed`) | The color was removed, re-numbered, or its palette changed season or brand. A changed key gives a NEW row and unticks the old one. Expected; the new row is the live one |
+| Value differs from BeProduct | Latest log for that `match_key` | Wait one run. If it persists, check that the task is not `SKIPPED` (`run_color_palette`) |
+| One color appears once per brand | — | By design: a palette with N brands gives N rows per color |
+| `Color Category` blank | The color's `Schema.color_category` in BeProduct | It only exists on colors edited since the field was added. Fill it in BeProduct |
+| Task FAILED: `expected exactly 1 active request named …` | The DTC request was renamed, duplicated or deactivated | Restore the name, or set the `color_request` job parameter to the new exact name |
+| Task FAILED: `view … lacks column(s)` | A DTC column was renamed or removed | Restore it in DTC, or update `sync/color_palette.py` `COL_*` and the SYNC_CONTRACT table |
+| Exit `NO_TARGETS_FROM_NONEMPTY_FOLDER` | Palettes were read but no row came out, so a BeProduct field likely changed shape | Nothing was written, so DTC is safe. Compare a palette's raw JSON with `flatten_palettes()` |
+| Exit `VERIFY_MISMATCH` | A write returned success, but the re-read still differs | Inspect `residual_after_write` in the exit JSON. Compare the DTC value with what was sent |
+| DTC `400 'Active' must be either YES or NO` | Something other than `YES`/`NO` was sent | A regression in `color_palette.flatten_palettes` |
 
 ---
 

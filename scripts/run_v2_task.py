@@ -64,6 +64,7 @@ NOTEBOOK_DIRS = {
     "v2_push_customer_code": "DTC/notebooks",
     "v2_inspect_requests": "DTC/notebooks",
     "v2_probe_image_get": "DTC/notebooks",
+    "v2_color_palette_sync": "DTC/notebooks",
     "p1p7_beproduct_to_dtc_transform": "beproduct",
     "p1_dtc_request_manager": "beproduct",
     "p1_pull_masters_to_delta": "DTC/notebooks",

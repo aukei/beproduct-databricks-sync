@@ -218,6 +218,7 @@ fieldId, JSONPath, sync direction. Always update it first, then the code constan
 | BeProduct sample submits → DTC (Phase 7) | `SAMPLE_SUBMIT_FIELDS` + `format_sample_field` | `dtc/python/sync/samples.py` (+ `phase1.FIELD_MAPPING`, transform staging) |
 | BeProduct → DTC transform (denormalize) | `FIELD_MAPPING` + staging `select` | `beproduct/p1p7_beproduct_to_dtc_transform.py` |
 | DTC WIP costing/duty push | `duty.WIP_HTS_COL` / `duty.WIP_DUTY_COL` / `duty.WIP_TARIFF_COL` | `dtc/python/sync/duty.py` |
+| BeProduct color palette → DTC Color Palette (Phase 11) | `color_palette.OWNED_COLS` + `flatten_palettes()` | `dtc/python/sync/color_palette.py` |
 | WIP ⇄ LinePlan join key (read by display name, both sheets) | `lineplan.LINEPLAN_REF_COLS` (+ `names` CTE in `dashboards/data_gaps/v_data_gaps.sql`) | `dtc/python/sync/lineplan.py` |
 
 Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
@@ -368,6 +369,59 @@ this stays true by construction; verify it stays true after any change).
    `"Factory 3 - Tariff"` (no `rate` suffix; ` - ` for numbered slots).
 
 ## Verified discoveries log (append-dated; do not delete)
+
+**Phase 11 LIVE -- BeProduct color palettes -> DTC "KTB Color Palette"
+(2026-10-08, deployed as v2 Stage 60 `color_palette`):**
+- Target: document `KTB Color Palette`, request `Color Palette`
+  (`6ac70bd87ee6ff2ab6ffbb55`, sheet `6ac70bd87ee6ff2ab6ffbb56`), view
+  `WIP_ITS_USE` (`6ac70b8f7ee6ff2ab6ffbb53`, 10 columns, `allowInsertRow=Y`,
+  0 mandatory). Found by EXACT name, never `is_in_scope()`: it does not follow
+  the WIP naming convention.
+- Owner decisions: `Season Brand = "<Season> <Year> - <Brand>"`; ONE ROW PER
+  BRAND; `Color Category` <- each color's `Schema.color_category`; a key that
+  disappears gets `Active = "NO"` (never deleted). Key = (Palette Number,
+  Color Number, Season Brand). Sheet is wholly BeProduct-owned, so a blank
+  CLEARS. Customer has no DTC column and is not synced.
+- **The `Active` checkbox accepts EXACTLY `"YES"` / `"NO"`.** `True` gets 400
+  `'Active' must be either YES or NO`, and lowercase `yes` is rejected too
+  (live probe on the then-empty sheet, probe row deleted afterwards).
+- Live: run 275109343119506 appended 18 rows in 1 call, re-read clean. Run
+  1049476858200400 made 18 no-ops and 0 calls (zero-diff-zero-write).
+  Deployed via `--reset-existing` after a live-vs-repo diff showed only the
+  new task and params differing.
+- Code: `sync/color_palette.py` + `test_color_palette.py`;
+  `dtc/notebooks/v2_color_palette_sync.py`; Delta snapshot
+  `beproduct_color_palette`; log `beproduct_to_dtc_sync_log` (`stage =
+  'color_palette'`). Runbook: TROUBLESHOOTING section 7.
+
+**BeProduct Color Palette API EXISTS -- Phase 11 feasibility, read-only probe
+(2026-10-07):**
+- SDK `api.color` (master folder `Color`) has the same attribute API as
+  Style/Material: `folders()`, `folder_schema()`, `attributes_list()`,
+  `attributes_get()`. Color folders: `Apparel`, `KTB`
+  (`73360953-7d55-48c0-a797-e921f0c660fd`). KTB holds 4 palettes / 18
+  colors (all test data).
+- **One `attributes_list(folder_id=...)` call returns everything**, colors
+  included, so no per-palette GET is needed. Per palette: `colorPaletteNumber`
+  (= `header_number`, e.g. `APP-S32027-00005`), `colorPaletteName`,
+  `modifiedAt`/`modifiedBy`, `isDeleted`, `headerData.fields[]` and
+  `headerData.colors.colors[]`.
+- Requested fields, by fieldId: Season = `season` (DropDown, e.g. `Fall`) +
+  `year` (`2028`; `season_year` = `S32028` is a derived LabelText); Customer =
+  `sold_to_customer` (MultiSelect list, `['Kontoor']`); Brands = `brands_multi`
+  (MultiSelect list); Palette Number/Name = `header_number`/`header_name`. Per
+  color: `color_number`, `color_name`, `color_reference`. Live, number ==
+  reference (Pantone code, e.g. `13-2705 TCX`), and `color_name` is the
+  Pantone name. Each color also has a stable `_id` (palette-color row id) and
+  `color_id`. Neither colors nor palettes carry a per-color timestamp.
+- **Server-side incremental filter works PER PALETTE**: `filters=[{"field":
+  "ModifiedAt" (or "FolderModifiedAt"), "operator": "Gt", "value": iso}]`
+  returned exactly the 1 palette modified after 2026-10-01. **Trap:** an
+  unknown field name (`modified_at`) returns ZERO rows with no error, which
+  is indistinguishable from "nothing changed".
+- **NOT yet verified:** whether editing a color INSIDE a palette bumps the
+  palette's `modifiedAt` (it needs a write). 3 of 4 palettes show
+  `modifiedAt == createdAt` (2026-07-31, `System`, a migration stamp).
 
 **Cost tag is now `userpurpose = lft-kontoor-sync` on every job, cluster and
 pool (2026-10-06, owner spec, applied live + read back):**
@@ -3814,6 +3868,7 @@ python3 dtc/tests/test_registry.py      # request-registry pure-function unit te
 python3 dtc/tests/test_xts_master.py    # Phase 0 XTS Master pure-function unit tests
 python3 dtc/tests/test_duty.py          # Phase 9b NT Orbit Duty Tools pure-function unit tests (fixture-based)
 python3 dtc/tests/test_bom.py           # Phase 10 BOM enrichment pure-function unit tests (upsert semantics)
+python3 dtc/tests/test_color_palette.py # Phase 11 color palette -> DTC planner (grain, YES/NO, untick, zero-diff)
 python3 dtc/tests/test_lifecycle.py     # Style/WIP-row lifecycle gating pure-function unit tests (Finalized/Drop + Active/Dropped)
 python3 dtc/tests/test_entra_auth.py    # Phase 9b Entra OAuth2 URL-building / callback-parsing pure-function unit tests
 python3 dtc/tests/test_phase1_live.py   # live reversible DTC write test (needs UAT)

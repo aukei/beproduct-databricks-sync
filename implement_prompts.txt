@@ -927,3 +927,19 @@ does the jobs / cluster etc have tag?
 userpurpose=lft-kontoor-sync for main jobs
 userpurpose=lft-kontoor-dev for one off / adhoc jobs
 do a doc checks.
+
+
+# phase 11 color Palette
+- retrieve BeProduct color palette
+https://hk.beproduct.com/lifung/Color/#/Color/list
+Get these fields: Season, Customer, Brands, Palette Number, Palette Name​, Color number​, Color Name​, Color Reference​
+- DTC Fabric requests will reference color number and color name from above, therefore we are syncing BeProduct above to a new DTC sheet.
+- First test if color paletter retrieve api exists, and how to detect updates?
+
+DTC document = 'KTB Color Palette', right now a demo request ref only, but likely won't follow the "seasoncode - brand" naming.
+- take the current one "Color Palette" (https://dtc.lfuat.net/operation/request/6ac70bd87ee6ff2ab6ffbb55) as live sample
+- pull all BP color palette to fill into this.
+- each run: download new color or patch updated color.
+- always from BP to DTC
+- BP color paletter split by folder = customer. 
+- confirmed Color Category is a per-color field, and found a custom Schema block with color code/name fields. 

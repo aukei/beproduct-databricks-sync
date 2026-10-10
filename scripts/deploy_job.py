@@ -401,6 +401,14 @@ JOB_PARAMS = {
     # ON since 2026-09-30 (owner decision): it had been enabled on the live
     # jobs, and the owner chose to keep it on rather than let a redeploy revert it.
     "run_customer_code_push": "true",
+    # Stage 60 (Phase 11, 2026-10-08): BeProduct color palettes -> DTC. The
+    # request is found by EXACT name inside the document (it does not follow the
+    # WIP "<customer> <season> <brand>" convention); the run refuses unless
+    # exactly one active request matches.
+    "run_color_palette": "true",
+    "color_folder": "KTB",                      # BeProduct COLOR folder
+    "color_document": "KTB Color Palette",
+    "color_request": "Color Palette",
     # Unqualified output table name for build_costing. Routine runs write the
     # real table; override it to build a comparison copy without replacing what
     # duty_compute reads and MERGEs. (The old `costing_chart_kei` scratch table
@@ -1014,6 +1022,18 @@ def build_v2_tasks():
         "dry_run": DRY,
         "run_customer_code_push": P("run_customer_code_push"),
     }, depends=[dep("pull_bom"), dep("pull_master_dtc")]))
+
+    # ── Stage 60: BeProduct color palettes -> DTC "KTB Color Palette" ──────
+    # Phase 11. Its own request, hence its own DTC write window (DTC locks per
+    # request, so it never contends with wip_push). Reads BeProduct and DTC
+    # LIVE and nothing this job builds, so it has no dependencies and runs from
+    # the start. Zero-diff-zero-write: a run with nothing changed writes nothing.
+    tasks.append(v2_task("color_palette", f"{NB_DTC_V2}/v2_color_palette_sync", {
+        "catalog": CAT, "schema": SCH, "dtc_environment": ENV, "dtc_workspace": WS,
+        "color_folder": P("color_folder"), "color_document": P("color_document"),
+        "color_request": P("color_request"),
+        "dry_run": DRY, "run_color_palette": P("run_color_palette"),
+    }))
 
     # ── Stage 50: DTC -> BeProduct (unchanged; writes BeProduct, never DTC) ──
     tasks.append(v2_task("phase2_push", f"{NB_DTC_V2}/p2_push_dtc_to_beproduct", {

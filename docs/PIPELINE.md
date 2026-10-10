@@ -124,11 +124,13 @@ flowchart TD
     wip_push --> phase3_images[["phase3_images (45) — DTC image"]]
 
     transform & pull_master_dtc --> phase2_push(["phase2_push (50) — BeProduct style"])
-    pull_bom & pull_master_dtc --> push_customer_code(["push_customer_code (55) — BeProduct material, disabled"])
+    pull_bom & pull_master_dtc --> push_customer_code(["push_customer_code (55) — BeProduct material"])
+
+    color_palette[["color_palette (60) — DTC Color Palette"]]
 
     classDef dtc fill:#fde2e1,stroke:#c0392b,color:#000
     classDef bp fill:#e1ecfd,stroke:#2c5aa0,color:#000
-    class wip_push,phase3_images dtc
+    class wip_push,phase3_images,color_palette dtc
     class p0_push,phase2_push,push_customer_code bp
 ```
 
@@ -170,7 +172,8 @@ flowchart LR
 | 40 | `wip_push` | `v2_wip_push` | **DTC** WIP `sheetData` | `run_wip_push`, `run_duty_push` | `request_manager`, `build_costing` |
 | 45 | `phase3_images` | `p3_beproduct_to_dtc_images` | **DTC** Style Image | `run_phase3` | `wip_push` |
 | 50 | `phase2_push` | `p2_push_dtc_to_beproduct` | **BeProduct** style | `run_phase2` | `transform`, `pull_master_dtc` |
-| 55 | `push_customer_code` | `v2_push_customer_code` | **BeProduct** material master | `run_customer_code_push` (**false**) | `pull_bom`, `pull_master_dtc` |
+| 55 | `push_customer_code` | `v2_push_customer_code` | **BeProduct** material master | `run_customer_code_push` (on since 2026-09-30) | `pull_bom`, `pull_master_dtc` |
+| 60 | `color_palette` | `v2_color_palette_sync` | **DTC** "KTB Color Palette" (own request) | `run_color_palette` | — (root) |
 
 Every task also takes `dry_run` (job default `false`); a stage whose flag is
 `false` exits SUCCESS with `SKIPPED_run_<flag>_false`, so a disabled stage looks
@@ -807,6 +810,55 @@ assignment" means. The write always uses the GUID `materialId`.
 5. **Every write is read back and verified.** A 200 from a vendor API means
    accepted, not stored; this pipeline has been burned by that twice.
 
+### Stage 60 — `color_palette` → DTC "KTB Color Palette"  (Phase 11, 2026-10-08)
+
+BeProduct color palettes → one DTC sheet that DTC Fabric requests pick colors
+from. **One-way, BeProduct → DTC; every column is BeProduct-owned.** Pure logic:
+`sync/color_palette.py` (tests `test_color_palette.py`).
+
+- **Source:** one `api.color.attributes_list(folder_id)` call on the BeProduct
+  COLOR folder `color_folder` (`KTB`) returns every palette with its colors.
+  The stage pulls in full every run and does not use `modifiedAt`. The pull is
+  one call, and only a full pull can see removals.
+- **Target:** the request named exactly `color_request` (`Color Palette`) in
+  document `color_document` (`KTB Color Palette`), view `WIP_ITS_USE`. It does
+  NOT follow the WIP naming convention, so it is found by name, never by
+  `is_in_scope()`.
+- **Grain:** one row per palette × color × **brand**. Key = `(Palette Number,
+  Color Number, Season Brand)`.
+- **Write window:** its own request, so it never contends with `wip_push`.
+  PATCH then POST, back to back.
+
+Gates, in order:
+
+1. `run_color_palette` false → exit `SKIPPED`.
+2. The BeProduct color folder must match exactly one folder by name, else the
+   task FAILS.
+3. A non-empty folder that yields zero rows → exit
+   `NO_TARGETS_FROM_NONEMPTY_FOLDER`, no write. This guards against a silent
+   field rename unticking every DTC row.
+4. Deleted palettes (`isDeleted`) contribute no rows.
+5. A color with no `color_number` is skipped and logged `no_color_number`.
+6. A duplicate key keeps the first occurrence and is logged `duplicate_key`.
+7. Exactly one ACTIVE request named `color_request` in the document, and its
+   view must contain all 10 owned columns, else the task FAILS.
+8. Per target row: no DTC row with that key → **INSERT** (`append_rows`). Key
+   exists and a column differs → **UPDATE** that column only. A value blanked
+   in BeProduct IS cleared, because the sheet is wholly BeProduct-owned.
+9. A DTC row whose key no BeProduct row produces → `Active = "NO"` (logged
+   `untick_removed`). It is never deleted. A row already `NO` is not rewritten.
+10. A DTC row with an incomplete key (a hand-typed row) is reported
+    (`unkeyed_dtc_row`) and never touched.
+11. Nothing differs → **no write at all**. After any write, the stage re-reads
+    and re-plans; anything still pending → `VERIFY_MISMATCH`.
+
+A change to any key part (a re-numbered color, a palette moved to another
+season, a brand removed) therefore shows up as a new row PLUS the old row
+unticked. That is intended.
+
+Outputs: Delta `beproduct_color_palette` (the flattened source, overwritten each
+run) and `beproduct_to_dtc_sync_log` rows with `stage = 'color_palette'`.
+
 ---
 
 ## Companion job
@@ -948,7 +1000,8 @@ scheduled run.
 | `phase2_push` | Stage 50, unchanged |
 | `compute_duty_rates` (own job) | unchanged, own job, now serverless |
 | `phase3_images` (own job) | → Stage 45 inside the v2 DAG; addresses rows by `rowid` |
-| — | **new**: `push_customer_code` (Stage 55, disabled) |
+| — | **new**: `push_customer_code` (Stage 55) |
+| — | **new**: `color_palette` (Stage 60, Phase 11) |
 
 The v1 phase numbers still used in AGENTS.md map as: Phase 0 → 00, Phases 1/4/7
 → 20 + 40, Phase 2 → 50, Phase 3 → 45, Phase 9a → 10 (`pull_lineplan_dtc`) +
