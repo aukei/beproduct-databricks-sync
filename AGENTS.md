@@ -370,6 +370,34 @@ this stays true by construction; verify it stays true after any change).
 
 ## Verified discoveries log (append-dated; do not delete)
 
+**An EMPTY source used to leave the last snapshot in place -- and that
+recreated retired DTC requests (2026-10-12, before a demo):**
+- The project team emptied BeProduct `TEST KTB` and retired (renamed +
+  deactivated) every KTB WIP request. The next manual run (03:51 UTC):
+  1. `bp_style_sync` found 0 styles and **skipped its write**, so `ktb_styles`
+     kept 18 styles from 2026-10-09 and `transform` rebuilt staging from them.
+  2. The registry correctly marked the 4 old requests inactive, then
+     `request_manager` -- by its documented recreate-on-inactive rule --
+     **CREATED 4 new requests with the old names** (`6acc5a1a…`, `…1b…`,
+     `…1d…`, `…1e…`), shared per policy.
+  3. `wip_push` inserted **44 rows of deleted styles** into them;
+     `phase3_images` tried 44 uploads, all failed (source images gone).
+  4. `phase2_push` failed: BeProduct answers `GET Style/Header/{id}` for a
+     DELETED style with **500 `NullReferenceException`**, not a 404.
+- **Three stages shared the shape**: an empty source made them exit without
+  writing, instead of writing the empty result. `bp_style_sync` (0 styles),
+  `pull_master_dtc` (`NO_IN_SCOPE_REQUESTS`, or all requests empty), and
+  `request_manager` (`NO_PENDING_ROWS`, left `dtc_request_mapping` intact).
+- **Fixed**: each now empties its own output in exactly the case where an
+  overwrite with 0 rows would have. Deliberately NOT emptied: an INCREMENTAL
+  style sync; a style result that fails only the folder-name check (the SDK
+  scoping anomaly); a targeted or `append` DTC pull. `phase2_push` now logs an
+  unreadable style as `style_unreadable` and skips it, like a failed push.
+- **Clean-restart order matters.** Recreate-on-inactive is by design, so
+  retiring a request only sticks once its BeProduct styles are gone (and
+  staging has refreshed). Retire requests with a lifecycle word in the name,
+  so a stray reactivation is still out of scope.
+
 **Phase 11 LIVE -- BeProduct color palettes -> DTC "KTB Color Palette"
 (2026-10-08, deployed as v2 Stage 60 `color_palette`):**
 - Target: document `KTB Color Palette`, request `Color Palette`

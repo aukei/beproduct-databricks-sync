@@ -278,6 +278,30 @@ def load_current(style_id):
     style_cache[style_id] = {"header": header, "cw_lot": cw_lot}
     return style_cache[style_id]
 
+# A style deleted in BeProduct after staging was built cannot be read: the API
+# answers GET Style/Header/{id} with a 500 NullReferenceException, not a 404
+# (live 2026-10-12, after the TEST KTB folder was emptied). Skip and log that
+# style, like a failed push below, instead of failing the whole stage.
+unreadable = {}    # style_id -> error text
+readable = []
+for j in joined:
+    sid = j["beproduct_style_id"]
+    if sid not in unreadable:
+        try:
+            load_current(sid)
+        except Exception as e:
+            unreadable[sid] = str(e)[:300]
+    if sid in unreadable:
+        log(sid, j["colorway_id"], j["bp_style_number"], j["color"], j["_req"],
+            j["_row_id"], "read", "READ", "error", "style_unreadable",
+            unreadable[sid])
+        continue
+    readable.append(j)
+if unreadable:
+    print(f"⚠️  {len(unreadable)} style(s) unreadable in BeProduct (deleted?), "
+          f"skipped: {sorted(unreadable)}")
+joined = readable
+
 for j in joined:
     cur = load_current(j["beproduct_style_id"])
     bp = {}
@@ -364,6 +388,7 @@ print("PHASE 2 PUSHBACK SUMMARY")
 print("=" * 80)
 print(f"  candidate rows:        {len(joined)}")
 print(f"  unmatched (skipped):   {unmatched}")
+print(f"  unreadable styles:     {len(unreadable)}")
 for k, v in plan.summary().items():
     print(f"  {k}: {v}")
 print(f"  styles pushed ok:      {ok}")

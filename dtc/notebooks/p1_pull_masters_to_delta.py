@@ -182,7 +182,19 @@ else:
     reg_rows = _reg_all
     print(f"In-scope active requests to pull: {len(reg_rows)}")
 
+def _empty_target_on_full_pull(why):
+    """A FULL overwrite pull that yields zero rows must leave the table empty,
+    exactly as an overwrite with 0 rows would. Skipping the write kept the
+    previous snapshot, so build_costing kept costing rows of requests that had
+    been retired (2026-10-12). A targeted pull or an append never empties."""
+    if filter_request_ids or write_mode != "overwrite":
+        return
+    if spark.catalog.tableExists(target_full):
+        spark.sql(f"DELETE FROM {target_full}")
+        print(f"⚠️  {why} -> emptied {target_full} (full overwrite pull)")
+
 if not reg_rows:
+    _empty_target_on_full_pull("No active in-scope requests")
     connector.close()
     dbutils.notebook.exit("NO_IN_SCOPE_REQUESTS")
 
@@ -319,6 +331,7 @@ else:
         print("⚠️  All targeted requests were empty — removed stale rows if any")
     else:
         print("⚠️  All in-scope requests were empty - no data rows written")
+        _empty_target_on_full_pull("All in-scope requests were empty")
 
 # COMMAND ----------
 

@@ -1104,6 +1104,23 @@ else:
     print("NO DATA TO SYNC")
     print("=" * 80)
     print(f"\n⚠️  Job completed with no data")
+
+    # A FULL refresh of a folder that resolved by id (Step 3 raises if it does
+    # not) and returned ZERO styles means the folder is genuinely empty, so the
+    # snapshot must be emptied too -- exactly what an overwrite with 0 rows
+    # would do. Leaving the previous snapshot in place made every downstream
+    # stage act on styles that no longer exist (2026-10-12: TEST KTB emptied
+    # before a demo -> request_manager RE-CREATED the 4 DTC requests the user
+    # had just retired, wip_push inserted 44 rows of deleted styles into them,
+    # and phase2 failed reading a deleted style).
+    # Not when the API returned styles that merely failed the folder-name check:
+    # that is the SDK scoping anomaly, not an empty folder.
+    if refresh_mode_val == "FULL" and len(all_styles) == 0:
+        _ktb_full = f"{catalog_val}.{schema_val}.{table_name_val}"
+        if spark.catalog.tableExists(_ktb_full):
+            spark.sql(f"DELETE FROM {_ktb_full}")
+            print(f"   Folder is empty -> emptied {_ktb_full} (FULL refresh)")
+
     print(f"\n   API returned: {len(all_styles)} total styles")
     print(f"   Matched folder '{folder_name_val}': 0 styles")
     

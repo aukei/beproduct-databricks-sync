@@ -226,6 +226,18 @@ applications (Proto / PreLine / SMS / Fit / PP / TOP).
 the **only** WIP read that feeds planning; v1's `repull_dtc` and `repull_dtc_bom`
 are gone.
 
+**An empty source empties the snapshot** (since 2026-10-12). A FULL
+`bp_style_sync` whose folder returns zero styles empties `ktb_styles`, and a
+full `pull_master_dtc` with no active in-scope requests (or only empty ones)
+empties `dtc_wip_<customer>` — exactly what an overwrite with 0 rows would do.
+Both used to exit without writing, leaving the last snapshot in place, so a
+retired folder or request kept driving every stage below: on 2026-10-12, after
+TEST KTB was emptied and its requests retired, `request_manager` recreated the 4
+requests from the stale styles and `wip_push` inserted 44 rows of deleted styles.
+Exceptions, which do NOT empty: an INCREMENTAL style sync; a style result that
+fails only the folder-name check (the SDK scoping anomaly, not an empty folder);
+a targeted (`request_ids`) or `append` pull.
+
 **`pull_lineplan_dtc`** — the `KTB LinePlan` document → `dtc_lineplan_<customer>`.
 
 **Gates — request-level scoping** (`phase1.is_in_scope()`, the shared choke point
@@ -357,6 +369,9 @@ Unchanged from v1. Resolves each pending staging request name against
 **active + in-scope** registry rows, writing `dtc_request_mapping`; creates and
 shares any missing in-scope request.
 
+- No pending staging rows → this environment's `dtc_request_mapping` is cleared
+  and the stage exits `NO_PENDING_ROWS`, so `wip_push` exits
+  `NO_RESOLVED_REQUESTS` instead of targeting last run's requests.
 - Only in-scope names are created; a brand-less `KTB SS26` logs `NOT_IN_SCOPE`.
 - Creation is gated by `dry_run`.
 - Sharing (`share_on_create`, default true): all views → `aiagentwip@lifung.com`;
@@ -709,7 +724,10 @@ it is outside the write-window constraint entirely and runs in parallel with
 Stages 20–40.
 
 Flag: `run_phase2`. Logs every decision to `dtc_to_beproduct_sync_log` (no
-exit JSON). Current BeProduct values are read live per style for the diff.
+exit JSON). Current BeProduct values are read live per style for the diff. A
+style that cannot be read (deleted in BeProduct after staging was built — the API
+answers with a **500 `NullReferenceException`**, not a 404) is logged
+`READ` / `style_unreadable` and skipped; the rest of the stage carries on.
 
 Identity comes from staging: a DTC row joins on `(request, BP Style#, colour)`;
 no staging match → `UNMATCHED` / `no_beproduct_identity` (a stranded or moved

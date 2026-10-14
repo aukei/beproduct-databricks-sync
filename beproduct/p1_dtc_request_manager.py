@@ -197,6 +197,12 @@ for n in req_names:
 
 if not req_names:
     print("⚠️  No pending staging rows - nothing to resolve")
+    # Clear this environment's mapping, as the "nothing resolved" branch below
+    # does. Exiting with it intact left wip_push targeting requests that had
+    # since been retired (2026-10-12).
+    if spark.catalog.tableExists(mapping_full):
+        spark.sql(f"DELETE FROM {mapping_full} WHERE environment = '{environment}'")
+        print(f"   Cleared {mapping_full} for environment '{environment}'")
     connector.close()
     dbutils.notebook.exit("NO_PENDING_ROWS")
 
