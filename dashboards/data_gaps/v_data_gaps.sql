@@ -62,6 +62,27 @@ styles AS (
   FROM lft.beproduct.ktb_styles
 ),
 resolved AS (SELECT DISTINCT dtc_request_name AS request FROM lft.beproduct.dtc_request_mapping),
+-- Styles whose colorways share a colour NAME (PIPELINE.md Stage 20, gate 7).
+-- BeProduct only needs color_number unique; DTC keys rows on the name, so the
+-- transform skips the whole style. Names compared like sync/phase1.norm():
+-- whitespace collapsed + trimmed, case kept, null sentinels ignored.
+dup_colors AS (
+  SELECT bp_style,
+         concat_ws('; ', collect_list(concat('"', name, '" (colour numbers ', numbers, ')'))) AS detail,
+         concat_ws(', ', collect_list(name)) AS names
+  FROM (
+    SELECT k.bp_style_number AS bp_style,
+           trim(regexp_replace(c.color_name, '[ \\t\\r\\f]+', ' ')) AS name,
+           concat_ws(' / ', collect_list(c.color_number)) AS numbers
+    FROM lft.beproduct.ktb_styles k
+    LATERAL VIEW explode(from_json(k.colorways_json,
+      'array<struct<colorway_id:string,color_name:string,color_number:string>>')) e AS c
+    GROUP BY 1, 2
+    HAVING count(*) > 1
+  )
+  WHERE lower(coalesce(name, '')) NOT IN ('', 'n/a', 'na', 'none', 'null', 'nan')
+  GROUP BY bp_style
+),
 -- bom_segments has had TWO shapes (Lakebase: parse_error; BeProduct
 -- PageBomVariation: error) and the source has been switched both ways, so the
 -- error column is read shape-agnostically through to_json(struct(*)).
@@ -175,12 +196,21 @@ gaps AS (
     ON m.CUSTOMER = 'KTB' AND upper(trim(m.BPSEASON)) = upper(trim(s.season))
 
   UNION ALL
+  SELECT 'WIP record', 'DUPLICATE_COLOR_NAME', 'blocker', 'BeProduct user', NULL, d.bp_style, d.names, NULL,
+         concat('Colourways share a name: ', d.detail,
+                '. DTC tells colourways apart by name, so the style is skipped: its DTC rows are frozen at their last values (nothing is deleted).'),
+         'BeProduct user: give each colourway of this style a different Color Name (the Color Number alone is not enough for DTC). It syncs again on the next run.',
+         '1.1'
+  FROM dup_colors d
+
+  UNION ALL
   SELECT 'WIP record', 'NOT_STAGED', 'blocker', 'IT', NULL, s.bp_style, NULL, NULL,
          'The style is in BeProduct but did not reach staging, so it cannot be sent to DTC.',
          'IT: check the transform task of the last main run.',
          '1.1'
   FROM styles s
   LEFT ANTI JOIN stg ON stg.bp_style = s.bp_style
+  LEFT ANTI JOIN dup_colors d ON d.bp_style = s.bp_style
   WHERE coalesce(s.product_status, '') NOT IN ('Finalized', 'Drop')
     AND EXISTS (SELECT 1 FROM lft.beproduct.dtc_seasoncode_mapping m
                 WHERE m.CUSTOMER = 'KTB' AND upper(trim(m.BPSEASON)) = upper(trim(s.season)))
@@ -207,6 +237,7 @@ gaps AS (
          'Data owner: add the colourway in BeProduct, or delete the DTC rows if they are obsolete.',
          '1.7'
   FROM wip w LEFT ANTI JOIN stg ON stg.bp_style = w.bp_style AND stg.color = w.color
+  LEFT ANTI JOIN dup_colors d ON d.bp_style = w.bp_style
   GROUP BY w.request, w.bp_style, w.color
 
   -- ═══ MATERIAL ROWS (runbook 1.8) ═════════════════════════════════════════

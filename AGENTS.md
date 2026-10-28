@@ -370,6 +370,101 @@ this stays true by construction; verify it stays true after any change).
 
 ## Verified discoveries log (append-dated; do not delete)
 
+**BeProduct colorways vs the color library: `colorSourceId` is NEVER
+validated, and a colorway "create" UPSERTS on `color_number` (2026-10-27/28,
+read probes + live write tests on TEST KTB `KTB-00072`):**
+- Asked for a future workflow that CREATES style colorways / BOM rows through
+  the API. Short answer: **a library color must first be in a palette**, so a
+  sync job can read its id. The UI does not enforce that; the API needs it.
+- `colorSourceId` exists only on Style and Material colorways. It is a
+  color-LIBRARY id (e.g. Pantone TCX), not a palette row.
+- **The public API exposes palettes, not the library.** There is no endpoint to
+  list or look up library colors (every guessed route returned 404). A palette
+  is a curated SUBSET, so listing all palettes does not give the full library.
+  The only API-readable source of valid library ids is a palette color's
+  **`color_source_id`** (equal to its `color_id`). Its `_id` is the palette-ROW
+  id, NOT a library id. `color_library` / `palette_id` are null on live data.
+  A colorway linked to a library color in the UI need not be in any palette,
+  and then the API cannot discover its id.
+- Write shape: `style.attributes_update(header_id, colorways=[{"id": None,
+  "colorSourceId": ..., "fields": {...}}])`. Required fields: `color_number`,
+  `color_name`, `primary`, `secondary` (`primary`/`secondary`/`image` are
+  ImageColor, hex without `#`, e.g. `fcccdc`; `secondary` may be `""`).
+- **BeProduct does no lookups and no validation:**
+  - a name-only create is NOT linked to a same-name palette color; it lands as
+    a manual color (`colorSourceId` null);
+  - a create with only `colorSourceId` does NOT fill name/hex from the library;
+  - id vs name/hex consistency is not checked;
+  - a made-up UUID, or a palette `_id`, is stored as-is with no error.
+  So the caller must send `colorSourceId` + `color_name` + `color_number` +
+  `primary` together, and validate the id against a palette snapshot first.
+- **`"id": None` is an UPSERT keyed on `color_number`, not a create** (the SDK
+  docs say "creates"). Same `color_number` as an existing colorway ->
+  **silently OVERWRITES** it, including name, `colorSourceId` and comment.
+  Same name with a different number -> a new colorway. Creating two colorways
+  with one number in one call keeps only the last. A writer must read the
+  style's colorways and match on `color_number` first.
+- Safe update pattern: list every existing colorway as `{"id": x, "fields":
+  {}}` in each call. Whether omitted colorways are kept is undocumented and was
+  not tested.
+- BOM variations: `syncColorways: true` with `selectedVariationColorways: []`
+  means the BOM's color columns mirror the style's colorways. `rows[].colors`
+  is empty on every live row. `isAdHoc` means a row with no linked MATERIAL;
+  it says nothing about color linkage.
+- **CORRECTION to the 2026-09-16 PageBomVariation entry:**
+  `style.app_get(header_id, page_id)` now returns a dict `{id, headerId,
+  name, data: [variations], createdBy, ...}`. The variation list is under
+  `data`, not the top-level value.
+- Gap for that workflow: Phase 11's `beproduct_color_palette` snapshot does
+  NOT store `color_source_id` yet (`sync/color_palette.py` reads number, name,
+  reference, hex, category only). Add it before building on the snapshot.
+- Test colorways left on `KTB-00072` (`712f52aa-…`) for UI review, labelled
+  in COMMENTS: D `13-2705 TCX` "Flushing Pink" with the real library id
+  `9a909a70-…`; E `13-2705 TCX-E` "Flushing Pink E" with a made-up id
+  `0419b1e6-…`. **E was DELETED 2026-10-28** (owner); D remains, a properly
+  linked colorway (`attributes_colorway_delete(header_id, colorway_id)`).
+- **UI-verified by the owner (2026-10-28):** the style shows 3 colorways
+  (Black, `13-2705 TCX`, `13-2705 TCX-E`) and the two pinks have IDENTICAL
+  swatches. So the swatch comes from the `primary` hex, not from the library
+  link: an ad-hoc (unlinked or dangling-id) colorway still gets a swatch, and
+  the UI gives no sign that E's `colorSourceId` points at nothing. The two
+  colorways also share a name, which BeProduct accepts while the
+  `color_number`s differ.
+- **THE GAP this exposes:** BeProduct's unique key per style is
+  `color_number`; DTC's in-request key uses the colour NAME (`Color / Wash`).
+  See the next entry for what that did to the pipeline and how it is handled.
+
+**Two colorways with the SAME NAME on one style fail `transform`, and with it
+the whole v2 run (2026-10-27/28, self-inflicted by the test above):**
+- BeProduct allows it: only `color_number` must differ (see the entry above).
+  The transform explodes colorways by `color_name`, so both land on one
+  staging key `(dtc_request_name, bp_style_number, color, fabric_group)`, and
+  on one DTC in-request key `(BP Style#, Color / Wash)`.
+- Cell 8 "validate" raised `Data quality validation failed: 1 critical
+  issues`, so staging was not written. That is why the data-gaps dashboard
+  showed nothing: it reads staging, which was stale, not wrong.
+- 22 consecutive runs failed (`SUCCESS_WITH_FAILURES`), 2026-10-27 10:09 ->
+  2026-10-28 06:31 UTC, from test colorways D and E both named "Flushing
+  Pink" on `KTB-00072`. Found by grouping `ktb_styles.colorways_json` by
+  (style, `color_name`). Fixed by renaming E; run 261280977376578 succeeded
+  on all 15 tasks.
+- The validate cell now NAMES the duplicate keys and their colorway ids in
+  the exception text. Serverless returns no stdout, so the exception is the
+  only diagnostic that reaches the run output.
+- **Owner decision (2026-10-28): skip the style and list it on the
+  dashboard.** A real user can create this in BeProduct, and failing the run
+  let one style block every style. `transform` now drops a style whose
+  colorways share a name, compared by `phase1.norm()`
+  (`phase1.duplicate_color_names()`, test `[dup-color]`), BEFORE exploding
+  colorways. The style's DTC rows are frozen at their last values, not
+  deleted: `build_costing` falls back to the WIP snapshot for a style absent
+  from staging. `v_data_gaps` lists it as `DUPLICATE_COLOR_NAME` (owner:
+  BeProduct user) and suppresses the misleading `NOT_STAGED` /
+  `ROW_NOT_IN_BEPRODUCT` rows it would otherwise also produce. PIPELINE.md
+  Stage 20 gate 7; TROUBLESHOOTING 1.1.
+- Not done: keying DTC rows on `color_number` instead. That would be the
+  real fix, but it changes the DTC match key for every existing row.
+
 **An EMPTY source used to leave the last snapshot in place -- and that
 recreated retired DTC requests (2026-10-12, before a demo):**
 - The project team emptied BeProduct `TEST KTB` and retired (renamed +
@@ -403,9 +498,10 @@ recreated retired DTC requests (2026-10-12, before a demo):**
 - Target: document `KTB Color Palette`, request `Color Palette`
   (`6ac70bd87ee6ff2ab6ffbb55`, sheet `6ac70bd87ee6ff2ab6ffbb56`), view
   `WIP_ITS_USE` (`6ac70b8f7ee6ff2ab6ffbb53`, 10 columns, `allowInsertRow=Y`,
-  0 mandatory). Found by EXACT name, never `is_in_scope()`: it does not follow
+  0 mandatory; 11 columns since `Hex` was added 2026-10-20). Found by EXACT name, never `is_in_scope()`: it does not follow
   the WIP naming convention.
-- Owner decisions: `Season Brand = "<Season> <Year> - <Brand>"`; ONE ROW PER
+- Owner decisions: `Season Brand = "<Season> <Year> - <Brand>"` (SUPERSEDED
+  2026-10-20, see below); ONE ROW PER
   BRAND; `Color Category` <- each color's `Schema.color_category`; a key that
   disappears gets `Active = "NO"` (never deleted). Key = (Palette Number,
   Color Number, Season Brand). Sheet is wholly BeProduct-owned, so a blank
@@ -421,6 +517,36 @@ recreated retired DTC requests (2026-10-12, before a demo):**
   `dtc/notebooks/v2_color_palette_sync.py`; Delta snapshot
   `beproduct_color_palette`; log `beproduct_to_dtc_sync_log` (`stage =
   'color_palette'`). Runbook: TROUBLESHOOTING section 7.
+- **`Hex` added 2026-10-20 (owner spec).** The DTC column is `Hex` with a
+  CAPITAL H (view definition, plain writable `string`). The owner asked for
+  "hex", but the stage FAILS if an owned column is missing from the view, so
+  the exact spelling matters. Source is each color's top-level `hex`, which
+  sits beside `rgb_*`/`cmyk_*`/`lab_*` and is NOT inside `Schema`. Live values
+  are 6 lowercase hex digits with no `#` (`fcccdc`), passed through unchanged.
+  All 18 colors carry one, so the first run after deploy backfills `Hex` on
+  every existing row (18 lean updates, one write window) and inserts nothing.
+  Owner confirmed: DTC stores it WITHOUT `#` too. **LIVE-VERIFIED** run
+  1108143496190219 (PERIODIC): 18 updates, `columns_changed = {Hex: 18}`, 1
+  PATCH call, 0 failed; the re-read showed 18 no-ops.
+- **`Season Brand` format changed 2026-10-20 (owner spec): `"FW28 -
+  Collaborations"` / `"SS28 - Wrangler"`.** The prefix comes from
+  `dtc_seasoncode_mapping` (`KTB`: `FALL`->`FW`, `SPRING`->`SS`), the SAME
+  table that builds the WIP request names, so "FW28" means the same in both.
+  BeProduct's own season codes are `S1`..`S4` and are NOT used. Year code is
+  the last 2 digits of `year` (BeProduct's `year` choice code is identical).
+  - Season Brand is part of the MATCH KEY, so a plain format change would have
+    unticked all 18 rows and inserted 18 duplicates. Instead each target
+    carries its legacy key (`LEGACY_SEASON_BRAND`, never written) and
+    `plan_sync` RENAMES a legacy-keyed row in place, only when no row with the
+    new key exists. Live dry plan: 18 updates, `{Season Brand: 18}`, 0
+    inserts, 0 unticks. The alias can be deleted once no legacy row remains.
+  - **LIVE-VERIFIED** run 444763043234091 (PERIODIC): 18 updates,
+    `columns_changed = {Season Brand: 18}`, 1 PATCH call, 0 failed, 0
+    inserts, 0 unticks; re-read showed 18 no-ops. No legacy-format row remains.
+  - An UNMAPPED season (Summer/Holiday have no row today) or a non-4-digit
+    year skips the palette, logs `no_season_mapping`, and HOLDS its existing
+    DTC rows (never unticked). Without the hold, a missing mapping row would
+    look like "palette removed" and untick real colors.
 
 **BeProduct Color Palette API EXISTS -- Phase 11 feasibility, read-only probe
 (2026-10-07):**

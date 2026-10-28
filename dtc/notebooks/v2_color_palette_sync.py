@@ -70,6 +70,7 @@ dbutils.widgets.text("schema", "beproduct", "Schema")
 dbutils.widgets.text("dtc_environment", "uat", "DTC environment")
 dbutils.widgets.text("dtc_workspace", "KTB", "DTC workspace")
 dbutils.widgets.text("color_folder", "KTB", "BeProduct COLOR folder name")
+dbutils.widgets.text("color_customer", "KTB", "Customer in dtc_seasoncode_mapping")
 dbutils.widgets.text("color_document", "KTB Color Palette", "DTC document")
 dbutils.widgets.text("color_request", "Color Palette", "DTC request reference (exact)")
 dbutils.widgets.text("color_view", "WIP_ITS_USE", "DTC view")
@@ -83,11 +84,13 @@ schema = dbutils.widgets.get("schema")
 environment = dbutils.widgets.get("dtc_environment").strip()
 workspace = dbutils.widgets.get("dtc_workspace").strip()
 folder_name = dbutils.widgets.get("color_folder").strip()
+customer = dbutils.widgets.get("color_customer").strip()
 document = dbutils.widgets.get("color_document").strip()
 request_name = dbutils.widgets.get("color_request").strip()
 view_name = dbutils.widgets.get("color_view").strip()
 snapshot_table = f"{catalog}.{schema}.{dbutils.widgets.get('color_palette_table').strip()}"
 sync_log_full = f"{catalog}.{schema}.beproduct_to_dtc_sync_log"
+season_mapping_table = f"{catalog}.{schema}.dtc_seasoncode_mapping"
 batch_size = max(1, int(dbutils.widgets.get("batch_size") or 100))
 dry_run = (dbutils.widgets.get("dry_run") or "true").strip().lower() == "true"
 
@@ -114,8 +117,16 @@ if len(_folders) != 1:
     raise RuntimeError(f"BeProduct color folder {folder_name!r}: expected 1 match, got {len(_folders)}")
 folder_id = _folders[0]["id"]
 
+# Season Brand = "<DTCCODE><YY> - <Brand>". The prefix map is the one the WIP
+# transform uses for request names (BeProduct -> DTC only).
+season_prefixes = {(r["BPSEASON"] or "").strip().upper(): (r["DTCCODE"] or "").strip()
+                   for r in spark.table(season_mapping_table)
+                                 .where(f"upper(CUSTOMER) = upper('{customer}')").collect()}
+print(f"Season prefixes for {customer!r}: {season_prefixes}")
+
 palettes = list(client.color.attributes_list(folder_id=folder_id))
-targets, flat_report = cp.flatten_palettes(palettes)
+targets, flat_report = cp.flatten_palettes(palettes, season_prefixes)
+held_palettes = flat_report["held_palettes"]
 print(f"Step 1: {flat_report['palettes']} palette(s), {flat_report['colors']} color(s) "
       f"-> {len(targets)} target row(s)")
 
@@ -162,7 +173,7 @@ if _missing:
     raise RuntimeError(f"view {view_name!r} lacks column(s) {_missing}")
 
 live_rows = dtc.get_sheet(sheet_id, view_id).get("sheetData", [])
-plan = cp.plan_sync(targets, live_rows)
+plan = cp.plan_sync(targets, live_rows, held_palettes)
 print(f"Step 3: request {request_id} sheet {sheet_id}: {len(live_rows)} live row(s)")
 print(f"        plan {plan.summary()}")
 
@@ -229,6 +240,8 @@ for k in plan.duplicate_dtc_keys + flat_report["duplicate_keys"]:
     log("REPORT", None, "warn", "duplicate_key", json.dumps(k))
 for s in flat_report["skipped_no_color_number"]:
     log("REPORT", None, "warn", "no_color_number", json.dumps(s))
+for s in flat_report["skipped_no_season_mapping"]:
+    log("REPORT", None, "warn", "no_season_mapping", json.dumps(s))
 
 print(f"Step 4: {'DRY RUN, nothing written' if dry_run else f'{calls} call(s)'}; failed rows: {failed}")
 
@@ -237,7 +250,8 @@ print(f"Step 4: {'DRY RUN, nothing written' if dry_run else f'{calls} call(s)'};
 # ── Step 5: verify -- re-read and re-plan; a landed write leaves nothing pending
 residual = None
 if not dry_run and plan.has_writes:
-    residual = cp.plan_sync(targets, dtc.get_sheet(sheet_id, view_id).get("sheetData", [])).summary()
+    residual = cp.plan_sync(targets, dtc.get_sheet(sheet_id, view_id).get("sheetData", []),
+                            held_palettes).summary()
     print(f"Step 5: residual plan after write {residual}")
 
 if log_rows:

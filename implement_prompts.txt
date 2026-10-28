@@ -943,3 +943,6 @@ DTC document = 'KTB Color Palette', right now a demo request ref only, but likel
 - always from BP to DTC
 - BP color paletter split by folder = customer. 
 - confirmed Color Category is a per-color field, and found a custom Schema block with color code/name fields. 
+
+Get 'hex' field from BP color palette to DTC too. New col in DTC document 'hex'.
+The DTC Season Brand = BP season + yearcode + ' - ' + brand, i.e. FW28 - Collaborations / SS28 - Wrangler

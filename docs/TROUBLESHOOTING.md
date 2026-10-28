@@ -160,6 +160,12 @@ Check each of these in order:
   (`dtc/notebooks/00_init_season_mapping.py`) and re-run.
 - **A colourless style is not missing.** It stages as one row with
   `Color / Wash = "NO BP COLORWAY"`. Look for that row in DTC.
+- **Do two colourways share a name?** BeProduct allows it as long as the
+  Color Numbers differ, but DTC keys rows on the name, so `transform` skips the
+  whole style (PIPELINE.md → Stage 20, gate 7). The dashboard shows
+  `DUPLICATE_COLOR_NAME`; the existing DTC rows are frozen, not deleted. The fix
+  is in BeProduct: give each colourway a different Color Name. To find them:
+  `SELECT bp_style_number, colorways_json FROM lft.beproduct.ktb_styles WHERE bp_style_number = '…'`.
 
 ### 1.2 In staging, but its request did not resolve
 
@@ -510,6 +516,7 @@ SELECT * FROM lft.beproduct.beproduct_color_palette;
 | Color shows `Active = NO` | Its key is no longer produced by BeProduct (log `untick_removed`) | The color was removed, re-numbered, or its palette changed season or brand. A changed key gives a NEW row and unticks the old one. Expected; the new row is the live one |
 | Value differs from BeProduct | Latest log for that `match_key` | Wait one run. If it persists, check that the task is not `SKIPPED` (`run_color_palette`) |
 | One color appears once per brand | — | By design: a palette with N brands gives N rows per color |
+| Palette's colors missing, log says `no_season_mapping` | `SELECT * FROM lft.beproduct.dtc_seasoncode_mapping` | Its BeProduct season (e.g. Summer, Holiday) has no DTC prefix. Add the `(KTB, <SEASON>, <code>)` row (`00_init_season_mapping`). Its existing DTC rows are held unchanged until then |
 | `Color Category` blank | The color's `Schema.color_category` in BeProduct | It only exists on colors edited since the field was added. Fill it in BeProduct |
 | Task FAILED: `expected exactly 1 active request named …` | The DTC request was renamed, duplicated or deactivated | Restore the name, or set the `color_request` job parameter to the new exact name |
 | Task FAILED: `view … lacks column(s)` | A DTC column was renamed or removed | Restore it in DTC, or update `sync/color_palette.py` `COL_*` and the SYNC_CONTRACT table |

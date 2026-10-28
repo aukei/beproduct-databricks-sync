@@ -115,7 +115,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
 # Column constants (validated against the live WIP_ITS_USE view)
@@ -269,6 +269,29 @@ def norm(value: Any) -> Optional[str]:
     if s.lower() in _NULLISH:
         return None
     return s
+
+
+def duplicate_color_names(color_names: Iterable[Any]) -> List[str]:
+    """
+    The colour names that occur more than once on ONE style, compared by
+    norm() -- the same rule the DTC in-request key ("BP Style#",
+    "Color / Wash") matches on. Sorted; blank / null-sentinel names ignored.
+
+    BeProduct only requires color_number to be unique per style, so two
+    colorways may share a name (live-verified 2026-10-28, KTB-00072). DTC
+    cannot tell such rows apart, so the transform skips the whole style and
+    the data-gaps dashboard lists it as DUPLICATE_COLOR_NAME.
+    """
+    seen: set = set()
+    dupes: set = set()
+    for name in color_names:
+        n = norm(name)
+        if n is None:
+            continue
+        if n in seen:
+            dupes.add(n)
+        seen.add(n)
+    return sorted(dupes)
 
 
 def parse_request_reference(reference: str) -> Dict[str, str]:

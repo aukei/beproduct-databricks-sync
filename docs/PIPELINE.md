@@ -317,6 +317,15 @@ material: the material fan-out depends on which segments a colourway is
    `ALL_DONE`, downstream stages still run — against the **previous** run's
    staging, so new styles silently stop appearing until this is fixed.
 6. **Request name format** — `^[A-Z]+ [A-Z]{2}[0-9]{2} .+$`; also a raise.
+7. **Duplicate colour name** (`phase1.duplicate_color_names()`) — BeProduct
+   only requires `color_number` to be unique per style, so two colorways can
+   share a `color_name`. DTC's in-request key is `(BP Style#, Color / Wash)`
+   and cannot tell them apart, so the **whole style is skipped** (names
+   compared with `phase1.norm()`: whitespace collapsed, case kept). Skipped,
+   not raised: its DTC rows stay frozen at their last values, nothing is
+   deleted, and every other style still syncs. Listed on the data-gaps
+   dashboard as `DUPLICATE_COLOR_NAME`. Before 2026-10-28 this reached the
+   staging key check and **failed the run for every style**.
 
 ---
 
@@ -856,18 +865,26 @@ Gates, in order:
    `NO_TARGETS_FROM_NONEMPTY_FOLDER`, no write. This guards against a silent
    field rename unticking every DTC row.
 4. Deleted palettes (`isDeleted`) contribute no rows.
-5. A color with no `color_number` is skipped and logged `no_color_number`.
-6. A duplicate key keeps the first occurrence and is logged `duplicate_key`.
-7. Exactly one ACTIVE request named `color_request` in the document, and its
-   view must contain all 10 owned columns, else the task FAILS.
-8. Per target row: no DTC row with that key → **INSERT** (`append_rows`). Key
-   exists and a column differs → **UPDATE** that column only. A value blanked
-   in BeProduct IS cleared, because the sheet is wholly BeProduct-owned.
-9. A DTC row whose key no BeProduct row produces → `Active = "NO"` (logged
-   `untick_removed`). It is never deleted. A row already `NO` is not rewritten.
-10. A DTC row with an incomplete key (a hand-typed row) is reported
+5. A palette whose `season` has no row in `dtc_seasoncode_mapping` for
+   `color_customer` (`KTB`), or whose `year` is not 4 digits, contributes no
+   rows and is logged `no_season_mapping`. Its existing DTC rows are HELD:
+   never unticked, never updated.
+6. A color with no `color_number` is skipped and logged `no_color_number`.
+7. A duplicate key keeps the first occurrence and is logged `duplicate_key`.
+8. Exactly one ACTIVE request named `color_request` in the document, and its
+   view must contain all 11 owned columns (incl. `Hex`), else the task FAILS.
+9. Per target row: no DTC row with that key → a row with the same Palette
+   and Color Number still holding the pre-2026-10-20 Season Brand
+   (`Fall 2028 - Collaborations`) is **renamed in place**; otherwise
+   **INSERT** (`append_rows`). Key exists and a column differs → **UPDATE**
+   that column only. A value blanked in BeProduct IS cleared, because the
+   sheet is wholly BeProduct-owned.
+10. A DTC row whose key no BeProduct row produces → `Active = "NO"` (logged
+    `untick_removed`), unless its palette is held (gate 5). It is never
+    deleted. A row already `NO` is not rewritten.
+11. A DTC row with an incomplete key (a hand-typed row) is reported
     (`unkeyed_dtc_row`) and never touched.
-11. Nothing differs → **no write at all**. After any write, the stage re-reads
+12. Nothing differs → **no write at all**. After any write, the stage re-reads
     and re-plans; anything still pending → `VERIFY_MISMATCH`.
 
 A change to any key part (a re-numbered color, a palette moved to another

@@ -271,7 +271,7 @@ One DTC row per palette × color × brand.
 
 | DTC column | BeProduct source (KTB **color** folder) |
 |---|---|
-| `Season Brand` | `season` + `year` + one `brands_multi` entry → `"Fall 2028 - Collaborations"` |
+| `Season Brand` | `<DTCCODE><YY> - <brand>` → `"FW28 - Collaborations"`. `DTCCODE` is `season` looked up in `dtc_seasoncode_mapping` (the WIP request-name table: `FALL`→`FW`, `SPRING`→`SS`); `YY` = last 2 digits of `year`; brand = one `brands_multi` entry. Was `"Fall 2028 - Collaborations"` until 2026-10-20; a row still in that form is renamed in place |
 | `Palette Number` | `colorPaletteNumber` (= `header_number`, e.g. `APP-S32027-00005`) |
 | `Palette Name` | `colorPaletteName` (= `header_name`) |
 | `Palette Type` | `palette_type` (`SEASONAL` / `CORE`) |
@@ -281,6 +281,7 @@ One DTC row per palette × color × brand.
 | `Color Name` | `colors[].color_name` |
 | `Color Category` | `colors[].Schema.color_category`, a per-color custom field. It only appears on colors edited since it was added |
 | `Color Reference` | `colors[].color_reference` |
+| `Hex` | `colors[].hex`, as BeProduct holds it: 6 lowercase hex digits, no `#` (e.g. `fcccdc`) |
 
 Key: `(Palette Number, Color Number, Season Brand)`. BeProduct `sold_to_customer`
 has no DTC column, so it is not synced.
@@ -291,7 +292,7 @@ has no DTC column, so it is not synced.
 
 | Key | Definition | Used for |
 |---|---|---|
-| In-request row key | `(BP Style#, Color / Wash)` | Matching a staging row to DTC rows. Matches **multiple** physical rows — one per material segment |
+| In-request row key | `(BP Style#, Color / Wash)` | Matching a staging row to DTC rows. Matches **multiple** physical rows — one per material segment. Color / Wash is the colorway **name**, but BeProduct only keeps `color_number` unique per style: a style with two same-name colorways is skipped (PIPELINE.md Stage 20, gate 7) |
 | Request routing key | `(Customer, BP Style#, SeasonCode, Brand)` | Which request a row belongs to; `brand_hk` |
 | Material discriminator | `Mill Fabric Article #` | Distinguishing a style × color's several physical rows |
 | BOM segment key | `(Fabric Group, Mill Fabric Article #)` | Matching a BOM segment to an existing row. Placement/Content excluded by design |

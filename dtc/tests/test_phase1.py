@@ -459,4 +459,17 @@ assert phase1.is_in_scope("KTB SS28 Supplier Direct", "KTB") is True
 assert phase1.is_in_scope("KTB SS28 (BACKUP) Wrangler-SUPPLIER X", "KTB") is False
 print("  ✓ [-SUPPLIER] supplier-artifact requests excluded from scope")
 
+# ── [dup-color] same colour NAME twice on one style ─────────────────────────
+# Added 2026-10-28 (owner spec). BeProduct keys colorways on color_number, so
+# two colorways may share a name; DTC's in-request key is the name. Compared
+# by norm(), the same rule the DTC key uses: whitespace collapses, case stays.
+assert phase1.duplicate_color_names(["Black", "Flushing Pink", "Flushing Pink"]) == ["Flushing Pink"]
+assert phase1.duplicate_color_names(["Pink", " Pink  "]) == ["Pink"], "whitespace collapses"
+assert phase1.duplicate_color_names(["Pink", "PINK"]) == [], "case is preserved, as in DTC"
+assert phase1.duplicate_color_names(["Black", "White"]) == []
+assert phase1.duplicate_color_names([None, "", "N/A", None]) == [], "blank names are not a duplicate key"
+assert phase1.duplicate_color_names(["B", "A", "B", "A", "A"]) == ["A", "B"], "sorted, each once"
+assert phase1.duplicate_color_names([]) == []
+print("  ✓ [dup-color] duplicate colour names detected by norm()")
+
 print("✅ ALL PHASE 1 CORE UNIT TESTS PASSED")

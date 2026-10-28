@@ -50,7 +50,8 @@ print("=" * 80)
 from pyspark.sql.functions import (
     explode, col, lit, concat, concat_ws, current_timestamp, 
     current_date, array, when, coalesce, upper, trim, size, right, substring,
-    from_json, udf, get_json_object, first as F_first
+    from_json, udf, get_json_object, first as F_first,
+    count as F_count, collect_set
 )
 from pyspark.sql.types import (
     StructType, StructField, StringType, TimestampType, ArrayType, BooleanType
@@ -78,7 +79,7 @@ for _p in (_MODULE_PATH, _MODULE_PATH.replace("/DTC/", "/dtc/")):
         sys.path.insert(0, _p)
 from sync.samples import format_sample_field, format_submit_status, SAMPLE_SUBMIT_FIELDS, FIT_SUBMIT_FIELDS
 from sync import lifecycle
-from sync.phase1 import DUMMY_COLOR
+from sync.phase1 import DUMMY_COLOR, duplicate_color_names
 from sync.bom import DUMMY_FABRIC_GROUP, DUMMY_FABRIC_ARTICLE
 
 # Spark UDF wrapper: raw {prefix}_sample_json (JSON string) -> DTC status string.
@@ -194,6 +195,24 @@ try:
         StructField("color_number", StringType()),
     ]))
     df_parsed = df_source.withColumn("cw_detail", from_json(col("colorways_json"), cw_schema))
+
+    # Skip a style whose colorways share a colour NAME (owner spec 2026-10-28).
+    # BeProduct only needs color_number to be unique; DTC keys rows on
+    # (BP Style#, Color / Wash), so it cannot tell the two apart. Skipping the
+    # style FREEZES its DTC rows (nothing is deleted) and the data-gaps
+    # dashboard lists it as DUPLICATE_COLOR_NAME. Before this, one such style
+    # failed Cell 8's key check and blocked the run for every style.
+    dup_color_styles = {}
+    for r in df_parsed.select("bp_style_number", "cw_detail").collect():
+        dupes = duplicate_color_names(cw["color_name"] for cw in (r["cw_detail"] or []))
+        if dupes:
+            dup_color_styles[r["bp_style_number"]] = dupes
+    if dup_color_styles:
+        print(f"   ⚠️  Skipping {len(dup_color_styles)} style(s) with duplicate colour names "
+              f"(DUPLICATE_COLOR_NAME on the data-gaps dashboard):")
+        for _style, _names in sorted(dup_color_styles.items()):
+            print(f"      {_style}: {_names}")
+        df_parsed = df_parsed.where(~col("bp_style_number").isin(list(dup_color_styles)))
 
     # "WIP = style x color x material" (owner spec, 2026-09-11): a style with
     # ZERO BeProduct colorways must still reach DTC (visible with its
@@ -744,17 +763,30 @@ try:
     # 4. Check for duplicate composite keys
     # Phase 6: key is now (dtc_request_name, bp_style_number, color, fabric_group)
     print(f"\n4️⃣ Checking for duplicate keys...")
-    duplicates = df_staging.groupBy(
+    # Name the offending keys, not just a count: serverless returns no stdout,
+    # so the exception text is the only diagnostic that reaches the run output.
+    # Usual cause: two BeProduct colorways on one style with the SAME
+    # color_name (BeProduct allows it; only color_number must differ).
+    dup_rows = df_staging.groupBy(
         "dtc_request_name", "bp_style_number", "color", "fabric_group"
-    ).count().where(col("count") > 1).count()
-    
+    ).agg(F_count("*").alias("count"),
+          collect_set("colorway_id").alias("colorway_ids")
+    ).where(col("count") > 1).collect()
+    duplicates = len(dup_rows)
+
     if duplicates > 0:
+        dup_desc = "; ".join(
+            f"{r['bp_style_number']} / '{r['color']}' x{r['count']} "
+            f"(request '{r['dtc_request_name']}', colorway_ids {sorted(r['colorway_ids'])})"
+            for r in dup_rows[:10]
+        )
         validations.append({
             "rule": "Unique composite key",
             "status": "FAIL",
-            "count": duplicates
+            "count": duplicates,
+            "detail": dup_desc,
         })
-        print(f"   ❌ {duplicates} duplicate keys found")
+        print(f"   ❌ {duplicates} duplicate keys found: {dup_desc}")
     else:
         print(f"   ✅ All keys unique")
     
@@ -775,7 +807,10 @@ try:
         if critical_fails:
             print(f"\n❌ {len(critical_fails)} critical validation failures")
             print(f"   Fix these issues before continuing")
-            raise ValueError(f"Data quality validation failed: {len(critical_fails)} critical issues")
+            details = " | ".join(
+                f"{v['rule']}: {v.get('detail', v['count'])}" for v in critical_fails
+            )
+            raise ValueError(f"Data quality validation failed: {len(critical_fails)} critical issues -- {details}")
     
 except Exception as e:
     print(f"❌ Validation failed: {e}")
@@ -824,6 +859,7 @@ print("=" * 80)
 
 print(f"\nTransformation Summary:")
 print(f"  Input styles: {source_count}")
+print(f"  Skipped, duplicate colour names: {len(dup_color_styles)} {sorted(dup_color_styles)}")
 print(f"  Styles with colors: {styles_with_colors}")
 print(f"  After color explosion: {exploded_count} rows")
 print(f"  After adding fabric row: {denorm_count} rows")
