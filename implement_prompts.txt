@@ -946,3 +946,27 @@ DTC document = 'KTB Color Palette', right now a demo request ref only, but likel
 
 Get 'hex' field from BP color palette to DTC too. New col in DTC document 'hex'.
 The DTC Season Brand = BP season + yearcode + ' - ' + brand, i.e. FW28 - Collaborations / SS28 - Wrangler
+
+
+# phase 12 - check BOMVariation - Color and Material mechanism
+Miro will now be the source of truth of Style's BOM from Designer's perspective.
+BeProduct remains the source of truth of Style's BOM from Merchandiser and factory perspective - as it genearte the PDF techpack which serve as style production spec.
+We need a 2 way sync of BOM between Miro and BP
+- Miro Style contains a BOM table, read by LogicApp using Miro MCP, and insert to corresponding BP Style's BOMVariation.
+- Another logicApp read from BP Style's BOMVariation and update corresponding Miro BOM tables
+
+1. Triage the BOMVariation APIs to find out what referential checks are in place:
+- Given a sacrificial BP Style: KTB-00070 (https://hk.beproduct.com/lifunghk/Style/#/Style/edit/4c15b728-7512-47c4-8961-579cbce792cb/31772865-77a2-4611-b2e7-d67310ff1123/Attributes)
+- Test Colorways
+    - how to add a 'Ginger' Color that is with proper ColorSourceId? For ref, add color -> color library -> Ginger has color number '17-1444 TCX'
+    - how to add a adhoc Color say 'CKAU' with hex code '7D3380'?
+- Test "HK BOM" (https://hk.beproduct.com/lifunghk/Style/#/Style/edit/4c15b728-7512-47c4-8961-579cbce792cb/31772865-77a2-4611-b2e7-d67310ff1123/Apps/BOMVariations/2e00eced-7d15-4f47-966d-3a16e79e9e21)
+    - how to add a new BOM Variation, say BOM name "ABCD-20161104"
+    - In that new variation, add material (LF Material ID) "CANVAS" as "Main fabric"
+    - In that new variation, add adhoc material "CANVAS Kei" as "Fabric"
+    - In these BOM line, how to set color way? both "Ginger" and "CKAU"
+    - If all OK, what does the resulting HK BOM looks like on API extraction? Does each material get a unique material ID (not LF Material ID)? Colorway get its own colorway ID with color name?
+
+ 2. BP style sync to DTC master chart Update
+ - Sync only colorways which "HIDE COLOR" box is UNCHECKED
+ - e.g. the colorways on KTB-00073 (https://hk.beproduct.com/lifunghk/Style/#/Style/edit/4c15b728-7512-47c4-8961-579cbce792cb/a19c1c71-680b-4bc0-8e53-6b9ccea3f935/Attributes) shows 8 colors. color number ['19-4109 TCX','xxxx','14-1430 TCX','12-0640 TCX'] have "HIDE COLOR" checked = skipped, ['16-1108TCX','19-0516 TCX','13-2705 TCX','14-2609 TCX'] are unchecked = synced.

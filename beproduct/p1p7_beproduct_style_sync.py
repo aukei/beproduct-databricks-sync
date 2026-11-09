@@ -693,6 +693,11 @@ if HAS_DATA:
     print("Step 4: Transform Records")
     print("=" * 80)
 
+    def is_hidden_colorway(cw: Dict) -> bool:
+        """BeProduct "HIDE COLOR" (fieldId hide_colorway) ticked -> never synced (owner spec 2026-11-09).
+        The API puts it at the top level as boolean `hideColorway`, not in cw["fields"]."""
+        return cw.get("hideColorway") is True
+
     def extract_colorways(record: Dict) -> List[str]:
         """
         Extract colorway names from record.colorways array.
@@ -704,7 +709,7 @@ if HAS_DATA:
         
         color_names = []
         for cw in colorways:
-            if isinstance(cw, dict):
+            if isinstance(cw, dict) and not is_hidden_colorway(cw):
                 color_name = cw.get("colorName")
                 if color_name:
                     color_names.append(str(color_name))
@@ -731,7 +736,7 @@ if HAS_DATA:
 
         detail = []
         for cw in colorways:
-            if isinstance(cw, dict) and cw.get("colorName"):
+            if isinstance(cw, dict) and cw.get("colorName") and not is_hidden_colorway(cw):
                 detail.append({
                     "colorway_id": cw.get("id"),
                     "color_name": str(cw.get("colorName")),

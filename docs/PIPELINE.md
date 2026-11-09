@@ -299,6 +299,13 @@ material: the material fan-out depends on which segments a colourway is
 
 1. **Folder.** Only styles in the BeProduct folder named by `folder_name`
    (currently `TEST KTB`) exist in `ktb_styles` at all.
+1b. **Hidden colorways** — a colorway with BeProduct "HIDE COLOR" ticked
+   (fieldId `hide_colorway`, read as top-level `hideColorway`) is dropped at
+   extraction (Stage 10), so it never reaches `ktb_styles.colorways_json`,
+   staging, the duplicate-name check or the data-gaps view. A colorway hidden
+   AFTER it reached DTC keeps its rows frozen (never deleted) and shows as
+   `ROW_NOT_IN_BEPRODUCT`. A style whose colorways are ALL hidden falls under
+   gate 2.
 2. **Colorway presence is not a gate.** A style with zero colorways gets one row
    with `color = DUMMY_COLOR` ("NO BP COLORWAY") rather than being dropped.
    Stage 40 upgrades that row in place the first time a real colorway appears.

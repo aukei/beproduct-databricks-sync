@@ -370,6 +370,100 @@ this stays true by construction; verify it stays true after any change).
 
 ## Verified discoveries log (append-dated; do not delete)
 
+**Hidden colorways are not synced (2026-11-09, owner spec; read-only probe):**
+- BeProduct colorway field "HIDE COLOR" = fieldId **`hide_colorway`**
+  (`TrueFalse`, default false), present in both `KTB` and `TEST KTB`
+  colorway schemas. **On a style record it is the TOP-LEVEL boolean
+  `hideColorway`, NOT in `colorways[].fields`** (`fields.hide_colorway` is
+  absent on every colorway).
+- Live: TEST KTB 4 of 23 colorways hidden (all on `KTB-00073`: Blac,
+  CAD-1234, Honeyed Apricot, Corn Confection); KTB 0 of 162.
+- `p1p7_beproduct_style_sync.is_hidden_colorway()` drops them from
+  `colorways_array` and `colorways_json`, so every downstream reader
+  (transform, dup-name skip, Phase 2 colorway ids, `v_data_gaps`) agrees.
+  `ktb_styles` therefore no longer holds hidden colorways.
+- Hiding a colorway already in DTC leaves its rows frozen (never deleted),
+  listed as `ROW_NOT_IN_BEPRODUCT`. All colorways hidden -> the style gets
+  the `NO BP COLORWAY` dummy row, like a colorless style.
+- Owner confirmed in the UI: KTB-00073 has 8 colorways, the 4 above ticked,
+  4 unticked (Twill, Dark Oliver, Flushing Pink, Full Blooming Pink).
+  **DEPLOYED 2026-11-09** to the v2 root (`upload_notebooks.py --dir beproduct
+  --notebooks-only`); picked up by the next 8-minute run.
+
+**Phase 12 triage: BOMVariation write API, color library, referential checks
+(2026-11-04, live writes on sacrificial TEST KTB `KTB-00070`
+`31772865-…`, app "HK BOM" `2e00eced-…`). Context: a planned 2-way
+Miro <-> BeProduct BOM sync via Logic Apps.**
+- **CORRECTION to the 2026-10-27 entry ("no endpoint to list library
+  colors"): `POST Color/CompanyColors?pageSize=&pageNumber=` IS the color
+  library** (`ColorLibraryItem`). Its `id` is the `colorSourceId`: verified,
+  Flushing Pink returns exactly the `9a909a70-…` id the UI linked. Field names
+  mislead: **`suggestedHex` holds the color NUMBER** (`17-1444 TCX`),
+  `suggestedName` the name, `hex` the hex, `paletteName` the library
+  (`PANTONE TCX`). Filter `{"filters":[{"field":"SuggestedHex","operator":
+  "Eq","value":"17-1444 TCX"}]}`; an unknown field returns a 500 that names the
+  type, not silent zero rows. Ginger = `2d41509d-0cbb-4945-b076-902aff092ff0`,
+  hex `c96551`.
+- Style colorways added: Ginger `bd5fc05f-…` (linked, `colorSourceId` =
+  library id) and ad hoc CKAU `6b6285db-…` (no `colorSourceId`). Same write
+  shape as 2026-10-27. BeProduct **lowercases hex** (`7D3380` -> `7d3380`).
+- Variation `ABCD-20161104` `5e7bc253-…` created via
+  `POST Style/{h}/PageBomVariation/{p}/CreateVariation` with
+  `syncColorways: false`, `selectedVariationColorways: [ginger, ckau]`.
+  CreateVariation with a bad row is ATOMIC (no half-created variation).
+- **Row write rules (Update and CreateVariation share them):**
+  - `group` takes the choice NAME (`"Main Fabric"`); its GUID is rejected
+    ("bad format"). The GET returns `rows[].group` as that GUID.
+  - `mill_vendor` (PartnerDropDown) takes the partner GUID (`code`); the name
+    and short text are rejected.
+  - `material_category`, `material_type`, `vendor_material_reference_no`,
+    `mill_vendor` are REQUIRED.
+  - Ad hoc row (no `materialId`): works. The name goes in `header_name`.
+- **BLOCKER, a BeProduct defect: a material-linked row CANNOT be added
+  through the API.** Without the 4 required fields -> "is a required field";
+  with them -> "is not editable on a material-linked row". Reproduced for
+  CANVAS (`c2541cb7-…`, folder KTB-10 Artwork) under 3 groups and with none,
+  for a woven control (`LF-BD26-000002--SH`), on Update and on
+  CreateVariation. The server does not fill the material's own values before
+  checking required fields. Raise with BeProduct.
+  **UI comparison (same day):** the owner added CANVAS in the UI to the
+  default variation `abcde` (row `4d86dc58-…`). That row is
+  `materialId` = CANVAS, `isAdHoc: false`, with group `Artwork` (the UI picks
+  the group from the material's folder; "MAIN FABRIC" was typed into the free
+  text `placement`), and the 4 required fields COPIED from the material. So the
+  UI fills them itself, while the public API neither fills them nor accepts
+  them. The same API add on `abcde` fails identically (group Artwork / Main
+  Fabric / none), so the variation is not the cause. Editing that UI-made
+  linked row through the API WORKS (placement changed and reverted).
+  Two-step workaround FAILS SILENTLY: creating an ad hoc row and then sending
+  `{rowId, materialId}` returns 200 and leaves the row ad hoc. Not caused by Group
+  `related_folder` (the schema lists Main Fabric -> Knits/Wovens/Denims/
+  Sweaters only; the API never checked it, since the ad hoc tests passed
+  Artwork values under Main Fabric).
+- **`header_number` = "CANVAS" does NOT link the material.** It creates an ad
+  hoc row whose `materialNumber` reads "CANVAS" while `materialId` is null and
+  `isAdHoc` true. Such a row looks linked and is not. (Removed after the test.)
+- **`rowId` is a caller-chosen UPSERT key.** An unknown `rowId` with full
+  fields INSERTS a row that keeps that exact id. Good: a sync can use
+  deterministic rowIds and be idempotent. Risk: a stale rowId re-creates a
+  row that someone deleted. Delete: `{"rowId": x, "deleteRow": true}`.
+- **Row colors**: `colorUpdate: [{colorwayId, hex, number, name}]`, one per
+  colorway column. GET returns `colors[]` with `colorwayId`, `hex`, `number`,
+  `name`, `materialColorwayId`, `colorSourceId` (null for ad hoc).
+- **Validated (each returned 400, nothing written)**: a style colorway that is
+  not in the variation, a bogus colorwayId, a library id used as colorwayId
+  ("Colorway not found"); bad hex ("Invalid hex color"); a bogus
+  `materialColorwayId`; a bogus id in `selectedVariationColorwaysUpdate.add`;
+  a bogus `materialId` ("One or more materials were not found"); an unknown
+  group name. The BOM variation API validates references, unlike style
+  colorways, which accept made-up ids.
+- Left in place on KTB-00070 for UI review: colorways Ginger + CKAU; variation
+  `ABCD-20161104` with one ad hoc row "CANVAS Kei" (`9dd8e5e0-…`, Fabric,
+  colors Ginger/CKAU). The default variation `abcde` was not touched.
+- Not tested, because no linked row could be created: `materialColorwayId` on a
+  linked row, and how a linked row reports its material's colors. CANVAS has
+  no material colorways.
+
 **BeProduct colorways vs the color library: `colorSourceId` is NEVER
 validated, and a colorway "create" UPSERTS on `color_number` (2026-10-27/28,
 read probes + live write tests on TEST KTB `KTB-00072`):**
@@ -461,7 +555,10 @@ the whole v2 run (2026-10-27/28, self-inflicted by the test above):**
   from staging. `v_data_gaps` lists it as `DUPLICATE_COLOR_NAME` (owner:
   BeProduct user) and suppresses the misleading `NOT_STAGED` /
   `ROW_NOT_IN_BEPRODUCT` rows it would otherwise also produce. PIPELINE.md
-  Stage 20 gate 7; TROUBLESHOOTING 1.1.
+  Stage 20 gate 7; TROUBLESHOOTING 1.1. **DEPLOYED 2026-10-28** (v2 root +
+  view); run 726422708342860 SUCCESS on all 15 tasks with no duplicate
+  present. The skip path itself is unit-tested and its SQL was checked
+  against fixture rows, but it has not yet fired on live data.
 - Not done: keying DTC rows on `color_number` instead. That would be the
   real fix, but it changes the DTC match key for every existing row.
 
