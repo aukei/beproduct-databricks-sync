@@ -55,7 +55,7 @@ Then update the tests: `test_phase1.py`, `test_phase2.py`, `test_phase3.py`,
    inconsistently cased and carry trailing spaces.
 3. **Every WIP PATCH body must be lean** — only fields from the allow-list below,
    a subset per call is fine, nothing outside it ever. This is explicit
-   DTC-developer guidance, and in v2 it is also what keeps an 8-minute cadence
+   DTC-developer guidance, and in v2 it is also what keeps an hourly cadence
    tolerable. Each payload builder is the sole source of its own keys, so the
    property holds by construction; verify it still does after any change.
 4. **Batch every change for one row into one PATCH object.** Never two calls for

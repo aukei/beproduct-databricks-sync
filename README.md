@@ -5,7 +5,7 @@ Bi-directional synchronization between **BeProduct** (style PLM) and **DTC**
 schema `lft.beproduct`. Each field syncs **one way only** (no loops).
 
 > **v2 is live (since 2026-09-15).** One serverless job writes each DTC request
-> at most once per run, every 8 minutes (periodic trigger since 2026-09-30). v1 is paused and kept only for rollback.
+> at most once per run, every hour (periodic trigger since 2026-11-09). v1 is paused and kept only for rollback.
 > Design record: [docs/MIGRATION_V1_V2.md](docs/MIGRATION_V1_V2.md).
 
 ## Something is missing or wrong?
@@ -39,8 +39,8 @@ Every runbook needs at most two other documents:
 
 | Job | ID | Schedule | Status |
 |---|---|---|---|
-| `BeProduct_DTC_sync_v2` | 367710575109755 | every 8 min (periodic) | **live**, serverless |
-| `BeProduct_DTC_sync_duty_compute` | 1026599988408090 | every 8 min (periodic) | **live**, serverless. NT Orbit → cache + `costing_chart`, no DTC contact |
+| `BeProduct_DTC_sync_v2` | 367710575109755 | every hour (periodic) | **live**, serverless |
+| `BeProduct_DTC_sync_duty_compute` | 1026599988408090 | every hour (periodic) | **live**, serverless. NT Orbit → cache + `costing_chart`, no DTC contact |
 | `BeProduct_DTC_sync_dag` | 294837488757511 | — | v1, **paused** (rollback only) |
 | `BeProduct_DTC_sync_images` | 847087837807970 | — | v1, **paused** (superseded by Stage 45) |
 

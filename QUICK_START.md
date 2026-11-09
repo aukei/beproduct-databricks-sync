@@ -83,8 +83,8 @@ Production is two jobs (full detail: [docs/PIPELINE.md](docs/PIPELINE.md)):
 
 | Job | ID | Schedule |
 |---|---|---|
-| `BeProduct_DTC_sync_v2` | 367710575109755 | every 8 min (periodic trigger; a tick during a run is skipped) |
-| `BeProduct_DTC_sync_duty_compute` | 1026599988408090 | every 8 min (periodic trigger) |
+| `BeProduct_DTC_sync_v2` | 367710575109755 | every hour (periodic trigger; a tick during a run is skipped) |
+| `BeProduct_DTC_sync_duty_compute` | 1026599988408090 | every hour (periodic trigger) |
 
 Key job parameters (defaults in `scripts/deploy_job.py` → `JOB_PARAMS`):
 

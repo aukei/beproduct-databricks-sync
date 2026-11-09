@@ -9,8 +9,8 @@ document is the *reasoning*, the *risks*, and the *rollout plan*.
 > column names in [SYNC_CONTRACT.md](SYNC_CONTRACT.md); symptom runbooks in
 > [TROUBLESHOOTING.md](TROUBLESHOOTING.md). Where this document and those
 > disagree, they win. `BeProduct_DTC_sync_v2` (367710575109755) runs serverless
-> every 8 min on a periodic trigger (since 2026-09-30); `BeProduct_DTC_sync_duty_compute`
-> (1026599988408090) runs serverless every 8 min too. The v1 jobs
+> every hour on a periodic trigger (since 2026-11-09); `BeProduct_DTC_sync_duty_compute`
+> (1026599988408090) runs serverless every hour too. The v1 jobs
 > `BeProduct_DTC_sync_dag` (294837488757511) and `BeProduct_DTC_sync_images`
 > (847087837807970) are PAUSED, kept for rollback only. What is still open
 > before the real `KTB` folder is switched on: [Remaining go-live items](#remaining-go-live-items).

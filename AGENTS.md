@@ -370,6 +370,12 @@ this stays true by construction; verify it stays true after any change).
 
 ## Verified discoveries log (append-dated; do not delete)
 
+**Both v2 jobs now run HOURLY (2026-11-09, set live by the owner):**
+- `BeProduct_DTC_sync_v2` and `BeProduct_DTC_sync_duty_compute`:
+  `trigger.periodic = {interval: 1, unit: HOURS}`, UNPAUSED,
+  `max_concurrent_runs=1`. Supersedes the 8-minute trigger below.
+  Mirrored in `deploy_job.PERIODIC_1_HOUR` so `--reset-existing` keeps it.
+
 **Hidden colorways are not synced (2026-11-09, owner spec; read-only probe):**
 - BeProduct colorway field "HIDE COLOR" = fieldId **`hide_colorway`**
   (`TrueFalse`, default false), present in both `KTB` and `TEST KTB`

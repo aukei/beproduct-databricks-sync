@@ -17,9 +17,9 @@ Why v2 exists and how it differs from v1 — see [MIGRATION_V1_V2.md](MIGRATION_
 Systems, repo layout and the Delta data model — see [ARCHITECTURE.md](ARCHITECTURE.md).
 
 > **Status: LIVE since 2026-09-15.** `BeProduct_DTC_sync_v2` (job
-> 367710575109755) runs serverless every 8 min on a periodic trigger (since 2026-09-30; was
-> every 15 min from 2026-09-28, every 2 h before that); the companion
-> `BeProduct_DTC_sync_duty_compute` (1026599988408090) also every 8 min. The v1 jobs `BeProduct_DTC_sync_dag` and `BeProduct_DTC_sync_images`
+> 367710575109755) runs serverless every hour on a periodic trigger (since 2026-11-09; was every
+> 8 min from 2026-09-30, every 15 min from 2026-09-28, every 2 h before that); the companion
+> `BeProduct_DTC_sync_duty_compute` (1026599988408090) also every hour. The v1 jobs `BeProduct_DTC_sync_dag` and `BeProduct_DTC_sync_images`
 > are PAUSED, kept only for rollback. `folder_name` is still `TEST KTB` until
 > go-live.
 
@@ -44,7 +44,7 @@ possible window**. v1 writes each request at up to 5 moments scattered across th
 whole DAG. v2 writes it at exactly one point, in ≤2 back-to-back calls.
 
 This is what makes the target cadence viable at all. The design target was a
-run every ~2 hours; production now runs every 8 minutes (2026-09-30):
+run every ~2 hours; production ran every 8 minutes from 2026-09-30 and hourly since 2026-11-09:
 
 | | Write windows/day | User-visible exposure |
 |---|---|---|
@@ -143,7 +143,7 @@ standalone images job is paused and superseded. Only one companion job remains:
 
 ```mermaid
 flowchart LR
-    duty["BeProduct_DTC_sync_duty_compute<br/>compute_duty_rates · every 8 min"]
+    duty["BeProduct_DTC_sync_duty_compute<br/>compute_duty_rates · every hour"]
     orbit[(NT Orbit API)]
     cache[(nt_orbit_duty_cache)]
     chart[(costing_chart)]
@@ -908,7 +908,7 @@ run) and `beproduct_to_dtc_sync_log` rows with `stage = 'color_palette'`.
 ### `BeProduct_DTC_sync_duty_compute` — NT Orbit lookups
 
 Single task `compute_duty_rates` (`p9b1_compute_duty_rates`), job
-1026599988408090, serverless, **every 8 min (periodic trigger, since 2026-09-30)**. NT Orbit →
+1026599988408090, serverless, **every hour (periodic trigger, since 2026-11-09)**. NT Orbit →
 `nt_orbit_duty_cache` + `costing_chart` (MERGE). **Zero DTC contact** — no API
 key, no read, no write — so it is free to run on its own schedule with its own
 latency. Its results reach DTC through the next main run: Stage 30 refills

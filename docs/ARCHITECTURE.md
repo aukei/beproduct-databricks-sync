@@ -126,8 +126,8 @@ The pipeline runs as **independent Databricks jobs**, all defined in
 
 | Job | Contents | Compute |
 |---|---|---|
-| `BeProduct_DTC_sync_v2` (367710575109755) | The main DAG — Stages 00–55, **including `phase3_images`** (folded in 2026-09-15); every 8 min, periodic trigger (since 2026-09-30) | serverless |
-| `BeProduct_DTC_sync_duty_compute` (1026599988408090) | NT Orbit lookups → `nt_orbit_duty_cache` + `costing_chart`; zero DTC contact; every 8 min, periodic trigger | serverless (moved off classic 2026-09-15) |
+| `BeProduct_DTC_sync_v2` (367710575109755) | The main DAG — Stages 00–55, **including `phase3_images`** (folded in 2026-09-15); every hour, periodic trigger (since 2026-11-09) | serverless |
+| `BeProduct_DTC_sync_duty_compute` (1026599988408090) | NT Orbit lookups → `nt_orbit_duty_cache` + `costing_chart`; zero DTC contact; every hour, periodic trigger | serverless (moved off classic 2026-09-15) |
 | `BeProduct_DTC_sync_images` (847087837807970) | Style Image upload — **superseded and PAUSED**; its task now runs inside the v2 DAG | classic |
 | `BeProduct_DTC_sync_dag` (294837488757511) | **v1 main job** — PAUSED after the v2 cutover; kept for rollback | classic + pool |
 
@@ -198,7 +198,7 @@ flowchart TD
     wip -->|50| bpback["BeProduct style<br/>vendor · factory · customer ID · COO · Lot#"]
     wip -.->|55 disabled| bpmat["BeProduct material master"]
 
-    duty["duty_compute job<br/>every 8 min"]
+    duty["duty_compute job<br/>every hour"]
     cc --> duty <--> orbit[(NT Orbit API)]
     duty --> cache & cc
 ```
