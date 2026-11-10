@@ -266,6 +266,36 @@ plan_rerun = compute_upsert(scope, dtc_rows_already_upgraded, bp_rows_first_colo
 check(plan_rerun.summary() == {"updates": 0, "inserts": 0, "noops": 1, "exceptions": 0},
       "next run's live-sheet read finds the real key directly -> pure NOOP")
 
+print("\n[5g] color_wash() + legacy bare-name rows renamed in place (2026-11-10)")
+check(phase1.color_wash("Twill", "16-1108 TCX") == "Twill 16-1108 TCX", "name + number")
+check(phase1.color_wash(" Twill ", None) == "Twill", "blank number -> name alone")
+check(phase1.color_wash(None, "16-1108 TCX") is None, "no name -> None")
+bp_twill = [{"bp_style_number": "S1", "color": "Twill 16-1108 TCX", "color_name": "Twill",
+             "brand": "Wrangler", "season_code": "FW26", "product_status": "Production"}]
+dtc_legacy = [
+    {"rowId": "t1", "rowIndex": 1, "BP Style#": "S1", "Color / Wash": "Twill",
+     "Brand": "Wrangler", "Product Status": "Production", "Fabric Group": "Main Fabric"},
+    {"rowId": "t2", "rowIndex": 2, "BP Style#": "S1", "Color / Wash": "Twill",
+     "Brand": "Wrangler", "Product Status": "Production", "Fabric Group": "Fabric"},
+]
+pl = compute_upsert(scope, dtc_legacy, bp_twill, allowed_cols=allowed2)
+check(pl.summary() == {"updates": 2, "inserts": 0, "noops": 0, "exceptions": 0},
+      "every material row of the legacy key is renamed, nothing inserted")
+check(all(op.fields == {"Color / Wash": "Twill 16-1108 TCX"} for op in pl.updates),
+      "rename writes only Color / Wash (lean PATCH)")
+dtc_renamed = [dict(r, **{"Color / Wash": "Twill 16-1108 TCX"}) for r in dtc_legacy]
+check(compute_upsert(scope, dtc_renamed, bp_twill, allowed_cols=allowed2).summary()["noops"] == 2,
+      "next run matches the new key directly -> NOOP")
+bp_same_name = bp_twill + [dict(bp_twill[0], color="Twill 19-0516 TCX")]
+pl_amb = compute_upsert(scope, dtc_legacy, bp_same_name, allowed_cols=allowed2)
+check(pl_amb.summary() == {"updates": 0, "inserts": 2, "noops": 0, "exceptions": 0},
+      "two colorways share the bare name -> ambiguous, legacy rows left alone")
+bp_plain = [dict(bp_twill[0], color="Twill"),
+            dict(bp_twill[0], color="Twill 16-1108 TCX")]
+pl_plain = compute_upsert(scope, dtc_legacy, bp_plain, allowed_cols=allowed2)
+check(pl_plain.summary()["noops"] == 2 and pl_plain.summary()["inserts"] == 1,
+      "a colorway whose current key IS the bare name keeps its rows")
+
 print("\n[6] missing bp_style_number -> exception (Phase 6: was missing_lf_style)")
 missing_key = compute_upsert(scope, [], [
     {"bp_style_number": None, "color": "Black", "brand": "Wrangler", "season_code": "FW26"},

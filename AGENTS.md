@@ -272,7 +272,7 @@ this stays true by construction; verify it stays true after any change).
   `phase2.resolve_coo_country_name()` + `beproduct_master_coo`) [header];
   Lot# (`drawing_number_walmart`) [colorway].
   [REMOVED Phase 6]: "Legacy Code" DTC→BP. "Customer Style#" DTC column not created.
-- **Keys** (match, not overwritten): BP Style# (`header_number`), Color/Wash (`colorName`)
+- **Keys** (match, not overwritten): BP Style# (`header_number`), Color/Wash (`colorName` + ' ' + `colorNumber` since 2026-11-10)
   [in-request]; [Customer, BP Style# (header_number), SeasonCode, Brand (brand_hk)]
   [composite/request-routing].
 - **BeProduct → DTC, image only (Phase 3)**: Style Image (`front_image_url` →
@@ -369,6 +369,35 @@ this stays true by construction; verify it stays true after any change).
    `"Factory 3 - Tariff"` (no `rate` suffix; ` - ` for numbered slots).
 
 ## Verified discoveries log (append-dated; do not delete)
+
+**DTC `Color / Wash` = "<COLOR NAME> <COLOR NUMBER>" (2026-11-10, owner spec):**
+- e.g. `Twill 16-1108 TCX`. `phase1.color_wash()`; name alone only if the
+  number is blank. **Owner decision: ALWAYS both, even when number == name**
+  (`Black Black`). Live, 8 of 21 TEST KTB colorways are like that (ad hoc
+  colours); numbers are copied as entered (`19-4003TCX`, no space).
+- `Color / Wash` is half of the in-request key, so every existing row would
+  have looked new. Staging now also carries the bare `color_name`, and
+  `compute_upsert()` renames a bare-name row IN PLACE (the dummy-anchor path),
+  only when exactly one colorway of the style has that bare name and no
+  colorway's current key is the bare name. Test `[5g]`.
+- Read-only simulation against live data before deploy: 42 WIP rows -> 28
+  renamed in place, 0 inserts, 0 ambiguous, 14 untouched (already stranded
+  before: KTB-00073's hidden colours + `Black`/`Very Peri`, KTB-00072's
+  `Flushing Pink E`/`Flushing Pink-E`).
+- Side effects, one run each: Phase 2 Lot#, the lifecycle check and
+  build_costing's intent overlay join on the colour and miss the not-yet-renamed
+  rows; `v2_wip_push` reports them as stranded. Lasting: `costing_chart.color_name`
+  and the NT Orbit product description / cache key include the number (only
+  rows with a blank duty field get re-queried).
+- The duplicate-colour skip (gate 7) and `v_data_gaps.dup_colors` now compare
+  the name + number value, so they only fire on a repeated name with a blank
+  number.
+- **DEPLOYED + LIVE-VERIFIED 2026-11-10** (v2 root modules + beproduct
+  notebooks + view). Run 889244351549419: `wip_push` 30 updates, 0 inserts,
+  2 PATCH calls, `columns_changed = {Color / Wash: 30}` (44 rows by then, not
+  42). Next run: 0 updates, 44 no-ops, 0 write windows; stranded = only the 14
+  pre-existing rows. Same deploy fixed the view's user-facing "8 min" texts to
+  hourly.
 
 **Both v2 jobs now run HOURLY (2026-11-09, set live by the owner):**
 - `BeProduct_DTC_sync_v2` and `BeProduct_DTC_sync_duty_compute`:

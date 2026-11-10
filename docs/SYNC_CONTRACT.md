@@ -73,7 +73,7 @@ Then update the tests: `test_phase1.py`, `test_phase2.py`, `test_phase3.py`,
 | DTC column | BeProduct source (fieldId) | Notes |
 |---|---|---|
 | **BP Style#** *(key)* | header `header_number` | Match key |
-| **Color / Wash** *(key)* | colorway `colorName` | In-request key; `DUMMY_COLOR` ("NO BP COLORWAY") when the style has no colorways |
+| **Color / Wash** *(key)* | colorway `colorName` + `colorNumber` | `"<name> <number>"`, e.g. `Twill 16-1108 TCX` (`phase1.color_wash()`, since 2026-11-10; always both, even `Black Black`). In-request key; `DUMMY_COLOR` ("NO BP COLORWAY") when the style has no colorways |
 | **Brand** *(routing)* | header `brand_hk` | Constant per request; `brand_hk`, not `brands_multi` |
 | Product Status | header `style_status` | |
 | Style Description | header `header_name` | |
@@ -292,7 +292,7 @@ has no DTC column, so it is not synced.
 
 | Key | Definition | Used for |
 |---|---|---|
-| In-request row key | `(BP Style#, Color / Wash)` | Matching a staging row to DTC rows. Matches **multiple** physical rows — one per material segment. Color / Wash is the colorway **name**, but BeProduct only keeps `color_number` unique per style: a style with two same-name colorways is skipped (PIPELINE.md Stage 20, gate 7) |
+| In-request row key | `(BP Style#, Color / Wash)` | Matching a staging row to DTC rows. Matches **multiple** physical rows — one per material segment. Color / Wash is the colorway **name + number** (since 2026-11-10; was the bare name). BeProduct keeps `color_number` unique per style, so only two same-name colorways with a BLANK number still collide; such a style is skipped (PIPELINE.md Stage 20, gate 7). A DTC row still keyed on the bare name is renamed in place, once, by `compute_upsert()` |
 | Request routing key | `(Customer, BP Style#, SeasonCode, Brand)` | Which request a row belongs to; `brand_hk` |
 | Material discriminator | `Mill Fabric Article #` | Distinguishing a style × color's several physical rows |
 | BOM segment key | `(Fabric Group, Mill Fabric Article #)` | Matching a BOM segment to an existing row. Placement/Content excluded by design |

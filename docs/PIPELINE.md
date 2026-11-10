@@ -332,7 +332,20 @@ material: the material fan-out depends on which segments a colourway is
    not raised: its DTC rows stay frozen at their last values, nothing is
    deleted, and every other style still syncs. Listed on the data-gaps
    dashboard as `DUPLICATE_COLOR_NAME`. Before 2026-10-28 this reached the
-   staging key check and **failed the run for every style**.
+   staging key check and **failed the run for every style**. Since
+   2026-11-10 the compared value is `phase1.color_wash()` = name + number
+   (the DTC `Color / Wash`), so only a repeated name with a blank number
+   collides.
+
+**`Color / Wash` = `"<COLOR NAME> <COLOR NUMBER>"`** (owner spec 2026-11-10,
+e.g. `Twill 16-1108 TCX`; always both, even `Black Black`). Staging carries the
+value in `color` and the bare name in `color_name`. `color_name` exists only so
+`compute_upsert()` can rename a DTC row still keyed on the bare name **in
+place** (like a `NO BP COLORWAY` anchor), never insert a twin. It does so only
+when exactly one colorway of the style has that bare name. Until that rename
+lands, joins on the colour (Phase 2 Lot#, the lifecycle check, build_costing's
+intent overlay) miss those rows for one run. `costing_chart.color_name`, and
+with it the NT Orbit product description and cache key, now include the number.
 
 ---
 
@@ -564,6 +577,11 @@ limit, so it has to be re-established explicitly in the composition layer.
 - **Dummy colorway upgrade**: the first real colorway UPDATEs the style's
   unclaimed `DUMMY_COLOR` row(s) in place — never insert-then-delete. A second
   real colorway gets a genuine INSERT.
+- **Legacy colour-key rename** (2026-11-10): a row whose `Color / Wash` is still
+  the bare colour name is claimed the same way and renamed to name + number.
+  Skipped (the row is left alone, the colorway inserted) when two colorways of
+  the style share that bare name, or when a colorway's current key IS the bare
+  name.
 - **INSERT** carries no locator at all — DTC assigns it (`append_rows`). A
   copied base row's `rowId`/`rowIndex` must be stripped
   (`bom.INSERT_EXCLUDE_COLS`), or the whole request is rejected with a 400.

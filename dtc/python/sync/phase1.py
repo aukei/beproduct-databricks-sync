@@ -294,6 +294,17 @@ def duplicate_color_names(color_names: Iterable[Any]) -> List[str]:
     return sorted(dupes)
 
 
+def color_wash(color_name: Any, color_number: Any) -> Optional[str]:
+    """
+    DTC "Color / Wash" for a BeProduct colorway: "<COLOR NAME> <COLOR NUMBER>",
+    e.g. "Twill 16-1108 TCX" (owner spec 2026-11-10). The name alone when the
+    number is blank. Before 2026-11-10 it was the bare name; compute_upsert()
+    renames such rows in place via the staging row's `color_name`.
+    """
+    name, number = norm(color_name), norm(color_number)
+    return f"{name} {number}" if name and number else name
+
+
 def parse_request_reference(reference: str) -> Dict[str, str]:
     """
     Parse a DTC request reference of the form "<customer> <seasonCode> <brand>".
@@ -575,6 +586,9 @@ def compute_upsert(
          "Dummy -> real transitions" section. Every such row for the style is
          claimed at once (a style can have more than one dummy-color row if
          Phase 10 already fanned it out by material).
+      2b. Before the dummy check, a row still keyed on the colour's bare NAME
+         (the pre-2026-11-10 "Color / Wash") is renamed in place the same way,
+         using the BeProduct row's `color_name` (see the legacy-key comment).
       3. Otherwise, a genuinely new (style, color) combination is INSERTed.
     """
     plan = UpsertPlan()
@@ -589,6 +603,16 @@ def compute_upsert(
     # key). Also index this style's currently-unclaimed dummy-color rows
     # separately, keyed by BP Style# alone, for the dummy->real upgrade path.
     dtc_index: Dict[Tuple, List[Dict[str, Any]]] = {}
+    # Legacy-key claim (2026-11-10): "Color / Wash" went from the bare colour
+    # name to color_wash() ("<name> <number>"). A row still keyed on the bare
+    # name is renamed IN PLACE, like a dummy anchor, never re-inserted. Only
+    # when exactly one BeProduct row of the style carries that bare name and no
+    # BeProduct row's current key IS that bare name -- otherwise it is ambiguous.
+    bp_keys_all = {(norm(b.get("bp_style_number")), norm(b.get("color"))) for b in bp_rows}
+    legacy_counts: Dict[Tuple, int] = {}
+    for b in bp_rows:
+        lk = (norm(b.get("bp_style_number")), norm(b.get("color_name")))
+        legacy_counts[lk] = legacy_counts.get(lk, 0) + 1
     dummy_color_rows_by_style: Dict[Optional[str], List[Dict[str, Any]]] = {}
     for r in dtc_rows:
         key = _match_key(r, style_col, color_col)
@@ -663,7 +687,12 @@ def compute_upsert(
         # Phase 10 already fanned the single dummy row out by material before
         # any real colorway ever arrived.
         anchors: List[Dict[str, Any]] = []
-        if key[1] != DUMMY_COLOR:
+        legacy_key = (key[0], norm(bp.get("color_name")))
+        if legacy_key[1] and legacy_key[1] != key[1] and legacy_counts.get(legacy_key) == 1 \
+                and legacy_key not in bp_keys_all:
+            anchors = [r for r in dtc_index.get(legacy_key, [])
+                       if r.get("rowId") not in claimed_dummy_row_ids]
+        if not anchors and key[1] != DUMMY_COLOR:
             anchors = [r for r in dummy_color_rows_by_style.get(key[0], [])
                        if r.get("rowId") not in claimed_dummy_row_ids]
 

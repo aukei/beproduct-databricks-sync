@@ -970,3 +970,4 @@ We need a 2 way sync of BOM between Miro and BP
  2. BP style sync to DTC master chart Update
  - Sync only colorways which "HIDE COLOR" box is UNCHECKED
  - e.g. the colorways on KTB-00073 (https://hk.beproduct.com/lifunghk/Style/#/Style/edit/4c15b728-7512-47c4-8961-579cbce792cb/a19c1c71-680b-4bc0-8e53-6b9ccea3f935/Attributes) shows 8 colors. color number ['19-4109 TCX','xxxx','14-1430 TCX','12-0640 TCX'] have "HIDE COLOR" checked = skipped, ['16-1108TCX','19-0516 TCX','13-2705 TCX','14-2609 TCX'] are unchecked = synced.
+ - in DTC Style master "Color / Wash" field, populate BP's "COLOR NAME + COLOR NUMBER", e.g. "Trill 16-1108 TCX"

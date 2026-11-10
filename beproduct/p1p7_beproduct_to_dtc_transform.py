@@ -79,11 +79,13 @@ for _p in (_MODULE_PATH, _MODULE_PATH.replace("/DTC/", "/dtc/")):
         sys.path.insert(0, _p)
 from sync.samples import format_sample_field, format_submit_status, SAMPLE_SUBMIT_FIELDS, FIT_SUBMIT_FIELDS
 from sync import lifecycle
-from sync.phase1 import DUMMY_COLOR, duplicate_color_names
+from sync.phase1 import DUMMY_COLOR, duplicate_color_names, color_wash
 from sync.bom import DUMMY_FABRIC_GROUP, DUMMY_FABRIC_ARTICLE
 
 # Spark UDF wrapper: raw {prefix}_sample_json (JSON string) -> DTC status string.
 format_sample_udf = udf(format_sample_field, StringType())
+# DTC "Color / Wash" = "<COLOR NAME> <COLOR NUMBER>" (owner spec 2026-11-10).
+color_wash_udf = udf(color_wash, StringType())
 
 # Configure parameters
 dbutils.widgets.text("catalog", "lft", "Catalog Name")
@@ -202,9 +204,13 @@ try:
     # style FREEZES its DTC rows (nothing is deleted) and the data-gaps
     # dashboard lists it as DUPLICATE_COLOR_NAME. Before this, one such style
     # failed Cell 8's key check and blocked the run for every style.
+    # Since 2026-11-10 the key is color_wash() = name + number, and BeProduct
+    # keeps color_number unique per style, so this now fires only on a
+    # repeated name with a BLANK number.
     dup_color_styles = {}
     for r in df_parsed.select("bp_style_number", "cw_detail").collect():
-        dupes = duplicate_color_names(cw["color_name"] for cw in (r["cw_detail"] or []))
+        dupes = duplicate_color_names(color_wash(cw["color_name"], cw["color_number"])
+                                      for cw in (r["cw_detail"] or []))
         if dupes:
             dup_color_styles[r["bp_style_number"]] = dupes
     if dup_color_styles:
@@ -236,7 +242,9 @@ try:
     df_exploded_real_colors = (
         df_with_colors_raw
         .withColumn("cw", explode(col("cw_detail")))
-        .withColumn("color", col("cw.color_name"))
+        .withColumn("color", color_wash_udf(col("cw.color_name"), col("cw.color_number")))
+        # Bare name: lets compute_upsert() rename pre-2026-11-10 rows in place.
+        .withColumn("color_name", col("cw.color_name"))
         .withColumn("colorway_id", col("cw.colorway_id"))
         .drop("cw", "cw_detail")
     )
@@ -249,6 +257,7 @@ try:
     df_dummy_colors = (
         df_without_colors_raw
         .withColumn("color", lit(DUMMY_COLOR))
+        .withColumn("color_name", lit(None).cast(StringType()))
         .withColumn("colorway_id", lit(None).cast(StringType()))
         .drop("cw_detail")
     )
@@ -544,6 +553,7 @@ try:
         col("bp_style_number"),            # Phase 6: new primary BP style key
         col("lf_style_number"),            # Phase 6: optional old LF style number
         col("color"),
+        col("color_name"),                 # bare BeProduct name; legacy-key rename only
         col("colorway_id"),                # carried for Phase 2 DTC -> BeProduct Lot# pushback
         col("fabric_group"),
         col("placement"),

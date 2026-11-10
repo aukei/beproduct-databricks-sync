@@ -8,7 +8,7 @@
 -- per-row drop reason, so this cannot drift from the real gates. Until then,
 -- ANY change to a gate in PIPELINE.md must be mirrored here.
 --
--- Freshness: every input is rewritten by the main job (every 8 min), so the
+-- Freshness: every input is rewritten by the main job (hourly), so the
 -- view is as fresh as the last main run. `as_of` is the DTC snapshot time.
 --
 -- Columns: area, gap_code, severity (blocker|warning|info), owner, request,
@@ -62,9 +62,9 @@ styles AS (
   FROM lft.beproduct.ktb_styles
 ),
 resolved AS (SELECT DISTINCT dtc_request_name AS request FROM lft.beproduct.dtc_request_mapping),
--- Styles whose colorways share a colour NAME (PIPELINE.md Stage 20, gate 7).
--- BeProduct only needs color_number unique; DTC keys rows on the name, so the
--- transform skips the whole style. Names compared like sync/phase1.norm():
+-- Styles whose colorways share a DTC "Color / Wash" (PIPELINE.md Stage 20,
+-- gate 7). Since 2026-11-10 that is name + number, so only a repeated name
+-- with a blank number collides; the transform skips the whole style. Names compared like sync/phase1.norm():
 -- whitespace collapsed + trimmed, case kept, null sentinels ignored.
 dup_colors AS (
   SELECT bp_style,
@@ -72,7 +72,9 @@ dup_colors AS (
          concat_ws(', ', collect_list(name)) AS names
   FROM (
     SELECT k.bp_style_number AS bp_style,
-           trim(regexp_replace(c.color_name, '[ \\t\\r\\f]+', ' ')) AS name,
+           -- sync/phase1.color_wash(): "<name> <number>", name alone if no number (2026-11-10)
+           concat_ws(' ', trim(regexp_replace(c.color_name, '[ \\t\\r\\f]+', ' ')),
+                     nullif(trim(regexp_replace(c.color_number, '[ \\t\\r\\f]+', ' ')), '')) AS name,
            concat_ws(' / ', collect_list(c.color_number)) AS numbers
     FROM lft.beproduct.ktb_styles k
     LATERAL VIEW explode(from_json(k.colorways_json,
@@ -197,9 +199,9 @@ gaps AS (
 
   UNION ALL
   SELECT 'WIP record', 'DUPLICATE_COLOR_NAME', 'blocker', 'BeProduct user', NULL, d.bp_style, d.names, NULL,
-         concat('Colourways share a name: ', d.detail,
-                '. DTC tells colourways apart by name, so the style is skipped: its DTC rows are frozen at their last values (nothing is deleted).'),
-         'BeProduct user: give each colourway of this style a different Color Name (the Color Number alone is not enough for DTC). It syncs again on the next run.',
+         concat('Colourways share a Color / Wash (name + number): ', d.detail,
+                '. DTC tells colourways apart by Color / Wash, so the style is skipped: its DTC rows are frozen at their last values (nothing is deleted).'),
+         'BeProduct user: give each colourway of this style its Color Number (or a different Color Name). It syncs again on the next run.',
          '1.1'
   FROM dup_colors d
 
@@ -225,7 +227,7 @@ gaps AS (
   UNION ALL
   SELECT 'WIP record', 'NOT_YET_IN_DTC', 'warning', 'Wait / IT', stg.request, stg.bp_style, stg.color, NULL,
          'In BeProduct and routed to a request, but no DTC row yet.',
-         'Wait for the next main run (8 min). If it is still missing after 30 min, contact IT.',
+         'Wait for the next main run (hourly). If it is still missing after 30 min, contact IT.',
          '1.3'
   FROM stg
   JOIN resolved r ON r.request = stg.request
@@ -266,7 +268,7 @@ gaps AS (
   UNION ALL
   SELECT 'Material rows', 'MATERIAL_ROWS_MISSING', 'warning', 'Wait / IT', w.request, w.bp_style, w.color, NULL,
          concat('DTC has ', count(*), ' material row(s) for this colour; the BOM implies ', 1 + b.fabric_count, '.'),
-         'Wait for the next main run (8 min). If it persists, contact IT.',
+         'Wait for the next main run (hourly). If it persists, contact IT.',
          '1.8'
   FROM wip w JOIN bom b ON b.bp_style = w.bp_style AND b.main_fabric_count = 1
   GROUP BY w.request, w.bp_style, w.color, b.fabric_count
@@ -341,7 +343,7 @@ gaps AS (
                   CASE WHEN c.duty_rate_mx IS NULL THEN 'duty MX' END,
                   CASE WHEN c.tariff_rate IS NULL THEN 'tariff' END),
                 ' still blank.'),
-         'Wait: the duty lookup runs every 8 min, and each new line takes ~1-2 min. If it is still blank after 1 hour, contact IT.',
+         'Wait: the duty lookup runs hourly, and each new line takes ~1-2 min. If it is still blank after 2 hours, contact IT.',
          '4.1'
   FROM lft.beproduct.costing_chart c
   WHERE nullif(trim(c.production_country), '') IS NOT NULL
@@ -351,7 +353,7 @@ gaps AS (
   UNION ALL
   SELECT 'Duty', 'DUTY_NOT_YET_IN_DTC', 'info', 'Wait / IT', s.request, s.bp_style, s.color, s.article,
          concat('Slot ', s.slot, ': HTS ', c.hts_code, ' is computed but not yet in the DTC sheet.'),
-         'Wait for the next main run (8 min). If it persists, contact IT.',
+         'Wait for the next main run (hourly). If it persists, contact IT.',
          '4.2'
   FROM lft.beproduct.costing_chart c
   JOIN slots s ON s.bp_style = c.bp_style_no AND s.color = c.color_name AND s.slot = c.supplier_type
