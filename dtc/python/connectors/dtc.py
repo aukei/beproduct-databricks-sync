@@ -12,7 +12,7 @@ import json
 import logging
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 import pandas as pd
 
 from client.rest_client import RestClient
@@ -745,6 +745,30 @@ class DTCConnector:
             f"/v1/sheets/{sheet_id}/views/{view_id}/images",
             params=params,
             files=files,
+        )
+
+    def copy_row_image(
+        self, sheet_id: str, view_id: str, row_id: str, column_name: str,
+        source_sheet_id: str, source_view_id: str, source_row_id: str,
+        source_column_name: str,
+    ) -> Dict[str, Any]:
+        """Copy an image cell's pointers from one row to another (2026-11-19).
+
+            POST /v1/sheets/{s}/views/{v}/images/copy?rowid=..&columnname=..
+            body {sourceSheetId, sourceViewId, sourceRowId, sourceColumnname}
+            -> 201
+
+        DTC copies the image METADATA, not the files, so nothing is
+        re-uploaded. All source images are copied in order and REPLACE what the
+        destination holds; refused with nothing written when the source has
+        more images than the destination column allows. Addressed by rowId
+        only: a stale rowindex on the upload endpoint silently creates a row.
+        """
+        q = urlencode({"rowid": row_id, "columnname": column_name})
+        return self.client.post(
+            f"/v1/sheets/{sheet_id}/views/{view_id}/images/copy?{q}",
+            data={"sourceSheetId": source_sheet_id, "sourceViewId": source_view_id,
+                  "sourceRowId": source_row_id, "sourceColumnname": source_column_name},
         )
 
     def get_view_definition(self, view_id: str) -> Dict[str, Any]:

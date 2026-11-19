@@ -967,7 +967,40 @@ We need a 2 way sync of BOM between Miro and BP
     - In these BOM line, how to set color way? both "Ginger" and "CKAU"
     - If all OK, what does the resulting HK BOM looks like on API extraction? Does each material get a unique material ID (not LF Material ID)? Colorway get its own colorway ID with color name?
 
- 2. BP style sync to DTC master chart Update
+2. BP style sync to DTC master chart Update
  - Sync only colorways which "HIDE COLOR" box is UNCHECKED
  - e.g. the colorways on KTB-00073 (https://hk.beproduct.com/lifunghk/Style/#/Style/edit/4c15b728-7512-47c4-8961-579cbce792cb/a19c1c71-680b-4bc0-8e53-6b9ccea3f935/Attributes) shows 8 colors. color number ['19-4109 TCX','xxxx','14-1430 TCX','12-0640 TCX'] have "HIDE COLOR" checked = skipped, ['16-1108TCX','19-0516 TCX','13-2705 TCX','14-2609 TCX'] are unchecked = synced.
  - in DTC Style master "Color / Wash" field, populate BP's "COLOR NAME + COLOR NUMBER", e.g. "Trill 16-1108 TCX"
+
+3. Keep a ledger of Style data of KTB WIP master chart whenever Product Status change.
+ - When there is a change of BP Style's Product status, before update corresponding DTC rows, backup those rows to a 'KTB WIP HISTORY' request.
+    - That 'KTB WIP HISTORY' request should be named after corresponding master chart, e.g. KTB FW28 Collaborations backup to KTB FW28 Collaborations Snaps.
+    - Use new "Copy Sheet Image" API to insert the "Style Image" pointer to backup row - to avoid duplicate image upload.
+    - Create target request if not exist. Share access to "Kontoor Project Team".
+- for ref, DTC MCP prompt to create "KTB WIP HISTORY" document: "KTB WIP HISTORY should contains ALL columns of KTB WIP plus one Log Date column, so total 181 columns. However strip fomular / lookup from all columns, the workflow will assign all 179 + 1 fields at insert time."
+KTB WIP HISTORY should contains all 179 col of KTB WIP plus 1 Log Date col, the setup is revised. The backup should contains materialized value of all lookups (last saved value)
+a 'FULL' view expose all 212 fields with EVENT type flatten out.
+    - From DTC developer for fields of type "event", there will be 3 physical fields created in request but shown as 1 field on UI. e.g. event field "Me" will create "Me - Actual", "Me - Due", "Me - Remark" 3 fields. 
+in this sense, make sure KTB WIP HISTORY contains all physical fields - there are several EVENT fields in WIP.
+    - KTB WIP view "WIP_ITS_USE" exposed 6 more col: 
+        - PP Sample Submission - Remark
+        - PP Sample Submission Approval - Actual
+        - PP Sample Submission Approval - Remark
+        - Fabric Construction - Drop Down
+        - FabricDropdown
+        - sorting
+4. Copy Sheet Image - New DTC API
+POST /v1/sheets/{sheetId}/views/{viewId}/images/copy?rowid={rowId}&columnname={text}
+POST /v1/sheets/{sheetId}/views/{viewId}/images/copy?rowindex={rowIndex}&columnname={text}
+- copy image from one sheet to another sheet
+    - mandatory checking for rowid / rowindex and columnname
+    - validation of rowid / rowindex and columnname
+    - system will copy meta data of images from mongo instead of physical file
+    - copies all the images in the source cell, in order, replacing what the destination holds
+    - refused, with nothing written, when the source holds more images than the destination field allows: Source has N images; '<column>' allows at most M.
+    - view control validation (i.e. field editable)
+- e.g. /v1/requests/sheet/67468bc66d9bb8104c1bc6a6/views/67b2baf3b246932af071118d/images/copy?rowid=a4a73d9c-16ed-417a-acf6-c42fbd6e718&columnname=Photo
+Request body:
+ 
+{    "sourceSheetId" : "67468bc66d9bb8104c1bc6a6",    "sourceViewId" : "67b2baf3b246932af071118d",    "sourceRowId" : "b3117bc6-c922-479d-bb52-1f3f4f650ddf",    "sourceColumnname": "Image Field"}
+Response code: 201

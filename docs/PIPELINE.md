@@ -533,13 +533,32 @@ Per request, in order:
      `(bp_style_number, color_wash, Mill Fabric Article #)`
 4. If the combined plan is empty → **send nothing at all.** No GET-to-PATCH path,
    zero calls, zero user disruption. Design rule 2.
-5. Otherwise: updates as a `patch_rows` PATCH keyed by `rowId`, then inserts as
+5. **Product Status ledger** (owner spec 2026-11-11). Every planned update that
+   changes a row's non-blank `Product Status` first appends that row, as it is
+   now, to `<request> Snaps` (document `KTB WIP HISTORY`, view `Full`), with
+   `Log Date` = run time. `sync/wip_history.py`.
+   - The Snaps request is created if missing and its `full - readonly` view
+     shared with `Kontoor Project Team`. Two active Snaps requests with one
+     name → refuse.
+   - Copied: every non-blank cell of the master row as read through
+     `WIP_ITS_USE`, lookups included (their last saved value). `Full` and
+     `WIP_ITS_USE` carry the same 211 columns; a new master column must be
+     added to both. `Style Image` is set after the append with DTC's "Copy
+     Sheet Image" API (`copy_row_image`), which copies the image pointer, not
+     the file. A failed image copy is logged (`ledger_image_copy_failed`), not
+     held: the backup row already exists.
+   - If the backup fails, those rows' updates are **held** this run
+     (`ledger_held`, log `LEDGER` / `ledger_failed_update_held`) and retried
+     next run, so a status never changes without its backup.
+   - Not backed up: a first status (blank before) and inserts.
+   - Flag `run_status_ledger` (default `true`).
+6. Otherwise: updates as a `patch_rows` PATCH keyed by `rowId`, then inserts as
    an `append_rows` POST to `.../rows` — the server assigns `rowId`/`rowIndex`
    and returns them in send order, so every inserted row is logged with its
    real id. Back to back; chunked by `batch_size` (100).
 
 Every operation is logged to `beproduct_to_dtc_sync_log` (`stage='wip_push'`;
-`operation` = `UPDATE` / `INSERT` / `NOOP` / `EXCEPTION` / `STRANDED_ROWS` /
+`operation` = `UPDATE` / `INSERT` / `NOOP` / `EXCEPTION` / `LEDGER` / `STRANDED_ROWS` /
 `REQUEST_INACTIVE` / `COLUMN_NOT_IN_VIEW` / `ERROR`). The exit value adds
 `columns_changed`, `columns_not_seen_in_view`, `stranded_rows`, `degraded`,
 `violations`, `bom_parse_errors`, `write_windows_opened` and per-request

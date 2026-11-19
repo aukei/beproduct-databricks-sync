@@ -80,7 +80,7 @@ from pyspark.sql import functions as F
 from pyspark.sql.types import StructType, StructField, StringType, TimestampType
 
 from connectors.dtc import DTCConnector
-from sync import bom, phase1, wip_plan
+from sync import bom, phase1, wip_history, wip_plan
 
 # COMMAND ----------
 
@@ -127,6 +127,11 @@ dbutils.widgets.text("material_exclude_columns", "", "Material columns to plan b
 # opening a write window every time. See docs/MIGRATION_V1_V2.md.
 dbutils.widgets.text("material_fill_if_blank_columns", "Content",
                      "Material columns written only when the cell is blank")
+# Product Status ledger (owner spec 2026-11-11): rows whose status is about to
+# change are first copied to "<request> Snaps" in this document.
+dbutils.widgets.text("run_status_ledger", "true", "Back up rows before a Product Status change")
+dbutils.widgets.text("status_ledger_document", wip_history.HISTORY_DOCUMENT, "Ledger document")
+dbutils.widgets.text("status_ledger_share_group", "Kontoor Project Team", "Ledger share group (blank = skip)")
 dbutils.widgets.text("explain_limit", "40", "Rows per request in the stdout trace")
 dbutils.widgets.text("sample_limit", "12", "current-vs-new samples per request in the exit JSON")
 
@@ -143,6 +148,9 @@ costing_table = dbutils.widgets.get("costing_chart_table")
 bom_table = f"{catalog}.{schema}.{dbutils.widgets.get('bom_segments_table')}"
 enable_duty = (dbutils.widgets.get("run_duty_push") or "true").strip().lower() == "true"
 explain_limit = int(dbutils.widgets.get("explain_limit") or 40)
+run_status_ledger = (dbutils.widgets.get("run_status_ledger") or "true").strip().lower() == "true"
+ledger_document = (dbutils.widgets.get("status_ledger_document") or "").strip() or wip_history.HISTORY_DOCUMENT
+ledger_share_group = (dbutils.widgets.get("status_ledger_share_group") or "").strip()
 sample_limit = int(dbutils.widgets.get("sample_limit") or 12)
 material_exclude = frozenset(
     c.strip() for c in (dbutils.widgets.get("material_exclude_columns") or "").split(",")
@@ -302,7 +310,8 @@ FALLBACK_COLS = {c for c in phase1.FIELD_MAPPING.values() if c != phase1.STYLE_I
 
 totals = {"requests": 0, "requests_written": 0, "requests_noop": 0,
           "updates": 0, "inserts": 0, "noops": 0, "exceptions": 0,
-          "patch_calls": 0, "patch_failed": 0, "orphan_marks": 0}
+          "patch_calls": 0, "patch_failed": 0, "orphan_marks": 0,
+          "ledger_rows": 0, "ledger_held": 0}
 by_source_totals = {}
 diagnostics_totals = {}
 columns_totals = {}
@@ -310,6 +319,47 @@ columns_unseen_totals = set()
 stranded_totals = []
 all_degraded, all_violations = [], []
 per_request = []
+
+_ledger_targets = {}   # Snaps request name -> (sheet_id, view_id, {column: type})
+
+
+def ledger_target(master_name):
+    """Find (or create + share) "<master> Snaps". Returns None in a dry run
+    when it does not exist yet. Raises on anything ambiguous."""
+    snaps = wip_history.snaps_request_name(master_name)
+    if snaps in _ledger_targets:
+        return _ledger_targets[snaps]
+    found = wip_history.pick_history_request(
+        connector.search_requests(workspace, document_name=ledger_document,
+                                  filters={"requestIsActive": "Y"}), snaps)
+    if len(found) > 1:
+        raise RuntimeError(f"{len(found)} active requests named {snaps!r} in {ledger_document!r}")
+    if found:
+        rid = found[0]["requestId"]
+    elif dry_run:
+        print(f"  🅓 ledger: would CREATE {snaps!r} in {ledger_document!r}")
+        return None
+    else:
+        rid = connector.create_sheet(workspace, ledger_document, snaps,
+                                     view_name=wip_history.HISTORY_VIEW)["requestId"]
+        print(f"  🆕 ledger: created {snaps!r} request_id={rid}")
+        log(snaps, rid, "CREATE_REQUEST", None, "created", "status_ledger")
+        if ledger_share_group:
+            connector.share_request_with_usergroup(rid, ledger_share_group,
+                                                   [wip_history.HISTORY_SHARE_VIEW])
+            log(snaps, rid, "SHARE_GROUP", None, "ok", "status_ledger",
+                f"{wip_history.HISTORY_SHARE_VIEW} -> {ledger_share_group}")
+    sid = connector.get_request(rid).get("sheetId")
+    vid = next(v["viewId"] for v in connector.get_views(rid)
+               if v.get("viewName") == wip_history.HISTORY_VIEW)
+    cols = {f["fieldName"]: f.get("type")
+            for f in (connector.get_view_definition(vid) or {}).get("dynamicFields") or []}
+    if wip_history.LOG_DATE_COL not in cols:
+        raise RuntimeError(f"{snaps!r} view {wip_history.HISTORY_VIEW!r} has no "
+                           f"{wip_history.LOG_DATE_COL!r} column")
+    _ledger_targets[snaps] = (sid, vid, cols)
+    return _ledger_targets[snaps]
+
 
 for name, m in mapping.items():
     totals["requests"] += 1
@@ -481,6 +531,54 @@ for name, m in mapping.items():
         continue
 
     totals["requests_written"] += 1
+
+    # ── Product Status ledger (owner spec 2026-11-11) ───────────────────────
+    # Copy each row whose status is about to change, AS IT IS NOW, to
+    # "<request> Snaps" BEFORE the PATCH. If that fails, hold those rows'
+    # updates this run (retried next run), so a status never changes without
+    # its backup. The Snaps request is a different request, so this does not
+    # touch the master's write window.
+    status_ops = wip_history.status_change_updates(plan.updates) if run_status_ledger else []
+    if status_ops:
+        snaps = wip_history.snaps_request_name(name)
+        try:
+            target = ledger_target(name)
+            if target:
+                h_sid, h_vid, h_cols = target
+                body = [wip_history.snapshot_row(op.current, h_cols, now.isoformat())
+                        for op in status_ops]
+                if not dry_run:
+                    new_ids = []
+                    for chunk in phase1.chunked(body, batch_size):
+                        new_ids += [r["rowId"] for r in connector.append_rows(h_sid, h_vid, chunk)]
+                    # Style Image: copy the pointer (no re-upload). The backup row
+                    # already exists, so a failure here is logged, never held --
+                    # holding would append a duplicate backup next run.
+                    for op, new_id in zip(status_ops, new_ids):
+                        if not op.current.get(phase1.STYLE_IMAGE_COL):
+                            continue
+                        try:
+                            connector.copy_row_image(
+                                h_sid, h_vid, new_id, phase1.STYLE_IMAGE_COL,
+                                sheet_id, view_id, op.row_id, phase1.STYLE_IMAGE_COL)
+                        except Exception as ie:  # noqa: BLE001
+                            log(snaps, None, "LEDGER", op.match_key, "warn",
+                                "ledger_image_copy_failed", str(ie)[:300])
+            totals["ledger_rows"] += len(status_ops)
+            for op in status_ops:
+                log(snaps, None, "LEDGER", op.match_key, "ok", "dry_run" if dry_run else "",
+                    f"{op.current.get(wip_history.STATUS_COL)} -> "
+                    f"{op.fields.get(wip_history.STATUS_COL)} rowId={op.row_id}")
+            print(f"  📒 ledger: {len(status_ops)} row(s) -> {snaps!r}"
+                  + ("  [dry_run]" if dry_run else ""))
+        except Exception as e:  # noqa: BLE001
+            held = {op.row_id for op in status_ops}
+            plan.updates = [op for op in plan.updates if op.row_id not in held]
+            totals["ledger_held"] += len(held)
+            print(f"  ❌ ledger failed ({e}) -- holding {len(held)} row update(s) until next run")
+            for op in status_ops:
+                log(snaps, None, "LEDGER", op.match_key, "error", "ledger_failed_update_held",
+                    str(e)[:300])
 
     # UPDATEs then INSERTs, back to back -- still ONE write window.
     # UPDATE : PATCH, keyed by rowId.

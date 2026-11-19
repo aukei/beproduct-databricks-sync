@@ -370,6 +370,43 @@ this stays true by construction; verify it stays true after any change).
 
 ## Verified discoveries log (append-dated; do not delete)
 
+**Product Status ledger -> "<request> Snaps" (2026-11-11, owner spec):**
+- Before `wip_push` changes a row's non-blank `Product Status`, it appends the
+  row as it is now to `<request> Snaps`, document **`KTB WIP HISTORY`**, view
+  **`Full`** (`allowInsertRow=Y`, 0 mandatory, no formula/lookup columns), with
+  `Log Date` = run time. `sync/wip_history.py`; PIPELINE.md Stage 40 step 5.
+- The owner created `KTB FW28 Collaborations Snaps` (`6af450008bcbbd4101839c1a`,
+  sheet `…1c1b`, view `Full` `6af3fcb2596c1e2c692829d0`) and shared its
+  `full - readonly` view with `Kontoor Project Team`. Missing Snaps requests
+  are created and shared the same way.
+- Live probe (row appended, read back, deleted): a full copied WIP_ITS_USE row
+  round-trips unchanged; `Log Date` (type `date`) takes an ISO timestamp.
+- **Column parity (2026-11-19, DTC setup revised):** the spec's "179 + 1" was
+  wrong. KTB WIP has **211** columns (union of all 21 views' field ids), and
+  `WIP_ITS_USE` now exposes all 211 (6 added on request: `PP Sample Submission
+  - Remark`, `PP Sample Submission Approval - Actual`/`- Remark`, `Fabric
+  Construction - Drop Down`, `FabricDropdown`, `sorting`). History `Full` = 212
+  = the same 211 + `Log Date`, every one plain (event Due/Actual/Remark
+  sub-fields are plain `date`/`string`; lookups/formulas are plain values).
+  Re-probed with a real master row: 50 cells sent, 0 differ on read-back,
+  `Factory Production Country for Main Factory` / `Main Vendor Customer ID`
+  stored as their last saved values (`IN` / `1000272091`). Probe row deleted. Any new master column must be added to
+  BOTH `WIP_ITS_USE` and history `Full`, or it backs up blank.
+- **`Style Image` via "Copy Sheet Image" (2026-11-19, live-verified):**
+  `POST /v1/sheets/{s}/views/{v}/images/copy?rowid=..&columnname=..`, body
+  `{sourceSheetId, sourceViewId, sourceRowId, sourceColumnname}` -> 201 with
+  the image metadata. Copies the POINTER (same `/api/v1/images/<id>.png` URL),
+  not the file; replaces what the destination holds; refused if the source has
+  more images than the destination allows. The documented example path
+  `/v1/requests/sheet/...` was not needed; `/v1/sheets/...` works.
+  `DTCConnector.copy_row_image` (rowId only). The ledger appends first, then
+  copies per new rowId; a copy failure is logged `ledger_image_copy_failed`,
+  never held (holding would duplicate the backup row). Probe: backup row got
+  the identical URL, master unchanged, probe row deleted.
+- A failed backup HOLDS those rows' updates (retried next run).
+- Dry run from a scratch root: 44 no-ops, no status change pending, so the
+  backup path has not yet fired on live data.
+
 **DTC `Color / Wash` = "<COLOR NAME> <COLOR NUMBER>" (2026-11-10, owner spec):**
 - e.g. `Twill 16-1108 TCX`. `phase1.color_wash()`; name alone only if the
   number is blank. **Owner decision: ALWAYS both, even when number == name**
@@ -450,7 +487,12 @@ Miro <-> BeProduct BOM sync via Logic Apps.**
   - `group` takes the choice NAME (`"Main Fabric"`); its GUID is rejected
     ("bad format"). The GET returns `rows[].group` as that GUID.
   - `mill_vendor` (PartnerDropDown) takes the partner GUID (`code`); the name
-    and short text are rejected.
+    and short text are rejected. **That GUID is the BeProduct Directory
+    record `id`** (verified 2026-11-11: both live values on KTB-00070 are
+    `lft.beproduct.beproduct_directory.id`). Look it up by `name` +
+    `partner_type`. The GET's `text` is NOT always `directory_id`
+    (`PEND-NT5R20` vs `BeProduct`). A VENDOR partner is accepted too (the
+    UI-made row uses one).
   - `material_category`, `material_type`, `vendor_material_reference_no`,
     `mill_vendor` are REQUIRED.
   - Ad hoc row (no `materialId`): works. The name goes in `header_name`.
@@ -4155,6 +4197,7 @@ python3 dtc/tests/test_xts_master.py    # Phase 0 XTS Master pure-function unit 
 python3 dtc/tests/test_duty.py          # Phase 9b NT Orbit Duty Tools pure-function unit tests (fixture-based)
 python3 dtc/tests/test_bom.py           # Phase 10 BOM enrichment pure-function unit tests (upsert semantics)
 python3 dtc/tests/test_color_palette.py # Phase 11 color palette -> DTC planner (grain, YES/NO, untick, zero-diff)
+python3 dtc/tests/test_wip_history.py   # Product Status ledger (Snaps backup) pure-function unit tests
 python3 dtc/tests/test_lifecycle.py     # Style/WIP-row lifecycle gating pure-function unit tests (Finalized/Drop + Active/Dropped)
 python3 dtc/tests/test_entra_auth.py    # Phase 9b Entra OAuth2 URL-building / callback-parsing pure-function unit tests
 python3 dtc/tests/test_phase1_live.py   # live reversible DTC write test (needs UAT)
