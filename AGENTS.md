@@ -406,6 +406,9 @@ this stays true by construction; verify it stays true after any change).
 - A failed backup HOLDS those rows' updates (retried next run).
 - Dry run from a scratch root: 44 no-ops, no status change pending, so the
   backup path has not yet fired on live data.
+- **DEPLOYED 2026-11-19** (`b6e7fc3`, v2 root). Run 566289372571541 SUCCESS on
+  all 16 tasks, `wip_push` 64 no-ops, `ledger_rows=0` (no status change
+  pending). The ledger still awaits its first real Product Status change.
 
 **DTC `Color / Wash` = "<COLOR NAME> <COLOR NUMBER>" (2026-11-10, owner spec):**
 - e.g. `Twill 16-1108 TCX`. `phase1.color_wash()`; name alone only if the
