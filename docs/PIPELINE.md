@@ -662,9 +662,14 @@ limit, so it has to be re-established explicitly in the composition layer.
      DTC, so it arrives late and progressively, and a corrected
      `LF_Material_ID` must be able to propagate. Safe because this pipeline is
      its only writer — unlike `Content`, which DTC's own trigger contests.
-4. **Fan-out**: for each "Fabric" segment whose key is not already represented —
-   by exact match or blank-article backfill — duplicate every existing row of that
-   colorway once per such segment.
+4. **Fan-out**: every BOM group except `Main Fabric`, `Packaging` and `Label`
+   (`bom.is_fanout_group()`: "Fabric", "Trim", "Artwork", ...; a blank group is
+   skipped) is a fan-out segment (owner spec 2026-11-20; until then only "Fabric").
+   A (group, article) repeated in the techpack — one line per colourway group —
+   counts once. For each segment whose key is not already represented — by exact
+   match or blank-article backfill — insert ONE row for that colorway. It copies
+   only STYLE columns from an existing row of the colour: never DTC-owned values
+   (vendor, LinePlan ref#, fabric lookups), duty, or that row's own material key.
 5. **Coverage is scoped per colorway, not per style.** `KTB-00029` had 2 colors ×
    3 segments = 6 expected rows but only 4, because one color's rows had claimed
    both Fabric segments globally and permanently starved the other. Rows with no
@@ -747,14 +752,18 @@ blank-vs-populated Style Image state). Logs to `beproduct_to_dtc_sync_log` with
 1. Row has a resolvable match key.
 2. Style Image cell is currently blank — idempotent, never re-uploads.
 3. Row has a `rowId`, else skipped `missing_row_id`.
-4. Source, in priority order: **(a) sibling copy** — any other row for the same BP
-   Style# in this request that already has a real image, reusing that DTC-hosted
-   URL (downloaded with the DTC `x-api-key`) rather than re-downloading from
-   BeProduct. Since 2026-09-18 DTC's gateway answers that download with 403
-   from Databricks, so a sibling copy carries the row's own BeProduct image
-   as `fallback_url` and uses it instead. **(b)** BeProduct's `front_image_url`,
-   which must be non-blank and `http(s)://`. **(c)** Neither → skipped
-   `no_source_image`.
+4. Source, in priority order. A style's image is header-level, so every row
+   of one BP Style# (each colour, each BOM fan-out row) gets the same image.
+   **(a) sibling copy** — another row of the same BP Style# in this request
+   already has an image, or gets it earlier in this same run. DTC copies the
+   pointer server-side (`POST .../images/copy`, `IMAGE_COPY` in the log), with
+   no download or re-upload. Since 2026-11-20. Before that the sibling's URL
+   was downloaded, which DTC's gateway has refused from Databricks since
+   2026-09-18. If the copy fails, or the source row got no image this run, the
+   row uploads its own BeProduct image instead (`sibling_fallback_beproduct`).
+   **(b)** BeProduct's `front_image_url`, which must be non-blank and
+   `http(s)://`, uploaded to the style's FIRST blank row only. **(c)** Neither
+   → skipped `no_source_image`.
 5. Content type (`classify_image_type()`, which also reads the first bytes):
    `jpeg`/`png` as-is; `webp`/`gif`/`bmp`/`tiff` transcoded to PNG;
    **`.ai` / `.pdf` whose bytes start `%PDF`** (Illustrator's default

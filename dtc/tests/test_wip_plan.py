@@ -213,6 +213,24 @@ check("[2g] Style Image never copied into a fan-out INSERT",
       p_img.explain())
 check("[2h] no violations recorded on a clean plan", not p_img.violations, p_img.violations)
 
+# A fan-out row (here a Trim, 2026-11-20) copies only STYLE columns from its
+# base row: not the base row's DTC-owned values, duty or its own material key.
+p_copy = wip_plan.compute_request_plan(
+    SCOPE,
+    [dtc_row("r1", 1, **{FG: "Main Fabric", MA: "WV-0003", PL: "BODICE", CT: "Cotton 100%",
+                         LF: "LF-MAIN", "Main Factory HTS Code": "6205200000",
+                         "LinePlan ref#": "WC-1", "Main Vendor (Sampling)": "VEND"})],
+    [bp_row()], bom_by_style={"KTB-1": bom_json([
+        ("Main Fabric", "WV-0003", "BODICE", "Cotton 100%"), ("Trim", "SH-1", "", "")])},
+    allowed_cols=ALLOWED)
+_trim = [r for r in p_copy.inserts if r.fields.get(FG) == "Trim"]
+check("[2i] a Trim fan-out copies style columns only, with no violations",
+      len(_trim) == 1 and _trim[0].fields.get("Style Description") == "A Shirt"
+      and not any(c in _trim[0].fields for c in
+                  ("Main Factory HTS Code", "LinePlan ref#", "Main Vendor (Sampling)", LF))
+      and not p_copy.violations,
+      p_copy.explain())
+
 
 # ---------------------------------------------------------------------------
 print("\n[3] Degrade, never abort")

@@ -142,8 +142,9 @@ sheets), staged through **Databricks/Delta**.
   source itself, reversing the 2026-09-03 design). Joined onto `ktb_styles`
   by `(bp_style_number=style_no, season||" - "||year=style_season)`, INNER
   JOIN throughout both hops. Parses for "Main Fabric" (exactly 1 by
-  construction) and "Fabric" (0 or more) segments by `**MaterialCategory`
-  ONLY. **Field mapping (corrected 2026-09-09)**: `Fabric Group` ←
+  construction) and fan-out segments (0 or more) by `**MaterialCategory`
+  ONLY -- "Fabric" only until 2026-11-20, now every group except Packaging
+  and Label (see verified-discoveries log). **Field mapping (corrected 2026-09-09)**: `Fabric Group` ←
   `**MaterialCategory`; `Placement` ← `**Placement`; `Mill Fabric Article #`
   ← `**SupplierRefNo`; `Content` ← `**MaterialContent` (REINSTATED as a
   real Phase 10 output — briefly removed entirely the same day after an
@@ -369,6 +370,42 @@ this stays true by construction; verify it stays true after any change).
    `"Factory 3 - Tariff"` (no `rate` suffix; ` - ` for numbered slots).
 
 ## Verified discoveries log (append-dated; do not delete)
+
+**BOM fan-out: every group except Packaging / Label (2026-11-20, owner spec,
+"Post customer meeting update 1"):**
+- Until now only `Main Fabric` + `Fabric` reached DTC WIP. Now every non-blank
+  `**MaterialCategory` except `Packaging` / `Label` (case-insensitive) fans out
+  as its own row: `bom.is_fanout_group()`, used by BOTH parsers (Lakebase and the
+  dormant PageBomVariation). Main Fabric stays the single anchor (first wins).
+- BeProduct's Group choices (owner): Main Fabric, Fabric, Trim, Artwork,
+  Label, Stitch/Seam, Packaging. So Fabric, Trim, Artwork and Stitch/Seam fan
+  out. No Stitch/Seam line exists in the live techpacks yet.
+- Live groups in KONTOOR techpacks today: Main Fabric 19, Fabric 17, **Trim 8**,
+  Label 3, **Artwork 1**, blank 2. In scope this adds Trim on KTB-00072/73/74/76.
+- **Two latent bugs surfaced, both fixed with it:**
+  1. A techpack repeats a line per COLOURWAY GROUP (KTB-00073, log 71323: Main
+     Fabric + Trim listed once for Twill/Dark Oliver/Flushing Pink and again for
+     Full Blooming). Main Fabric already kept the first; fan-out segments did
+     not, so every colour got the Trim twice. `plan_style_enrichment()` now
+     dedups fan-out segments by `segment_key()`, first wins.
+  2. A fan-out INSERT copied the WHOLE base row (the colour's Main Fabric row):
+     its duty/HTS (Main Fabric only, 2026-09-07 decision), a blank-coded
+     segment's inherited `LF Fabric ID`, and DTC-owned values (vendor, LinePlan
+     ref#, Construction, Mill Name...). The last were stripped by the allow-list
+     but logged as VIOLATIONS. `wip_plan._apply_material` now copies only style
+     columns (`allowed - MATERIAL_OWNED_COLS - duty_columns()`). Tests
+     `test_bom [4b]/[11u]`, `test_wip_plan [2i]`.
+- **Images for those rows: upload once, copy the rest (same day, owner spec).**
+  `phase3_images` uploads a style's BeProduct image to ONE row (or none, when a
+  row already has it), and every other blank row of that BP Style# gets
+  `DTCConnector.copy_row_image` from it: a server-side pointer copy, logged
+  `IMAGE_COPY`. Replaces the sibling-URL download that DTC's gateway 403s from
+  Databricks. A failed copy, or a source whose own upload failed this run,
+  falls back to the row's own BeProduct upload. Test `test_phase3 [15b]`. A
+  copy WITHIN one sheet is not live-verified yet; only master -> Snaps was.
+- Scratch-root dry run on live data: **17 Trim inserts**, 0 updates, 0
+  violations, status OK, ONE write window / 1 call; columns = style fields +
+  the 5 material columns (Trim `Content`/`Placement` blank). Not yet deployed.
 
 **Product Status ledger -> "<request> Snaps" (2026-11-11, owner spec):**
 - Before `wip_push` changes a row's non-blank `Product Status`, it appends the

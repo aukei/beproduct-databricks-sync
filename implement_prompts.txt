@@ -1007,4 +1007,6 @@ Response code: 201
 
 
 # 14 Post customer meeting update 1
-- wip_push write 
+- BP to DTC WIP, currently only write "Main Fabric" and "Fabric". New request write all groups except ['Packaging','Label']
+according to beproduct setup, possibile values of "Group" are ["Main Fabric",'Fabric","Trim","Artwork","Label","Stitch/Seam","Packaging"].
+- when adding rows to DTC WIP chart, optimize current "Image pulling" action to use the new copy image API for fan out rows, so to reduce uploading same image in every rows.

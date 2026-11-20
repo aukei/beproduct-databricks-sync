@@ -628,6 +628,7 @@ def _apply_material(
     field on this style, still goes out.
     """
     by_handle = {r.handle: r for r in updates + inserts}
+    style_copy_cols = allowed_patch_columns() - MATERIAL_OWNED_COLS - duty_columns()
 
     projected_by_style: Dict[Optional[str], List[PlannedRow]] = {}
     for pr in updates + inserts:
@@ -699,6 +700,13 @@ def _apply_material(
                 # are attributed to `style`; only the 4 BOM columns the fan-out
                 # actually sets are attributed to `material`.
                 for col, val in payload.items():
+                    if col not in act.wip_fields and col not in style_copy_cols:
+                        # Only STYLE columns describe the new row too. DTC-owned
+                        # values (vendor, LinePlan ref#, fabric lookups), duty
+                        # (Main Fabric only) and the base row's own material
+                        # fields (e.g. its LF Fabric ID) belong to the base row.
+                        pr.dropped[col] = "not a style column; not copied from the base row"
+                        continue
                     if col in material_exclude_cols and col in act.wip_fields:
                         # A fan-out INSERT still copies the base row's value
                         # forward; only the material contribution's OWN write to

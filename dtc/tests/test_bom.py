@@ -144,6 +144,20 @@ no_interesting = bom_table(COLUMN_HEADER, [
 check(parse_bom_segments(no_interesting).is_empty(),
       "blank/other MaterialCategory values (e.g. real Etam Lingerie rows) -> empty")
 
+print("\n[4b] parse_bom_segments() — every group except Packaging/Label fans out")
+def _row(cat, art):
+    return ["SHIRT", cat, "", "", "", "", "", "", "", "", "", "", "",
+            "", "", "", art, "", "", "", "", "", "", "", "", "", {"Colorway": []},
+            {"Color": []}, "", ""]
+groups = bom_table(COLUMN_HEADER, [_row("Main Fabric", "M1"), _row("Trim", "T1"),
+                                   _row("Fabric", "F1"), _row("Label", "L1"),
+                                   _row("PACKAGING", "P1"), _row("Artwork", "A1"),
+                                   _row("Stitch/Seam", "S1"), _row("", "B1"), _row("Main Fabric", "M2")])
+segs_g = parse_bom_segments(groups)
+check([d["bom_detail_name"] for d in segs_g.fabric_list] == ["Trim", "Fabric", "Artwork", "Stitch/Seam"],
+      "Trim/Fabric/Artwork/Stitch/Seam fan out in order; Label, PACKAGING (any case), blank and a 2nd Main Fabric do not")
+check(segs_g.main_fabric["bom_detail_name"] == "Main Fabric", "Main Fabric still the anchor")
+
 print("\n[5] parse_bom_segments() — multiple Type=='BOM' table entries are concatenated")
 extra_bom_data = [
     ["SLEEVELESS SHIRT", "Fabric", "LF-XX", "X", "WV-9999", "", "50% Wool",
@@ -640,6 +654,19 @@ check(_update_11t.wip_fields == {WIP_FIELD_FABRIC_GROUP: "Main Fabric",
       "all-or-nothing")
 
 # ---------------------------------------------------------------------------
+print("\n[11u] a fan-out segment repeated per colourway group is inserted ONCE per colour")
+_trim = {"fabric_group": "Trim", "mill_fabric_article": "VWG-345TE", "placement": None,
+         "content": None, "lf_material_id": "SF00074"}
+_main = {"fabric_group": "Main Fabric", "mill_fabric_article": "HUGP-03", "placement": None,
+         "content": "Cotton 55%", "lf_material_id": "LF-1"}
+_acts = plan_style_enrichment(
+    existing_rows=[{"row_id": "r1", "color": "Black", "fabric_group": "Main Fabric",
+                    "mill_fabric_article": "HUGP-03", "content": "Cotton 55%",
+                    "lf_material_id": "LF-1"}],
+    custom_fields=None, target_segments=[_main, _trim, dict(_trim)])
+check([a.wip_fields["Fabric Group"] for a in _acts if a.kind == "insert"] == ["Trim"],
+      "two identical Trim lines -> exactly one Trim insert")
+
 print("\n[12] build_insert_row_payload() — Style Image must never be copied forward")
 base_fields = {
     "rowId": "r1", "rowIndex": 3, "BP Style#": "KTB-00023",

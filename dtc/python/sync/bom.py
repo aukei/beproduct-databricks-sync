@@ -101,13 +101,11 @@ so no special-casing is required. If more than one `Type == "BOM"` table
 entry exists, ALL of their `Data` rows are concatenated (defensive; only one
 has ever been observed live, but nothing in the spec guarantees exactly one).
 
-Only two ``**MaterialCategory`` values matter here: "Main Fabric" and
-"Fabric" (UNCHANGED from the old `bom_detail_name` semantics — the OLD
-`bom_unified` structure's `bom_detail_name` field and this NEW structure's
-`**MaterialCategory` column play the exact same conceptual role: "Main
-Fabric" appears exactly once per style by construction; "Fabric" is zero or
-more). Other `**MaterialCategory` values (blank, or anything else) are
-ignored, matching the old "Stitch/Seam"/"Trim"/"Label" ignore-list behavior.
+"Main Fabric" appears exactly once per style by construction and anchors
+the style. Every other non-blank ``**MaterialCategory`` ("Fabric", "Trim",
+"Artwork", ...) is a fan-out segment, zero or more, EXCEPT "Packaging" and
+"Label" (owner spec 2026-11-20; until then only "Fabric" was written). Below,
+"Fabric segment" means any such fan-out segment. See `is_fanout_group()`.
 
 Enrichment logic -- UPSERT semantics (owner spec, revised 2026-09-03,
 mapping source revised again 2026-09-09; see AGENTS.md decisions log for the
@@ -198,13 +196,23 @@ from typing import Any, Dict, List, Optional, Tuple
 DUMMY_FABRIC_GROUP = "NO TPM BOM"
 DUMMY_FABRIC_ARTICLE = "NO TPM BOM"
 
-# The only two **MaterialCategory (formerly bom_detail_name) values Phase 10
-# cares about. There is exactly ONE "Main Fabric" per style by construction;
-# "Fabric" can be zero or more. Any other value (blank, or anything else) is
-# ignored -- matches the old "Stitch/Seam"/"Trim"/"Label" ignore-list
-# behavior under the prior bom_unified-based source.
+# "Main Fabric" is the anchor segment: exactly ONE per style by construction
+# (first wins), and without it nothing is enriched. Every OTHER non-blank
+# **MaterialCategory is a fan-out segment -- zero or more, one WIP row each.
+# BeProduct's Group choices: Main Fabric, Fabric, Trim, Artwork, Label,
+# Stitch/Seam, Packaging -- so Fabric, Trim, Artwork and Stitch/Seam fan out,
+# and the groups below do not (owner spec
+# 2026-11-20, "Post customer meeting update 1"; before that only "Fabric" was
+# written). Matched case-insensitively. A blank category is never written.
 SEGMENT_MAIN_FABRIC = "Main Fabric"
 SEGMENT_FABRIC = "Fabric"
+EXCLUDED_SEGMENT_GROUPS = frozenset({"packaging", "label"})
+
+
+def is_fanout_group(name: Any) -> bool:
+    """True for a BOM group written as its own WIP row besides Main Fabric."""
+    n = (name or "").strip() if isinstance(name, str) else ""
+    return bool(n) and n != SEGMENT_MAIN_FABRIC and n.casefold() not in EXCLUDED_SEGMENT_GROUPS
 
 # Raw DTC WIP field names (live-confirmed via GET /v1/views/{WIP_ITS_USE view id}
 # dynamicFields, 2026-09-02) — NOT the Delta col_* normalized names.
@@ -309,8 +317,9 @@ class ParsedBomSegments:
     """
     Result of `parse_bom_segments()`. `main_fabric` is at most ONE detail
     dict (first "Main Fabric" occurrence wins, though by construction there
-    should only ever be one); `fabric_list` holds ALL "Fabric" segments found
-    (zero or more), in document order.
+    should only ever be one); `fabric_list` holds ALL fan-out segments found
+    (every `is_fanout_group()` category -- "Fabric", "Trim", ...; zero or
+    more), in document order.
     """
     main_fabric: Optional[Dict[str, Any]] = None
     fabric_list: List[Dict[str, Any]] = field(default_factory=list)
@@ -415,7 +424,7 @@ def parse_bom_segments(custom_fields: Any) -> ParsedBomSegments:
         name = detail.get("bom_detail_name")
         if name == SEGMENT_MAIN_FABRIC and main_fabric is None:
             main_fabric = detail
-        elif name == SEGMENT_FABRIC:
+        elif is_fanout_group(name):
             fabric_list.append(detail)
     return ParsedBomSegments(main_fabric=main_fabric, fabric_list=fabric_list)
 
@@ -635,7 +644,7 @@ def parse_bom_variations(variations: List[Dict[str, Any]]) -> ParsedBomSegments:
         group = (fields.get("fabric_group") or "").strip()
         if group == SEGMENT_MAIN_FABRIC and parsed.main_fabric is None:
             parsed.main_fabric = fields
-        elif group == SEGMENT_FABRIC:
+        elif is_fanout_group(group):
             parsed.fabric_list.append(fields)
     return parsed
 
@@ -902,7 +911,16 @@ def plan_style_enrichment(
         # itself vanished) -- never revert existing Fabric Group/Placement/
         # Mill Fabric Article #/Content data.
         return []
-    main_target, fabric_targets = target_segments[0], target_segments[1:]
+    main_target = target_segments[0]
+    # One row per (Fabric Group, Mill Fabric Article #), first wins -- same rule
+    # as Main Fabric. A techpack repeats a line per colourway group (live:
+    # KTB-00073's Trim, 2026-11-20), and colourway affinity is ignored here, so
+    # without this every colour got the same Trim inserted twice.
+    fabric_targets, _seen = [], set()
+    for t in target_segments[1:]:
+        if segment_key(t) not in _seen:
+            _seen.add(segment_key(t))
+            fabric_targets.append(t)
 
     def row_key(row: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
         return segment_key({

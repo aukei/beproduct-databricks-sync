@@ -243,7 +243,9 @@ written or deleted. Keeping or removing it is a data-owner decision.
 
 Material rows come from the techpack BOM (PIPELINE.md → Stage 20b and Stage 40,
 "Gates — material fields"). The expected count per colour is
-**1 + the number of "Fabric" segments**.
+**1 + the number of distinct fan-out segments** (every BOM group except Main
+Fabric, Packaging and Label, e.g. Fabric and Trim). `fabric_count` below counts
+distinct ones: a line repeated per colourway group counts once.
 
 ```sql
 SELECT bp_style_number, style_season, main_fabric_count, fabric_count, parse_error

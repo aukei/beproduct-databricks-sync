@@ -213,7 +213,8 @@ check(op.match_key == ("S1", "Red") and op.row_index == 2,
       "upload targets the blank sibling row")
 check(op.image_url == "https://dtc-api.example.net/api/v1/images/existing.png",
       "copied the ALREADY-IMAGED sibling's own DTC-hosted URL, NOT bp_rows' front_image_url")
-check(op.source == "sibling_copy", "ImageUploadOp.source records the copy path")
+check(op.source == "sibling_copy" and op.source_row_id == "r1",
+      "ImageUploadOp records the copy path and the imaged row it copies from")
 
 check(op.fallback_url == "https://cdn/s1-red.jpg",
       "sibling copy carries the row's OWN BeProduct image as fallback (DTC 403s image GETs, 2026-09-28)")
@@ -221,24 +222,25 @@ plan_nofb = compute_image_uploads(dtc_rows, [bp_rows[0]])
 check(len(plan_nofb.uploads) == 1 and plan_nofb.uploads[0].fallback_url is None,
       "no BeProduct row for the colour -> sibling copy still planned, fallback None")
 
-print("  [15b] no sibling has an image yet -> falls back to full BeProduct extraction (unchanged path)")
+print("  [15b] no sibling has an image yet -> upload ONCE, then copy (changed 2026-11-20)")
 dtc_rows = [
     {"BP Style#": "S2", "Color / Wash": "Blue", "rowId": "r3", "rowIndex": 3},  # blank
     {"BP Style#": "S2", "Color / Wash": "Red", "rowId": "r4", "rowIndex": 4},   # blank
+    {"BP Style#": "S2", "Color / Wash": "Red", "rowId": "r4b"},  # blank Trim fan-out row
 ]
 bp_rows = [
     {"bp_style_number": "S2", "color": "Blue", "front_image_url": "https://cdn/s2-blue.jpg"},
     {"bp_style_number": "S2", "color": "Red", "front_image_url": "https://cdn/s2-red.jpg"},
 ]
 plan = compute_image_uploads(dtc_rows, bp_rows)
-check(len(plan.uploads) == 2, "both rows extracted independently (no sibling image existed yet)")
-by_key = {op.match_key: op for op in plan.uploads}
-check(by_key[("S2", "Blue")].image_url == "https://cdn/s2-blue.jpg"
-      and by_key[("S2", "Blue")].source == "beproduct_extract",
-      "Blue row: normal BeProduct extraction, its OWN url")
-check(by_key[("S2", "Red")].image_url == "https://cdn/s2-red.jpg"
-      and by_key[("S2", "Red")].source == "beproduct_extract",
-      "Red row: normal BeProduct extraction, its OWN url (not Blue's)")
+check([(op.row_id, op.source) for op in plan.uploads]
+      == [("r3", "beproduct_extract"), ("r4", "sibling_copy"), ("r4b", "sibling_copy")],
+      "first row uploaded from BeProduct, the rest copied, source op first")
+check(plan.uploads[0].image_url == "https://cdn/s2-blue.jpg", "the upload uses its OWN url")
+check(all(op.source_row_id == "r3" for op in plan.uploads[1:]),
+      "both copies (other colour + fan-out row) copy from the uploaded row")
+check(plan.uploads[1].fallback_url == "https://cdn/s2-red.jpg",
+      "a copy keeps its own BeProduct url as fallback if the copy fails")
 
 print("  [15c] different BP Style# with an image -> NOT treated as a sibling (style-scoped, not request-wide)")
 dtc_rows = [

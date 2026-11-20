@@ -93,7 +93,6 @@ import io
 import json
 import uuid
 from datetime import datetime, timezone
-from urllib.parse import urlparse
 
 import requests
 from PIL import Image
@@ -219,23 +218,10 @@ def log(rows, name, request_id, operation, key, status, reason="", detail="", pa
                  (json.dumps(payload) if payload is not None else None)))
 
 
-# Sibling-copy uploads (see phase3.compute_image_uploads) source from a DTC-
-# hosted image URL (returned by our own earlier upload to this SAME DTC
-# environment) rather than BeProduct's CDN. Live-discovered 2026-09-04:
-# unlike BeProduct CDN URLs (self-contained SAS token in the query string),
-# DTC's own image URLs require the SAME x-api-key auth as every other DTC
-# API call -- an anonymous GET returns 401 Unauthorized. Detected by
-# comparing the URL's host against the connector's own base_url host, so
-# the same x-api-key already used for this run's DTC calls is attached
-# ONLY for DTC-hosted URLs (BeProduct CDN downloads stay anonymous/unchanged).
-_dtc_host = urlparse(connector.client.base_url).netloc
-
-
 def download_image(url, timeout):
-    """Fetch image bytes from the BeProduct CDN or a DTC-hosted sibling-copy
-    URL (see module comment above); return (bytes, content_type)."""
-    headers = {"x-api-key": api_key} if urlparse(url).netloc == _dtc_host else None
-    resp = requests.get(url, timeout=timeout, headers=headers)
+    """Fetch image bytes from the BeProduct CDN; return (bytes, content_type).
+    DTC-hosted images are never downloaded: siblings copy server-side."""
+    resp = requests.get(url, timeout=timeout)
     resp.raise_for_status()
     ctype = (resp.headers.get("Content-Type") or "").split(";")[0].strip() or None
     return resp.content, ctype
@@ -291,7 +277,7 @@ def prepare_for_dtc(img_bytes, content_type, url):
 # COMMAND ----------
 
 log_rows = []
-totals = {"requests": 0, "uploads_ok": 0, "uploads_failed": 0, "converted": 0,
+totals = {"requests": 0, "uploads_ok": 0, "copies_ok": 0, "uploads_failed": 0, "converted": 0,
           "skipped": 0, "already_imaged_rows": 0, "download_failed": 0,
           "unsupported_type": 0}
 uploaded_count = 0  # respects max_uploads cap
@@ -330,41 +316,63 @@ for name, m in mapping.items():
         log(log_rows, name, request_id, "SKIP", sk.match_key, "skipped", sk.reason, sk.detail)
         totals["skipped"] += 1
 
-    # 4. Upload each planned image (download CDN -> POST multipart).
+    # 4. Apply in plan order: a copy's source row is always handled first.
+    failed_rows = set()  # rowIds that did not get an image this run
     for op in plan.uploads:
         if max_uploads and uploaded_count >= max_uploads:
             print(f"  ⏸  max_uploads={max_uploads} reached; stopping.")
             cap_reached = True
             break
 
-        # Download: the sibling's DTC-hosted copy, else the BeProduct CDN.
-        # A failed sibling copy falls back to this row's own BeProduct image:
-        # since 2026-09-28 DTC's gateway 403s every GET of /api/v1/images/*.
-        src_url = op.image_url
+        # Sibling copy: DTC copies the image pointer from a row that has it
+        # (or got it earlier in this loop). Nothing is downloaded or uploaded.
+        copy_err = None
+        if op.source == "sibling_copy":
+            if op.source_row_id in failed_rows:
+                copy_err = "source row got no image this run"
+            else:
+                try:
+                    if not dry_run:
+                        connector.copy_row_image(
+                            sheet_id, view_id, op.row_id, phase1.STYLE_IMAGE_COL,
+                            sheet_id, view_id, op.source_row_id, phase1.STYLE_IMAGE_COL)
+                    log(log_rows, name, request_id, "IMAGE_COPY", op.match_key, "ok",
+                        "dry_run" if dry_run else "",
+                        f"rowId={op.row_id} from rowId={op.source_row_id}",
+                        {"source": "sibling_copy", "sourceRowId": op.source_row_id,
+                         "rowId": op.row_id, "rowIndex": op.row_index})
+                    uploaded_count += 1
+                    totals["copies_ok"] += 1
+                    continue
+                except Exception as e:
+                    copy_err = str(e)[:200]
+            print(f"  ↪ copy to {op.row_id} not done ({copy_err[:80]}); uploading its BeProduct image")
+
+        # Upload from BeProduct: the planned source row, or a copy's fallback.
+        src_url = op.image_url if copy_err is None else op.fallback_url
+        src_tag = op.source if copy_err is None else "sibling_fallback_beproduct"
+        extra = {} if copy_err is None else {"copy_error": copy_err, "sourceRowId": op.source_row_id}
+        if not src_url:
+            log(log_rows, name, request_id, "IMAGE_UPLOAD", op.match_key, "error",
+                "copy_failed", copy_err, {"rowId": op.row_id, **extra})
+            failed_rows.add(op.row_id)
+            totals["uploads_failed"] += 1
+            continue
         try:
             raw_bytes, ctype = download_image(src_url, http_timeout)
         except Exception as e:
-            if not op.fallback_url:
-                log(log_rows, name, request_id, "IMAGE_UPLOAD", op.match_key, "error",
-                    "download_failed", str(e)[:300], {"url": src_url})
-                totals["download_failed"] += 1
-                continue
-            print(f"  ↪ sibling copy failed ({str(e)[:80]}); using BeProduct image")
-            src_url = op.fallback_url
-            try:
-                raw_bytes, ctype = download_image(src_url, http_timeout)
-            except Exception as e2:
-                log(log_rows, name, request_id, "IMAGE_UPLOAD", op.match_key, "error",
-                    "download_failed", str(e2)[:300],
-                    {"url": src_url, "sibling_url": op.image_url, "sibling_error": str(e)[:200]})
-                totals["download_failed"] += 1
-                continue
+            log(log_rows, name, request_id, "IMAGE_UPLOAD", op.match_key, "error",
+                "download_failed", str(e)[:300], {"url": src_url, **extra})
+            failed_rows.add(op.row_id)
+            totals["download_failed"] += 1
+            continue
 
         # Classify + transcode (webp/etc -> png); skip vector/unknown types.
         img_bytes, out_ctype, fname, note = prepare_for_dtc(raw_bytes, ctype, src_url)
         if img_bytes is None:
             log(log_rows, name, request_id, "IMAGE_UPLOAD", op.match_key, "skipped",
-                "unsupported_type", note, {"url": src_url, "content_type": ctype})
+                "unsupported_type", note, {"url": src_url, "content_type": ctype, **extra})
+            failed_rows.add(op.row_id)
             totals["unsupported_type"] += 1
             continue
         converted = note.startswith(("transcode", "rasterized"))
@@ -389,15 +397,16 @@ for name, m in mapping.items():
                 f"rowId={op.row_id} rowIndex={op.row_index} "
                 f"bytes={len(img_bytes)} type={out_ctype}"
                 + (f" ({note})" if converted else ""),
-                {"url": src_url, "source": op.source if src_url == op.image_url else "sibling_fallback_beproduct", "rowId": op.row_id,
-                 "rowIndex": op.row_index})
+                {"url": src_url, "source": src_tag, "rowId": op.row_id,
+                 "rowIndex": op.row_index, **extra})
             uploaded_count += 1
             totals["uploads_ok"] += 1
         except Exception as e:
             log(log_rows, name, request_id, "IMAGE_UPLOAD", op.match_key, "error",
                 "upload_failed", str(e)[:300],
-                {"url": src_url, "source": op.source if src_url == op.image_url else "sibling_fallback_beproduct", "rowId": op.row_id,
-                 "rowIndex": op.row_index})
+                {"url": src_url, "source": src_tag, "rowId": op.row_id,
+                 "rowIndex": op.row_index, **extra})
+            failed_rows.add(op.row_id)
             totals["uploads_failed"] += 1
 
 connector.close()
@@ -422,6 +431,6 @@ print(f"\nReview details:\n  SELECT * FROM {sync_log_full} WHERE run_id = '{run_
 print("\n✅ Image sync complete")
 
 dbutils.notebook.exit(
-    f"OK uploads_ok={totals['uploads_ok']} failed={totals['uploads_failed'] + totals['download_failed']} "
+    f"OK uploads_ok={totals['uploads_ok']} copies_ok={totals['copies_ok']} failed={totals['uploads_failed'] + totals['download_failed']} "
     f"skipped={totals['skipped']}"
 )

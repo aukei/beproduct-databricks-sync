@@ -258,11 +258,12 @@ class ImageUploadOp:
     # Retained for logging/traceability ONLY -- never used to address the cell.
     row_index: Optional[int] = None
     source: str = "beproduct_extract"  # "beproduct_extract" | "sibling_copy" -- see compute_image_uploads
-    # sibling_copy only: this row's OWN BeProduct front_image_url, tried when
-    # the DTC-hosted sibling URL cannot be downloaded. Since 2026-09-28 DTC's
-    # Application Gateway returns 403 for EVERY GET of /api/v1/images/*, with
-    # or without x-api-key (34/34 live), so without this the sibling path
-    # fails forever and the row never gets an image.
+    # sibling_copy only: the rowId whose Style Image is copied server-side
+    # (DTCConnector.copy_row_image, no download, no re-upload). It already has
+    # the image, or gets it from an EARLIER op in this same plan.
+    source_row_id: Optional[str] = None
+    # sibling_copy only: this row's OWN BeProduct front_image_url, uploaded
+    # when the copy fails (e.g. the source row's own upload failed this run).
     fallback_url: Optional[str] = None
 
 
@@ -313,20 +314,15 @@ def compute_image_uploads(
         a URL, or that have no rowIndex, are recorded as skips for
         visibility.
 
-    Sibling-copy (added 2026-09-03, owner spec): a style's front image is a
-    HEADER-level BeProduct attribute (one per style, not per colorway), so
-    every colorway row of the same BP Style# within one request (fixed
-    Brand+Season) is expected to carry the SAME image. Before falling back
-    to a full BeProduct CDN download+transcode+upload for a blank row, check
-    whether ANY other row for the same BP Style# in this request already has
-    a real Style Image — if so, reuse that row's OWN already-uploaded
-    DTC-hosted image URL as the upload source instead. This avoids: a
-    redundant BeProduct CDN download (some of those URLs are known to 403 —
-    see AGENTS.md), redundant transcoding, and any chance of the two
-    colorways' images silently diverging. The upload MECHANICS are
-    unchanged (still download-the-URL + classify/transcode + multipart
-    POST) — only WHICH url is downloaded differs, so no notebook-side
-    changes were needed; see `ImageUploadOp.source`.
+    Sibling-copy (2026-09-03; server-side copy since 2026-11-20): a style's
+    front image is a HEADER-level BeProduct attribute (one per style, not per
+    colorway), so every row of the same BP Style# in one request -- each
+    colour, and each BOM fan-out row -- carries the SAME image. So a style's
+    image is uploaded from BeProduct ONCE: to a row that already has it (no
+    upload at all), else to the style's first blank row. Every other blank row
+    of the style gets `sibling_copy` from that row via DTC's copy-image API,
+    which copies the pointer and re-uploads nothing. Ops are emitted in order,
+    so an in-plan source always precedes its copies.
     """
     lf_col, color_col = MATCH_KEY_COLS
 
@@ -339,18 +335,18 @@ def compute_image_uploads(
             continue
         bp_index.setdefault(key, bp)
 
-    # Index EXISTING (already-imaged) DTC rows by BP Style# alone (style-level,
-    # not colorway-level) so a blank sibling can copy from any already-imaged
-    # colorway of the same style in this request. First real image wins.
-    sibling_image_by_style: Dict[str, str] = {}
+    # Copy source per BP Style# alone (style-level, not colorway-level):
+    # (rowId, image url). Seeded from already-imaged rows (first wins); a style
+    # with none gets its first planned BeProduct upload as the source below.
+    sibling_image_by_style: Dict[str, Tuple[str, str]] = {}
     for r in dtc_rows:
         style_no = norm(r.get(lf_col))
-        if style_no is None or style_no in sibling_image_by_style:
+        if style_no is None or style_no in sibling_image_by_style or not r.get("rowId"):
             continue
         if is_image_populated(r):
             existing_url = norm(r.get(STYLE_IMAGE_COL))
             if is_valid_image_url(existing_url):
-                sibling_image_by_style[style_no] = existing_url
+                sibling_image_by_style[style_no] = (r["rowId"], existing_url)
 
     plan = ImagePlan()
 
@@ -389,14 +385,15 @@ def compute_image_uploads(
         bp_url = norm(bp.get("front_image_url")) if bp is not None else None
 
         style_no = norm(r.get(lf_col))
-        sibling_url = sibling_image_by_style.get(style_no) if style_no else None
-        if sibling_url is not None:
+        sibling = sibling_image_by_style.get(style_no) if style_no else None
+        if sibling is not None:
             plan.uploads.append(ImageUploadOp(
                 match_key=key,
                 row_id=row_id,
-                image_url=sibling_url,
+                image_url=sibling[1],
                 row_index=(int(row_index) if row_index is not None else None),
                 source="sibling_copy",
+                source_row_id=sibling[0],
                 fallback_url=bp_url if is_valid_image_url(bp_url) else None,
             ))
             continue
@@ -417,5 +414,7 @@ def compute_image_uploads(
             row_index=(int(row_index) if row_index is not None else None),
             source="beproduct_extract",
         ))
+        if style_no:
+            sibling_image_by_style[style_no] = (row_id, norm(url))
 
     return plan

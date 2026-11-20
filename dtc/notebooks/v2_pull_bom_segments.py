@@ -251,9 +251,11 @@ for r in matched:
     try:
         parsed = bom.parse_bom_segments(cf)
         # main_fabric is an Optional[dict] (at most one by construction);
-        # fabric_list holds every "Fabric" segment in document order.
+        # fabric_count = DISTINCT fan-out segments (a line repeated per
+        # colourway group is one DTC row), as v_data_gaps expects.
         main_count = 1 if parsed.main_fabric else 0
-        fabric_count = len(parsed.fabric_list)
+        fabric_count = len({bom.segment_key(bom.extract_enrichment_fields(d))
+                            for d in parsed.fabric_list})
     except Exception as e:  # noqa: BLE001
         parse_error = f"{type(e).__name__}: {e}"
         n_unparseable += 1
