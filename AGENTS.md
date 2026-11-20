@@ -401,11 +401,16 @@ this stays true by construction; verify it stays true after any change).
   `DTCConnector.copy_row_image` from it: a server-side pointer copy, logged
   `IMAGE_COPY`. Replaces the sibling-URL download that DTC's gateway 403s from
   Databricks. A failed copy, or a source whose own upload failed this run,
-  falls back to the row's own BeProduct upload. Test `test_phase3 [15b]`. A
-  copy WITHIN one sheet is not live-verified yet; only master -> Snaps was.
+  falls back to the row's own BeProduct upload. Test `test_phase3 [15b]`.
 - Scratch-root dry run on live data: **17 Trim inserts**, 0 updates, 0
   violations, status OK, ONE write window / 1 call; columns = style fields +
-  the 5 material columns (Trim `Content`/`Placement` blank). Not yet deployed.
+  the 5 material columns (Trim `Content`/`Placement` blank).
+- **DEPLOYED + LIVE-VERIFIED 2026-11-20** (`f7f2d29`, v2 root). Run
+  1022639763966847 SUCCESS on all 16 tasks: `wip_push` 17 inserts, 0 updates,
+  64 no-ops, 1 call, status OK; `phase3_images` `uploads_ok=0 copies_ok=17`.
+  Read back `KTB FW28 Collaborations`: 17 Trim rows, none blank, every one
+  holding a pointer already on a sibling row of its style, so a copy WITHIN
+  one sheet works too.
 
 **Product Status ledger -> "<request> Snaps" (2026-11-11, owner spec):**
 - Before `wip_push` changes a row's non-blank `Product Status`, it appends the
