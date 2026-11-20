@@ -408,7 +408,14 @@ this stays true by construction; verify it stays true after any change).
   backup path has not yet fired on live data.
 - **DEPLOYED 2026-11-19** (`b6e7fc3`, v2 root). Run 566289372571541 SUCCESS on
   all 16 tasks, `wip_push` 64 no-ops, `ledger_rows=0` (no status change
-  pending). The ledger still awaits its first real Product Status change.
+  pending).
+- **FIRST LIVE FIRING 2026-11-20** (owner set `KTB-00075` Proto -> Pre-Line in
+  BeProduct). Run `wip_push`: `ledger_rows=2`, `columns_changed =
+  {Product Status: 2}`, 1 PATCH call. Snaps got 2 rows (Main Fabric + Fabric),
+  `Log Date` = run time; diffed against the master rows afterwards, the ONLY
+  difference is `Product Status` (Proto vs Pre-Line), and `Style Image` holds
+  the identical pointer. Note: an unsaved BeProduct edit looks exactly like
+  "the ledger didn't fire" -- check the live style first.
 
 **DTC `Color / Wash` = "<COLOR NAME> <COLOR NUMBER>" (2026-11-10, owner spec):**
 - e.g. `Twill 16-1108 TCX`. `phase1.color_wash()`; name alone only if the
