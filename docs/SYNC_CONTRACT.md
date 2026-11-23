@@ -41,6 +41,7 @@ file owns direction, keys and the allow-list.
 | Duty value columns | `DUTY_VALUE_FIELDS` | `dtc/python/sync/duty.py` |
 | Staging denormalization | `FIELD_MAPPING` + staging `select` | `beproduct/p1p7_beproduct_to_dtc_transform.py` |
 | BeProduct color palette → DTC Color Palette (Stage 60) | `OWNED_COLS` + `flatten_palettes()` | `dtc/python/sync/color_palette.py` |
+| BeProduct style BOM → DTC KTB FABRIC DEV lines (Stage 65) | `COL_ARTICLE` / `COL_COLOR` + `colorway_label()` | `dtc/python/sync/fabric_dev.py` |
 
 Then update the tests: `test_phase1.py`, `test_phase2.py`, `test_phase3.py`,
 `test_samples.py`, `test_bom.py`, `test_duty.py`, and `test_wip_plan.py` *(NEW)*.
@@ -285,6 +286,21 @@ One DTC row per palette × color × brand.
 
 Key: `(Palette Number, Color Number, Season Brand)`. BeProduct `sold_to_customer`
 has no DTC column, so it is not synced.
+
+### BeProduct style BOM → DTC "KTB FABRIC" DEV lines (Stage 65, 2026-11-23)
+
+Document `KTB FABRIC`, request `"<Customer> <SeasonCode> <Brand> - DEV"` (the
+style's WIP request name + ` - DEV`), view `WIP_ITS_USE`. DTC users own the
+fabric lines; this stage only gives each one a line per colorway.
+
+| DTC column | Role | BeProduct source |
+|---|---|---|
+| `Mill Fabric Article #` | match key, never written | style BOM row (PageBomVariation, Group `Main Fabric` or `Fabric` only) `MILL FABRIC CODE/SUPPLIER ITEM CODE` |
+| `Color / Wash` | written | colorway `"<colorNumber>-<COLORNAME upper>"`, e.g. `17-1444 TCX-GINGER`. Hidden colorways included. Which colorways: the BOM variation's own (`selectedVariationColorways`), or all of the style's when it has `syncColorways` |
+
+A copied line takes every column of the article's first line except
+`rowId`/`rowIndex`/`ITS_Key`/`sysSource`, formula/image columns and lookups.
+A line's colour is never cleared and a line is never deleted.
 
 ---
 

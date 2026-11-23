@@ -407,6 +407,10 @@ JOB_PARAMS = {
     # WIP "<customer> <season> <brand>" convention); the run refuses unless
     # exactly one active request matches.
     "run_color_palette": "true",
+    # Stage 65 (2026-11-23): BeProduct style BOM -> DTC "KTB FABRIC"
+    # "<request> - DEV" lines, one per fabric x colorway.
+    "run_fabric_dev": "true",
+    "fabric_document": "KTB FABRIC",
     "color_folder": "KTB",                      # BeProduct COLOR folder
     "color_document": "KTB Color Palette",
     "color_request": "Color Palette",
@@ -1035,6 +1039,18 @@ def build_v2_tasks():
         "color_request": P("color_request"),
         "dry_run": DRY, "run_color_palette": P("run_color_palette"),
     }))
+
+    # ── Stage 65: style BOM -> DTC "KTB FABRIC" "<request> - DEV" lines ────
+    # Reads the BeProduct style BOM itself (NOT the techpack bom_segments) and
+    # ktb_styles for the colorways, hidden ones included. Writes only the
+    # FABRIC document's DEV requests, so its write windows never contend with
+    # wip_push's. Gaps -> fabric_dev_gaps (v_data_gaps). sync/fabric_dev.py.
+    tasks.append(v2_task("fabric_dev", f"{NB_DTC_V2}/v2_fabric_dev_sync", {
+        "catalog": CAT, "schema": SCH, "customer": CUST, "folder_name": P("folder_name"),
+        "dtc_environment": ENV, "dtc_workspace": WS,
+        "fabric_document": P("fabric_document"),
+        "dry_run": DRY, "run_fabric_dev": P("run_fabric_dev"),
+    }, depends=[dep("bp_style_sync")]))
 
     # ── Stage 50: DTC -> BeProduct (unchanged; writes BeProduct, never DTC) ──
     tasks.append(v2_task("phase2_push", f"{NB_DTC_V2}/p2_push_dtc_to_beproduct", {

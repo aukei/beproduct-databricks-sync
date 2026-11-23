@@ -127,10 +127,11 @@ flowchart TD
     pull_bom & pull_master_dtc --> push_customer_code(["push_customer_code (55) — BeProduct material"])
 
     color_palette[["color_palette (60) — DTC Color Palette"]]
+    bp_style_sync --> fabric_dev[["fabric_dev (65) — DTC KTB FABRIC DEV"]]
 
     classDef dtc fill:#fde2e1,stroke:#c0392b,color:#000
     classDef bp fill:#e1ecfd,stroke:#2c5aa0,color:#000
-    class wip_push,phase3_images,color_palette dtc
+    class wip_push,phase3_images,color_palette,fabric_dev dtc
     class p0_push,phase2_push,push_customer_code bp
 ```
 
@@ -174,6 +175,7 @@ flowchart LR
 | 50 | `phase2_push` | `p2_push_dtc_to_beproduct` | **BeProduct** style | `run_phase2` | `transform`, `pull_master_dtc` |
 | 55 | `push_customer_code` | `v2_push_customer_code` | **BeProduct** material master | `run_customer_code_push` (on since 2026-09-30) | `pull_bom`, `pull_master_dtc` |
 | 60 | `color_palette` | `v2_color_palette_sync` | **DTC** "KTB Color Palette" (own request) | `run_color_palette` | — (root) |
+| 65 | `fabric_dev` | `v2_fabric_dev_sync` | **DTC** "KTB FABRIC" `- DEV` requests; Delta `fabric_dev_gaps` | `run_fabric_dev` | `bp_style_sync` |
 
 Every task also takes `dry_run` (job default `false`); a stage whose flag is
 `false` exits SUCCESS with `SKIPPED_run_<flag>_false`, so a disabled stage looks
@@ -946,6 +948,52 @@ unticked. That is intended.
 
 Outputs: Delta `beproduct_color_palette` (the flattened source, overwritten each
 run) and `beproduct_to_dtc_sync_log` rows with `stage = 'color_palette'`.
+
+### Stage 65 — `fabric_dev` → DTC "KTB FABRIC" DEV lines  (2026-11-23)
+
+Gives every fabric line in a KTB FABRIC `- DEV` request one line per colorway
+that uses it. Pure logic: `sync/fabric_dev.py` (tests `test_fabric_dev.py`);
+columns: SYNC_CONTRACT.md → "BeProduct style BOM → DTC KTB FABRIC DEV lines".
+
+- **Source:** the BeProduct **style BOM** (PageBomVariation, fetched per style
+  by this task), NOT the techpack `bom_segments` that `wip_push` uses. Group
+  `Main Fabric` and `Fabric` rows only. Colorways from `ktb_styles.data_json`,
+  so **hidden colorways are included** (`colorways_json` drops them).
+- **Target:** per style, `"<customer> <DTCCODE><YY> <brand> - DEV"` in document
+  `fabric_document` (`KTB FABRIC`), view `WIP_ITS_USE`. All styles of a request
+  are merged: a fabric shared by several styles gets the union of their colours.
+- **Write window:** per DEV request, PATCH then POST, back to back. Never the
+  WIP requests, so it never contends with `wip_push`.
+
+Gates, in order:
+
+1. `run_fabric_dev` false → exit `SKIPPED`.
+2. A style with no season mapping or brand has no request name; listed in
+   `styles_without_request_name`, nothing else.
+3. A style whose BOM fetch fails is listed in `fetch_errors` and contributes
+   nothing (lines are only ever added, so nothing is reverted).
+4. A BOM fabric row with a blank `MILL FABRIC CODE/SUPPLIER ITEM CODE` → gap
+   `BOM_FABRIC_NO_ARTICLE`.
+5. No active request with the exact DEV name → gap `FABRIC_REQUEST_NOT_FOUND`
+   (per style × article); more than one → `FABRIC_REQUEST_AMBIGUOUS`. Never
+   created.
+6. The view must contain `Mill Fabric Article #` and `Color / Wash`, else that
+   request errors.
+7. Per article: no line with that `Mill Fabric Article #` → gap
+   `FABRIC_LINE_NOT_FOUND`. Never created.
+8. Per needed colour label: already on a line (case-insensitive) → nothing. A
+   line holding the same colour in an older notation (the bare name, or the
+   WIP form `"<name> <number>"`) → renamed in place. Else the article's first
+   blank-colour line is filled in place. Else the article's first line is
+   copied with the new label (`append_rows`).
+9. Lines whose colour no colorway needs are left alone; nothing is deleted or
+   cleared.
+10. Nothing to do → **no write**. After a write, re-read and re-plan; anything
+    still pending → `VERIFY_MISMATCH`.
+
+Outputs: Delta `fabric_dev_gaps` (overwritten every run, read by
+`v_data_gaps`, area "Fabric DEV") and `beproduct_to_dtc_sync_log` rows with
+`stage = 'fabric_dev'`.
 
 ---
 

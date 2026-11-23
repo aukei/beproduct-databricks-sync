@@ -1010,3 +1010,12 @@ Response code: 201
 - BP to DTC WIP, currently only write "Main Fabric" and "Fabric". New request write all groups except ['Packaging','Label']
 according to beproduct setup, possibile values of "Group" are ["Main Fabric",'Fabric","Trim","Artwork","Label","Stitch/Seam","Packaging"].
 - when adding rows to DTC WIP chart, optimize current "Image pulling" action to use the new copy image API for fan out rows, so to reduce uploading same image in every rows.
+
+- a separate step to enrich DTC "KTB FABRIC" document Requests
+    1. read from BP Style BOM, not from TPM BOM. Taking only "Main Fabric" and "Fabric" 2 groups
+    2. Read corresponding KTB FABRIC request: "<Customer> <SeasonCode> <Brand> - DEV", e.g. KTB FW28 Collaborations - DEV (https://dtc.lfuat.net/operation/request/6aceeb971cbacf7ff11164ee), KTB FW28 Blue Bell - DEV (https://dtc.lfuat.net/operation/request/6adf0e7483595492db9fe95a)
+    3. For each BP (Main) Fabric, multiplex corresponding DTC line (i.e. matching Mill Fabric Article #) with colorways: one line for each color, including those 'hide color' box checked. Write color to "Color / Wash" DTC field
+        3.1 fill in colorway name, like '17-1444 TCX-GINGER'
+    4. Flag error in dashboard If
+        4.1 fabric line does not exist on DTC
+        4.2 Fabric Request does not exist in DTC

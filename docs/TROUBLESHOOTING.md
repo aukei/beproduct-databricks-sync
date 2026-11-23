@@ -528,6 +528,33 @@ SELECT * FROM lft.beproduct.beproduct_color_palette;
 
 ---
 
+## 8. A KTB FABRIC DEV line has no colour line
+
+Stage 65 `fabric_dev` (PIPELINE.md → Stage 65; columns in SYNC_CONTRACT.md).
+Each main run (≤ 1 h) gives every fabric line in `"<request> - DEV"` one line
+per colorway, labelled `17-1444 TCX-GINGER`. The data-gaps dashboard shows its
+gaps under area "Fabric DEV".
+
+```sql
+SELECT * FROM lft.beproduct.fabric_dev_gaps;            -- last run's gaps
+SELECT log_time, operation, status, reason, dtc_request_name, match_key, color, payload
+FROM lft.beproduct.beproduct_to_dtc_sync_log
+WHERE stage = 'fabric_dev' ORDER BY log_time DESC LIMIT 100;
+```
+
+| Symptom / gap | Cause → fix |
+|---|---|
+| `FABRIC_REQUEST_NOT_FOUND` | No active KTB FABRIC request named exactly `<request> - DEV`. A DTC user creates it (the pipeline never does) |
+| `FABRIC_REQUEST_AMBIGUOUS` | Two active requests share the name. Deactivate one |
+| `FABRIC_LINE_NOT_FOUND` | The DEV request has no line whose `Mill Fabric Article #` equals the BOM row's `MILL FABRIC CODE/SUPPLIER ITEM CODE`. Add the line in DTC, or correct the code in the BeProduct BOM. Matching ignores extra spaces but not case |
+| `BOM_FABRIC_NO_ARTICLE` | A Main Fabric / Fabric BOM row has no mill fabric code. Fill it in BeProduct |
+| A colour is missing, no gap | Is the colorway in that BOM variation? A variation without "sync colorways" only covers its selected colorways. Is the style's season mapped (`styles_without_request_name` in the exit JSON)? |
+| A line with an old-style colour (`Ginger` or `Ginger 17-1444 TCX`) was renamed | By design: the same colour in an older notation is renamed in place rather than duplicated |
+| Extra colour lines remain after a colorway was removed | By design: lines are never deleted. Remove them in DTC |
+| Exit `NO_BOM_PAGE` | No style had a "BOMVariations" app. Set the `bom_page_id` widget |
+
+---
+
 ## Tools
 
 | Need | Tool |

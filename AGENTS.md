@@ -220,6 +220,7 @@ fieldId, JSONPath, sync direction. Always update it first, then the code constan
 | BeProduct → DTC transform (denormalize) | `FIELD_MAPPING` + staging `select` | `beproduct/p1p7_beproduct_to_dtc_transform.py` |
 | DTC WIP costing/duty push | `duty.WIP_HTS_COL` / `duty.WIP_DUTY_COL` / `duty.WIP_TARIFF_COL` | `dtc/python/sync/duty.py` |
 | BeProduct color palette → DTC Color Palette (Phase 11) | `color_palette.OWNED_COLS` + `flatten_palettes()` | `dtc/python/sync/color_palette.py` |
+| BeProduct style BOM → DTC KTB FABRIC `- DEV` colour lines (Stage 65) | `fabric_dev.COL_ARTICLE` / `COL_COLOR` + `colorway_label()` | `dtc/python/sync/fabric_dev.py` |
 | WIP ⇄ LinePlan join key (read by display name, both sheets) | `lineplan.LINEPLAN_REF_COLS` (+ `names` CTE in `dashboards/data_gaps/v_data_gaps.sql`) | `dtc/python/sync/lineplan.py` |
 
 Then update unit tests: `dtc/tests/test_phase1.py`, `dtc/tests/test_phase2.py`,
@@ -370,6 +371,87 @@ this stays true by construction; verify it stays true after any change).
    `"Factory 3 - Tariff"` (no `rate` suffix; ` - ` for numbered slots).
 
 ## Verified discoveries log (append-dated; do not delete)
+
+**Stage 65 `fabric_dev` BUILT -- style BOM -> KTB FABRIC "<request> - DEV"
+colour lines (2026-11-23, owner spec; DEPLOYED + LIVE-VERIFIED same day).** PIPELINE.md Stage 65, SYNC_CONTRACT.md, TROUBLESHOOTING section 8.
+- Live DTC read: `KTB FABRIC` has 4689 active requests but only 13 distinct
+  names; the DEV ones are `KTB FW28 Collaborations - DEV` (`6aceeb97…`),
+  `KTB FW28 Blue Bell - DEV` (`6adf0e74…`), `KTB SS27 Blue Bell - DEV`
+  (`6adf1324…`), `KTB SS28 Collaborations - DEV` (`6acdaa79…`). View
+  `WIP_ITS_USE` (`6a0ac943…`, 130 fields, `allowInsertRow=Y`, 0 mandatory) has
+  both `Mill Fabric Article #` and `Color / Wash` (plain `string`). Lookups:
+  `SBU`; formulas: 2. Every line carries `flowAdd = YES`; library-made lines
+  carry `sysSource = ML` (not copied into a multiplexed line).
+- Colour label = `"<colorNumber>-<COLORNAME upper>"` (`17-1444 TCX-GINGER`).
+  BeProduct holds `colorName` as typed (`Ginger`), so the upper-casing is ours.
+  Ad hoc colours give e.g. `CKAU-CKAU`, `Earthy Hours-EARTHY HOURS`.
+- **Lines already multiplexed by hand in two older notations**: FW28
+  Collaborations DEV used the bare name (`Flushing Pink`), SS27 Blue Bell DEV
+  the WIP form (`Honeyed Apricot 14-1430 TCX`). Both are renamed in place, not
+  duplicated.
+- BOM source = PageBomVariation, fetched by the task itself; the
+  `MILL FABRIC CODE/SUPPLIER ITEM CODE` of a material-LINKED row is copied from
+  the material, and for CANVAS that is `100% COTTON CANVAS 12OZ` (the material
+  name, not a code), hence a `FABRIC_LINE_NOT_FOUND` gap for KTB-00070.
+- Serverless dry run (run 295755094123499, TEST KTB): 138 styles, 0 fetch
+  errors, 7 styles with fabric rows; FW28 Collaborations DEV 2 updates + 11
+  copies, SS27 Blue Bell DEV 8 updates + 10 copies, 0 writes; gaps
+  `FABRIC_LINE_NOT_FOUND` x3 (KTB-00070 x2, KTB-00074 `WV-0067`). Identical to
+  a local run of the same planner. `fabric_dev_gaps` now exists, so the edited
+  `v_data_gaps` compiles (checked read-only).
+- **DEPLOYED 2026-11-23**: v2 job reset (live-vs-repo diff showed only the new
+  task + `run_fabric_dev`/`fabric_document`), `v_data_gaps` redeployed. Run
+  1110852486448060 SUCCESS on all tasks (333 s; `fabric_dev` 53 s): FW28
+  Collaborations DEV 2 updates + 11 inserts, SS27 Blue Bell DEV 8 updates + 10
+  inserts, 2 calls each, 0 failed; the post-write re-read planned 0 changes.
+  Read back SS27: 21 lines, every needed colour present once, copies carry the
+  source line's mill/content/LF Fabric ID and `flowAdd = YES`, `sysSource` blank.
+
+**BOMVariation re-triage after BeProduct's fix: a material-linked row CAN
+now be added through the API (2026-11-23, live writes on sacrificial TEST KTB
+`KTB-00070` `31772865-…`, app "HK BOM" `2e00eced-…`). Resolves the 2026-11-04
+BLOCKER below.**
+- Rerun from a clean slate: the 11-04 variation and the Ginger/CKAU colorways
+  were deleted first (`DELETE .../Variation/{v}` -> 200 `"Variation deleted"`;
+  `style.attributes_colorway_delete`), then everything was recreated.
+- **Linked row: send `materialId` (+ optional `group`) and NOTHING the material
+  owns.** BeProduct now copies `material_category`, `material_type`,
+  `vendor_material_reference_no`, `mill_vendor`, `header_number`/`header_name`
+  from the material, like the UI. Works on CreateVariation AND Update, for
+  CANVAS (Artwork folder) under "Main Fabric" and for the woven control
+  `LF-BD26-000002--SH` (`1f1325a4-…`). Sending any material-owned field is a
+  400 "is not editable on a material-linked row", EVEN WITH THE MATERIAL'S OWN
+  VALUE. No `group` -> the material's folder group (Artwork for CANVAS).
+- **LF Material ID -> `materialId`**: `material.attributes_list(filters=
+  [{"field":"header_number","operator":"Eq","value":"CANVAS"}])`, no folder
+  needed, 1 hit. The filter field is the fieldId `header_number`;
+  `HeaderNumber` returns ZERO rows with no error (same trap as Color palettes).
+- Now 400, all with clear messages: a bogus `materialId` or a style id as one
+  ("One or more materials were not found"); changing the material of an
+  existing row ("materialId cannot change the material of existing row ...;
+  delete the row and add the material as a new row" -- the 11-04 two-step
+  silent no-op is GONE); a made-up or non-partner `mill_vendor` GUID; a bad
+  `material_category` / `group` dropdown value; a colorway not in the
+  variation, a bogus colorwayId ("Colorway not found"); bad hex.
+- **Still a trap**: an ad hoc row with `header_number` = "CANVAS" is accepted
+  and reads `materialNumber: "CANVAS"` with `materialId: null`, `isAdHoc:
+  true`. Treat `materialId`, never `materialNumber`, as "linked".
+- **Still unvalidated**: a style colorway's `colorSourceId` (a made-up UUID was
+  stored as-is; probe colorway deleted). Look the id up in
+  `Color/CompanyColors` (filter `SuggestedHex` = colour number) first.
+- Caller-chosen `rowId` is KEPT on CreateVariation and on Update (11-04 only
+  proved Update).
+- BOM `colors[].colorSourceId` is null on every row, INCLUDING the
+  library-linked Ginger colour; the link lives only on the style colorway.
+  `materialColorwayId` null (CANVAS has no material colorways). Linked rows
+  get colours only via `colorUpdate`, same as ad hoc.
+- Left on KTB-00070 for UI review: colorways Ginger `4ab767c0-…` (linked,
+  `colorSourceId` `2d41509d-…`) and CKAU `657bba9b-…` (ad hoc, `7d3380`);
+  variation `ABCD-20161104` `44e2cf2a-…` (`syncColorways: false`, both
+  colorways) with linked CANVAS / Main Fabric (row `c9623940-…`) and ad hoc
+  "CANVAS Kei" / Fabric (row `11111111-2026-1123-0000-00000000c4e1`), both
+  coloured Ginger + CKAU. Probe variation `ZZ-PROBE-20261123` deleted.
+  `abcde` untouched.
 
 **BOM fan-out: every group except Packaging / Label (2026-11-20, owner spec,
 "Post customer meeting update 1"):**
@@ -555,6 +637,7 @@ Miro <-> BeProduct BOM sync via Logic Apps.**
   for a woven control (`LF-BD26-000002--SH`), on Update and on
   CreateVariation. The server does not fill the material's own values before
   checking required fields. Raise with BeProduct.
+  **RESOLVED 2026-11-23** by a BeProduct fix -- see the 2026-11-23 entry.
   **UI comparison (same day):** the owner added CANVAS in the UI to the
   default variation `abcde` (row `4d86dc58-…`). That row is
   `materialId` = CANVAS, `isAdHoc: false`, with group `Artwork` (the UI picks
@@ -586,7 +669,7 @@ Miro <-> BeProduct BOM sync via Logic Apps.**
   a bogus `materialId` ("One or more materials were not found"); an unknown
   group name. The BOM variation API validates references, unlike style
   colorways, which accept made-up ids.
-- Left in place on KTB-00070 for UI review: colorways Ginger + CKAU; variation
+- (Superseded 2026-11-23: these were deleted and recreated.) Left in place on KTB-00070 for UI review: colorways Ginger + CKAU; variation
   `ABCD-20161104` with one ad hoc row "CANVAS Kei" (`9dd8e5e0-…`, Fabric,
   colors Ginger/CKAU). The default variation `abcde` was not touched.
 - Not tested, because no linked row could be created: `materialColorwayId` on a
@@ -4249,6 +4332,7 @@ python3 dtc/tests/test_xts_master.py    # Phase 0 XTS Master pure-function unit 
 python3 dtc/tests/test_duty.py          # Phase 9b NT Orbit Duty Tools pure-function unit tests (fixture-based)
 python3 dtc/tests/test_bom.py           # Phase 10 BOM enrichment pure-function unit tests (upsert semantics)
 python3 dtc/tests/test_color_palette.py # Phase 11 color palette -> DTC planner (grain, YES/NO, untick, zero-diff)
+python3 dtc/tests/test_fabric_dev.py    # Stage 65 KTB FABRIC DEV colour-line planner
 python3 dtc/tests/test_wip_history.py   # Product Status ledger (Snaps backup) pure-function unit tests
 python3 dtc/tests/test_lifecycle.py     # Style/WIP-row lifecycle gating pure-function unit tests (Finalized/Drop + Active/Dropped)
 python3 dtc/tests/test_entra_auth.py    # Phase 9b Entra OAuth2 URL-building / callback-parsing pure-function unit tests

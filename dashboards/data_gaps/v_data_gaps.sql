@@ -386,6 +386,20 @@ gaps AS (
         WHERE run_id = (SELECT run_id FROM p2_last) AND status = 'error'
           AND reason <> 'header_value_conflict') l
 
+  -- ═══ KTB FABRIC "- DEV" lines (Stage 65 writes its own gap rows) ═════════
+  UNION ALL
+  SELECT 'Fabric DEV', g.gap_code,
+         CASE g.gap_code WHEN 'FABRIC_LINE_NOT_FOUND' THEN 'warning' ELSE 'blocker' END,
+         CASE g.gap_code WHEN 'BOM_FABRIC_NO_ARTICLE' THEN 'BeProduct user' ELSE 'DTC user' END,
+         g.request, g.bp_style, NULL, g.article, g.detail,
+         CASE g.gap_code
+           WHEN 'FABRIC_REQUEST_NOT_FOUND' THEN 'DTC user: create the KTB FABRIC request with exactly this name.'
+           WHEN 'FABRIC_REQUEST_AMBIGUOUS' THEN 'DTC user: keep only one active KTB FABRIC request with this name.'
+           WHEN 'FABRIC_LINE_NOT_FOUND' THEN 'DTC user: add a line with this Mill Fabric Article # to the DEV request (or fix the code in the BeProduct BOM).'
+           ELSE 'BeProduct user: fill MILL FABRIC CODE/SUPPLIER ITEM CODE on this BOM fabric row.' END,
+         '8'
+  FROM lft.beproduct.fabric_dev_gaps g
+
   -- ═══ PUSH / IMAGE errors -- last run of each ═════════════════════════════
   UNION ALL
   SELECT CASE l.stage WHEN 'images' THEN 'Style image' ELSE 'WIP record' END,
