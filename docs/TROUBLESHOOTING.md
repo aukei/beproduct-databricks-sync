@@ -21,6 +21,8 @@ rationale. You should not need it to fix a production issue.
 5. [A tariff (or duty rate / HTS) is outdated](#5-a-tariff-or-duty-rate--hts-is-outdated)
 6. [The job itself fails](#6-the-job-itself-fails)
 7. [A color is missing or wrong in the DTC Color Palette](#7-a-color-is-missing-or-wrong-in-the-dtc-color-palette)
+8. [A KTB FABRIC DEV line has no colour line](#8-a-ktb-fabric-dev-line-has-no-colour-line)
+9. [A Product Status change has no backup row in WIP HISTORY](#9-a-product-status-change-has-no-backup-row-in-wip-history)
 
 ---
 
@@ -84,7 +86,8 @@ python scripts/run_v2_task.py v2_wip_push dry_run=true               # one task,
 
 What each exit value tells you:
 - `wip_push`: counts per request, `columns_changed`, `stranded_rows`,
-  `violations`, `degraded`, and `sample_changes` (current vs new values).
+  `violations`, `degraded`, `diagnostics` (soft-delete counts, 1.7), and
+  `sample_changes` (current vs new values).
 - `build_costing`: **per-gate drop counts**. This is the main tool for
   runbook 3.
 - `phase2_push` and `duty_compute` exit no summary. Use the log table (phase 2)
@@ -559,6 +562,30 @@ WHERE stage = 'fabric_dev' ORDER BY log_time DESC LIMIT 100;
 | A line with an old-style colour (`Ginger` or `Ginger 17-1444 TCX`) was renamed | By design: the same colour in an older notation is renamed in place rather than duplicated |
 | Extra colour lines remain after a colorway was removed | By design: lines are never deleted. Remove them in DTC |
 | Exit `NO_BOM_PAGE` | No style had a "BOMVariations" app. Set the `bom_page_id` widget |
+
+---
+
+## 9. A Product Status change has no backup row in WIP HISTORY
+
+Before `wip_push` changes a row's `Product Status`, it appends the row as it was
+to `"<request> Snaps"` in document `KTB WIP HISTORY` (PIPELINE.md → Stage 40
+step 5; columns in SYNC_CONTRACT.md). The exit value counts `ledger_rows` and
+`ledger_held`.
+
+```sql
+SELECT log_time, dtc_request_name, match_key, status, reason, payload
+FROM lft.beproduct.beproduct_to_dtc_sync_log
+WHERE stage = 'wip_push' AND operation = 'LEDGER' ORDER BY log_time DESC LIMIT 100;
+```
+
+| Symptom | Cause → fix |
+|---|---|
+| No `LEDGER` row, status did change | The status was blank before (first push), the row was just inserted, or it is soft-deleted (`Soft Delete = Y`). None of these is backed up, by design |
+| No `LEDGER` row, status did not change either | The edit was not saved in BeProduct yet, or the run has not happened (0.2). Check the live style first |
+| `error` / `ledger_failed_update_held` | The backup failed, so that request's status updates were **held** and retry next run. `payload` has the error: two active Snaps requests with one name (deactivate one), or the Snaps view `Full` has no `Log Date` column |
+| `warn` / `ledger_image_copy_failed` | The backup row exists but has no `Style Image`. Copy it by hand; it is not retried |
+| A column is blank on the backup row | The column is missing from the history view `Full`. Add it there too: `Full` must carry every `WIP_ITS_USE` column + `Log Date` |
+| Nothing at all, any style | Widget `run_status_ledger` is `false` |
 
 ---
 

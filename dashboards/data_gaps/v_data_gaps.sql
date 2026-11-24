@@ -235,8 +235,8 @@ gaps AS (
 
   UNION ALL
   SELECT 'WIP record', 'ROW_NOT_IN_BEPRODUCT', 'warning', 'Data owner', w.request, w.bp_style, w.color, NULL,
-         concat(count(*), ' DTC row(s) have a style/colour that BeProduct does not have (deleted colourway, or typed directly into DTC). The pipeline never updates or deletes them.'),
-         'Data owner: add the colourway in BeProduct, or delete the DTC rows if they are obsolete.',
+         concat(count(*), ' DTC row(s) have a style/colour that BeProduct does not stage. A colour removed from a live style is soft-deleted by the next run and leaves this list; what remains is a Finalized/Drop or skipped style, or a row typed directly into DTC, which the pipeline never updates.'),
+         'Data owner: add the colourway in BeProduct, or set Soft Delete = Y on the DTC rows if they are obsolete.',
          '1.7'
   FROM wip w LEFT ANTI JOIN stg ON stg.bp_style = w.bp_style AND stg.color = w.color
   LEFT ANTI JOIN dup_colors d ON d.bp_style = w.bp_style

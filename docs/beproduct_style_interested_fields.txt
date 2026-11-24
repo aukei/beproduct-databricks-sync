@@ -64,6 +64,9 @@ for reading the Notes column below:
   - Sample-app submit history -> DTC: Stage 20 formats, Stage 40 writes.
   - DTC -> BeProduct style: phase2_push (Stage 50).
   - Style Image: phase3_images (Stage 45), binary upload only.
+  - Removal -> DTC "Soft Delete" = "Y" (wip_push, Stage 40, since 2026-11-24):
+    a row whose colour or BOM material line left a still-staged style. Not a
+    BeProduct field; see SYNC_CONTRACT invariant 6.
 
 DTC column                 | BeProduct field name           | fieldId                  | Location (JSONPath in Style JSON)                          | Notes
 ---------------------------+--------------------------------+--------------------------+------------------------------------------------------------+------------------------------------------------------------

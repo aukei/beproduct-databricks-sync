@@ -566,6 +566,8 @@ Every operation is logged to `beproduct_to_dtc_sync_log` (`stage='wip_push'`;
 `operation` = `UPDATE` / `INSERT` / `NOOP` / `EXCEPTION` / `LEDGER` / `STRANDED_ROWS` /
 `REQUEST_INACTIVE` / `COLUMN_NOT_IN_VIEW` / `ERROR`). The exit value adds
 `columns_changed`, `columns_not_seen_in_view`, `stranded_rows`, `degraded`,
+`diagnostics` (incl. `soft_deleted_colour_rows` / `soft_deleted_material_rows`
+flagged this run, `soft_deleted_ignored` already flagged),
 `violations`, `bom_parse_errors`, `write_windows_opened` and per-request
 `sample_changes`. Status is `COMPLETED_WITH_VIOLATIONS` /
 `COMPLETED_WITH_WARNINGS` rather than `OK` when those are non-empty.
@@ -751,7 +753,7 @@ Flags: `run_wip_push` (whole stage), `run_duty_push` (duty contribution only).
 - Delete — `DELETE /v1/sheets/{sheetId}/views/{viewId}/rows`,
   body `{"rowIndexes":[…]}` → 204, but removes **at most ~11 rows per call** and
   renumbers the rest; loop re-read + delete to empty a sheet. Nothing in the
-  pipeline deletes rows today.
+  pipeline deletes rows today (soft delete is a PATCH of `Soft Delete = "Y"`).
 - Create — `POST /v1/sheets` → 201, ids nested under `data` with a capital-S `SheetId`
 - Share — `POST /v1/requests/{requestId}/shares/{userEmail}` and
   `…/shares/usergroups/{userGroupName}`,
@@ -770,8 +772,9 @@ per run, and it sees `wip_push`'s newly inserted rows in the same run. In steady
 state it uploads nothing and opens no window.
 
 Reads `dtc_request_mapping` / `beproduct_to_dtc_staging`, and does its own live
-`get_sheet()` immediately before writing (rows with `Soft Delete = Y` dropped) (that read also supplies the current
-blank-vs-populated Style Image state). Logs to `beproduct_to_dtc_sync_log` with
+`get_sheet()` immediately before writing (that read also supplies the current
+blank-vs-populated Style Image state). Rows with `Soft Delete = Y` are dropped
+from that read, so they are never uploaded to or copied from. Logs to `beproduct_to_dtc_sync_log` with
 `stage='images'`.
 
 **Addressing is by `rowId`** (query parameter lowercase `rowid`; camelCase
@@ -1131,7 +1134,8 @@ scheduled run.
   (`DEFAULT_FILL_COLS`), Phase 2 (blank-skip unless `push_blanks`) and especially
   the material contribution (an entire style takes zero actions rather than risk
   blanking real data). A row failing a gate almost always means "wait for a later
-  run", not "this data is lost".
+  run", not "this data is lost". The one way a BeProduct removal reaches DTC is
+  Stage 40's soft delete, which only sets a flag and never blanks a value.
 - **Lean PATCH is a real gate, not a style preference.** It appears as
   `diff_updatable_fields`, NOOP-on-match, blank-vs-blank equality and
   `push_already_correct`. An unchanged field must never generate network traffic —

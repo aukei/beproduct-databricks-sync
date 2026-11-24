@@ -157,8 +157,10 @@ sheets), staged through **Databricks/Delta**.
   `Content` independently, a row with a currently-BLANK `Mill Fabric
   Article #` is backfilled in place (one-way, disambiguated by Placement
   when needed — fixes a live "frozen row" bug, `KTB-00025`), an un-enriched
-  row gets full first-time enrichment, and any other real value is left
-  completely untouched (never revert). Each new "Fabric" segment duplicates
+  row gets full first-time enrichment, and a row holding any other real
+  (Fabric Group, Mill Fabric Article #) is **soft-deleted** (`Soft Delete =
+  "Y"`, since 2026-11-24; before that it was left untouched). Values are
+  never reverted or blanked. Each new "Fabric" segment duplicates
   every existing row of the SAME COLORWAY once — **scoped per colorway, not
   globally across the whole style** (fixed 2026-09-10 — a style's multiple
   colors used to share one combined "is this segment represented?" pool,
@@ -650,7 +652,8 @@ BLOCKER below.**
   (transform, dup-name skip, Phase 2 colorway ids, `v_data_gaps`) agrees.
   `ktb_styles` therefore no longer holds hidden colorways.
 - Hiding a colorway already in DTC leaves its rows frozen (never deleted),
-  listed as `ROW_NOT_IN_BEPRODUCT`. All colorways hidden -> the style gets
+  listed as `ROW_NOT_IN_BEPRODUCT`. (Superseded 2026-11-24: its rows are now
+  soft-deleted, see the soft-delete entry.) All colorways hidden -> the style gets
   the `NO BP COLORWAY` dummy row, like a colorless style.
 - Owner confirmed in the UI: KTB-00073 has 8 colorways, the 4 above ticked,
   4 unticked (Twill, Dark Oliver, Flushing Pink, Full Blooming Pink).
@@ -1917,6 +1920,9 @@ Intended to replace the `alb_tpm_*` Lakebase BOM source entirely:**
   would risk destroying real user data. **Open question for the owner:** were
   `Rose Bisque` / `OffWhite` removed from BeProduct, or created directly in
   DTC?
+- (Superseded 2026-11-24: a colour missing from a style that is STILL staged is
+  now soft-deleted, not stranded. "Stranded" now means only a row of a style
+  absent from staging, or staged as Finalized/Drop.)
 
 **Instance pool idled to zero; `folder_name` still `TEST KTB` (2026-09-15):**
 - `beproduct-dtc-sync-pool-v5` **`min_idle_instances` 1 -> 0**. Once the v2 main

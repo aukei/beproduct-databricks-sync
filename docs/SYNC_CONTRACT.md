@@ -306,7 +306,6 @@ line only for a fabric the request does not have at all (2026-11-24).
 |---|---|---|
 | `Mill Fabric Article #` | match key; written only on a NEW line | style BOM row (PageBomVariation, Group `Main Fabric` or `Fabric` only) `MILL FABRIC CODE/SUPPLIER ITEM CODE` |
 | `Color / Wash` | written | colorway `"<colorNumber>-<COLORNAME upper>"`, e.g. `17-1444 TCX-GINGER`. Hidden colorways included. Which colorways: the BOM variation's own (`selectedVariationColorways`), or all of the style's when it has `syncColorways` |
-
 | `Mill Name` | written only on a NEW line, never updated | BOM row `MILL/SUPPLIER NAME` value (the partner name, e.g. `HUA JIN (HONG KONG) LIMITED`); first non-blank across the request's styles; omitted when blank |
 
 A new line (article not in the request) holds ONLY those three columns, one
@@ -315,6 +314,23 @@ downstream workflow fills the rest (`Season`, `Brand`, `Season Brand`,
 `ListsActive`, `flowAdd`, ...). Do not copy those in. A copied line takes every column of the article's first line except
 `rowId`/`rowIndex`/`ITS_Key`/`sysSource`, formula/image columns and lookups.
 A line's colour is never cleared and a line is never deleted.
+
+### DTC KTB WIP → "KTB WIP HISTORY" Snaps (Stage 40 ledger, 2026-11-11)
+
+Document `KTB WIP HISTORY`, request `"<WIP request name> Snaps"`, view `Full`
+(its `full - readonly` view shared with `Kontoor Project Team`). Append-only:
+one row per WIP row whose non-blank `Product Status` is about to change,
+written before the change (`sync/wip_history.py`).
+
+| Column | Value |
+|---|---|
+| every `WIP_ITS_USE` column except `Soft Delete` | the WIP row's current non-blank cells, lookups as last saved. `Full` has no `Soft Delete` column |
+| `Style Image` | copied afterwards by "Copy Sheet Image" (the pointer, not the file) |
+| `Log Date` | run time |
+
+Never backed up: a first status (blank before), an insert, a soft-deleted row.
+`Full` must carry every `WIP_ITS_USE` column plus `Log Date`, or that column
+backs up blank. Runbook: TROUBLESHOOTING 9.
 
 ---
 
