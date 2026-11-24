@@ -977,10 +977,13 @@ Gates, in order:
 5. No active request with the exact DEV name → gap `FABRIC_REQUEST_NOT_FOUND`
    (per style × article); more than one → `FABRIC_REQUEST_AMBIGUOUS`. Never
    created.
-6. The view must contain `Mill Fabric Article #` and `Color / Wash`, else that
-   request errors.
-7. Per article: no line with that `Mill Fabric Article #` → gap
-   `FABRIC_LINE_NOT_FOUND`. Never created.
+6. The view must contain `Mill Fabric Article #`, `Color / Wash` and
+   `Mill Name`, else that request errors.
+7. Per article: no line with that `Mill Fabric Article #` → one NEW line per
+   needed colour, holding only `Mill Name` (BOM `MILL/SUPPLIER NAME`),
+   `Mill Fabric Article #` and `Color / Wash` (`append_rows`, logged
+   `line_created`; listed in the exit JSON's `created_articles`). Since
+   2026-11-24; was gap `FABRIC_LINE_NOT_FOUND`.
 8. Per needed colour label: already on a line (case-insensitive) → nothing. A
    line holding the same colour in an older notation (the bare name, or the
    WIP form `"<name> <number>"`) → renamed in place. Else the article's first

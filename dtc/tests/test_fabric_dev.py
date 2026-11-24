@@ -24,9 +24,11 @@ def cw(i, number, name, hidden=False):
     return {"id": i, "colorNumber": number, "colorName": name, "hideColorway": hidden}
 
 
-def bom_row(group, article, material="M"):
+def bom_row(group, article, material="M", mill=None):
     return {"materialNumber": material, "fields": [
         {"id": "group", "name": "Group", "value": group},
+        {"id": "mill_vendor", "name": "MILL/SUPPLIER NAME",
+         "value": {"value": mill, "code": "guid", "text": "CODE"} if mill else None},
         {"id": "vendor_material_reference_no", "name": "MILL FABRIC CODE/SUPPLIER ITEM CODE",
          "value": article}]}
 
@@ -96,9 +98,22 @@ check(p.updates == [{"rowId": "r2", fd.COL_COLOR: "17-1444 TCX-GINGER"}] and not
       "alias wins over the blank line, no insert")
 check(needs.needs["ART-1"][0] == GINGER, "needs carry both older notations")
 
-print("[6] missing article reported, never created")
-p = fd.plan_request({"ART-9": [GINGER]}, [dtc(1, "ART-1")])
-check(p.missing_articles == ["ART-9"] and not p.has_writes, "gap, no write")
+print("[6] missing article -> one new 3-field line per colour")
+p = fd.plan_request({"ART-9": [GINGER, CKAU]}, [dtc(1, "ART-1", "x", **{"Fabric Content": "C"})],
+                    mills={"ART-9": "AKIJ TEXTILE MILLS LTD."})
+check(p.created_articles == ["ART-9"] and not p.updates, "created, nothing renamed")
+check(p.inserts == [{fd.COL_ARTICLE: "ART-9", fd.COL_COLOR: "17-1444 TCX-GINGER", fd.COL_MILL: "AKIJ TEXTILE MILLS LTD."},
+                    {fd.COL_ARTICLE: "ART-9", fd.COL_COLOR: "CKAU-CKAU", fd.COL_MILL: "AKIJ TEXTILE MILLS LTD."}],
+      "only Mill Name, article, colour -- nothing copied from other lines")
+p = fd.plan_request({"ART-9": [GINGER]}, [])
+check(p.inserts == [{fd.COL_ARTICLE: "ART-9", fd.COL_COLOR: "17-1444 TCX-GINGER"}], "blank mill -> key omitted")
+p = fd.plan_request({"ART-9": [GINGER]}, [dtc(1, "ART-9", "17-1444 TCX-GINGER", **{fd.COL_MILL: "M"})],
+                    mills={"ART-9": "M"})
+check(not p.has_writes and not p.created_articles, "rerun after create -> no write")
+n3 = fd.style_fabric_needs(COLORWAYS, [variation([bom_row("Fabric", "ART-1"),
+                                                  bom_row("Main Fabric", "ART-1", mill=" HUA JIN "),
+                                                  bom_row("Fabric", "ART-1", mill="OTHER")])])
+check(n3.mills == {"ART-1": "HUA JIN"}, "mill = first non-blank MILL/SUPPLIER NAME value, trimmed")
 
 print("[7] non-copyable columns from the view definition")
 cols = fd.non_copyable_cols([{"fieldName": "SBU", "type": "lookup"},

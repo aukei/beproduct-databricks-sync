@@ -546,7 +546,7 @@ WHERE stage = 'fabric_dev' ORDER BY log_time DESC LIMIT 100;
 |---|---|
 | `FABRIC_REQUEST_NOT_FOUND` | No active KTB FABRIC request named exactly `<request> - DEV`. A DTC user creates it (the pipeline never does) |
 | `FABRIC_REQUEST_AMBIGUOUS` | Two active requests share the name. Deactivate one |
-| `FABRIC_LINE_NOT_FOUND` | The DEV request has no line whose `Mill Fabric Article #` equals the BOM row's `MILL FABRIC CODE/SUPPLIER ITEM CODE`. Add the line in DTC, or correct the code in the BeProduct BOM. Matching ignores extra spaces but not case |
+| A line with only Mill Name / Mill Fabric Article # / Color / Wash appeared (log reason `line_created`) | The DEV request had no line with that `Mill Fabric Article #`, so the stage created one per colour (since 2026-11-24; was gap `FABRIC_LINE_NOT_FOUND`). A DTC user fills the rest. A wrong article (e.g. a material NAME in the BOM's mill code) creates a junk line: fix the code in the BeProduct BOM and delete the line in DTC. Matching ignores extra spaces but not case |
 | `BOM_FABRIC_NO_ARTICLE` | A Main Fabric / Fabric BOM row has no mill fabric code. Fill it in BeProduct |
 | A colour is missing, no gap | Is the colorway in that BOM variation? A variation without "sync colorways" only covers its selected colorways. Is the style's season mapped (`styles_without_request_name` in the exit JSON)? |
 | A line with an old-style colour (`Ginger` or `Ginger 17-1444 TCX`) was renamed | By design: the same colour in an older notation is renamed in place rather than duplicated |

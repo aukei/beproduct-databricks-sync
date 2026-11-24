@@ -291,14 +291,20 @@ has no DTC column, so it is not synced.
 
 Document `KTB FABRIC`, request `"<Customer> <SeasonCode> <Brand> - DEV"` (the
 style's WIP request name + ` - DEV`), view `WIP_ITS_USE`. DTC users own the
-fabric lines; this stage only gives each one a line per colorway.
+fabric lines; this stage gives each one a line per colorway, and creates a
+line only for a fabric the request does not have at all (2026-11-24).
 
 | DTC column | Role | BeProduct source |
 |---|---|---|
-| `Mill Fabric Article #` | match key, never written | style BOM row (PageBomVariation, Group `Main Fabric` or `Fabric` only) `MILL FABRIC CODE/SUPPLIER ITEM CODE` |
+| `Mill Fabric Article #` | match key; written only on a NEW line | style BOM row (PageBomVariation, Group `Main Fabric` or `Fabric` only) `MILL FABRIC CODE/SUPPLIER ITEM CODE` |
 | `Color / Wash` | written | colorway `"<colorNumber>-<COLORNAME upper>"`, e.g. `17-1444 TCX-GINGER`. Hidden colorways included. Which colorways: the BOM variation's own (`selectedVariationColorways`), or all of the style's when it has `syncColorways` |
 
-A copied line takes every column of the article's first line except
+| `Mill Name` | written only on a NEW line, never updated | BOM row `MILL/SUPPLIER NAME` value (the partner name, e.g. `HUA JIN (HONG KONG) LIMITED`); first non-blank across the request's styles; omitted when blank |
+
+A new line (article not in the request) holds ONLY those three columns, one
+line per needed colour. Deliberate (DTC admin's request, 2026-11-24): DTC's own
+downstream workflow fills the rest (`Season`, `Brand`, `Season Brand`,
+`ListsActive`, `flowAdd`, ...). Do not copy those in. A copied line takes every column of the article's first line except
 `rowId`/`rowIndex`/`ITS_Key`/`sysSource`, formula/image columns and lookups.
 A line's colour is never cleared and a line is never deleted.
 

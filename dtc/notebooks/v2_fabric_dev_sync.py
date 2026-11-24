@@ -9,13 +9,15 @@ rule set: `sync/fabric_dev.py`.
   2. Each style's BOM straight from BeProduct (PageBomVariation), NOT the
      techpack BOM `wip_push` uses. Main Fabric + Fabric rows only.
   3. Per "<Customer> <SeasonCode> <Brand> - DEV" request: read it LIVE, plan,
-     then PATCH (in-place colour fills/renames) and POST (copied lines), back
-     to back -- one write window per request. Nothing to do -> NO write.
+     then PATCH (in-place colour fills/renames) and POST (copied lines + new
+     lines for a fabric the request lacks: Mill Name / Mill Fabric Article # /
+     Color / Wash only), back to back -- one write window per request.
+     Nothing to do -> NO write.
   4. Re-read and re-plan after a write; anything still pending is reported.
-  5. Gaps (no DEV request, fabric line missing, BOM fabric with no article)
-     -> `fabric_dev_gaps`, overwritten each run, read by `v_data_gaps`.
+  5. Gaps (no DEV request, BOM fabric with no article) -> `fabric_dev_gaps`,
+     overwritten each run, read by `v_data_gaps`.
 
-Never creates a request or a fabric line, never deletes a line.
+Never creates a request, never deletes a line.
 """
 
 # COMMAND ----------
@@ -168,7 +170,7 @@ GAP_SCHEMA = StructType([StructField(c, StringType()) for c in
                          ("request", "bp_style", "article", "gap_code", "detail")]
                         + [StructField("as_of", TimestampType())])
 gaps = []
-needs_by_request, styles_by_article, fetch_errors = {}, {}, []
+needs_by_request, mills_by_request, styles_by_article, fetch_errors = {}, {}, {}, []
 for s, bodies, err in fetched:
     if err:
         fetch_errors.append(f"{s['num']}: {err}")
@@ -180,6 +182,8 @@ for s, bodies, err in fetched:
         dst = needs_by_request.setdefault(s["request"], {}).setdefault(article, [])
         dst.extend(c for c in colors if c not in dst)
         styles_by_article.setdefault((s["request"], article), set()).add(s["num"])
+    for article, mill in n.mills.items():
+        mills_by_request.setdefault(s["request"], {}).setdefault(article, mill)
 print(f"        {len(needs_by_request)} DEV request(s) needed; {len(fetch_errors)} fetch error(s)")
 
 # COMMAND ----------
@@ -228,22 +232,17 @@ for req, needs in sorted(needs_by_request.items()):
         view_id = next(v["viewId"] for v in dtc.get_views(rid) if v.get("viewName") == view_name)
         vdef = dtc.get_view_definition(view_id)
         fields = (vdef.get("data", vdef) or {}).get("dynamicFields") or []
-        missing_cols = {fd.COL_ARTICLE, fd.COL_COLOR} - {f.get("fieldName") for f in fields}
+        missing_cols = {fd.COL_ARTICLE, fd.COL_COLOR, fd.COL_MILL} - {f.get("fieldName") for f in fields}
         if missing_cols:
             raise RuntimeError(f"view {view_name!r} lacks {sorted(missing_cols)}")
         exclude = fd.non_copyable_cols(fields)
         live = dtc.get_sheet(sheet_id, view_id).get("sheetData", [])
-        plan = fd.plan_request(needs, live, exclude)
+        plan = fd.plan_request(needs, live, exclude, mills_by_request.get(req))
     except Exception as e:  # noqa: BLE001
         res.update(status="ERROR", error=f"{type(e).__name__}: {str(e)[:300]}")
         log(req, rid, "EXCEPTION", None, None, "error", "read_failed", res["error"])
         results.append(res)
         continue
-
-    for article in plan.missing_articles:
-        for num in sorted(styles_by_article[(req, article)]):
-            gaps.append((req, num, article, fd.GAP_LINE_NOT_FOUND,
-                         f"no line with Mill Fabric Article # {article!r} in {req!r}", now))
 
     # The write window: PATCH then POST, back to back. Empty plan -> no call.
     calls, failed, inserted_ids = 0, 0, []
@@ -275,15 +274,18 @@ for req, needs in sorted(needs_by_request.items()):
                 err = str(e)[:300]
         for r in chunk:
             log(req, rid, "INSERT", r.get(fd.COL_ARTICLE), r.get(fd.COL_COLOR),
-                status_word if ok else "error", "line_copied" if ok else "append_failed",
+                status_word if ok else "error",
+                ("line_created" if r.get(fd.COL_ARTICLE) in plan.created_articles else "line_copied")
+                if ok else "append_failed",
                 "" if ok else err, r)
 
     residual = None
     if not dry_run and plan.has_writes:
         residual = fd.plan_request(needs, dtc.get_sheet(sheet_id, view_id).get("sheetData", []),
-                                   exclude).summary()
+                                   exclude, mills_by_request.get(req)).summary()
     res.update(status="OK", live_rows=len(live), plan=plan.summary(), write_calls=calls,
                failed_rows=failed, inserted_row_ids=inserted_ids[:50], residual_after_write=residual,
+               created_articles=plan.created_articles[:50],
                sample_updates=plan.updates[:5],
                sample_inserts=[{fd.COL_ARTICLE: r.get(fd.COL_ARTICLE), fd.COL_COLOR: r.get(fd.COL_COLOR)}
                                for r in plan.inserts[:10]])

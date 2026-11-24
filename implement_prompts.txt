@@ -1017,5 +1017,6 @@ according to beproduct setup, possibile values of "Group" are ["Main Fabric",'Fa
     3. For each BP (Main) Fabric, multiplex corresponding DTC line (i.e. matching Mill Fabric Article #) with colorways: one line for each color, including those 'hide color' box checked. Write color to "Color / Wash" DTC field
         3.1 fill in colorway name, like '17-1444 TCX-GINGER'
     4. Flag error in dashboard If
-        4.1 fabric line does not exist on DTC
+        ---override--- 4.1 fabric line does not exist on DTC
+        4.1 Create fabric line in Dev request if material not exist. Fill only 3 fields: "Mill Name","Mill Fabric Article #","Color / Wash"
         4.2 Fabric Request does not exist in DTC

@@ -8,8 +8,8 @@ that wip_push uses. Only BOM rows whose Group is "Main Fabric" or "Fabric".
 
 Target: the KTB FABRIC request "<Customer> <SeasonCode> <Brand> - DEV", i.e. the
 style's WIP request name plus " - DEV". The fabric lines there are created by
-DTC users; this stage never creates a fabric, it only multiplexes an existing
-line by colour:
+DTC users; this stage multiplexes an existing line by colour, and creates a
+line only for a fabric the request does not have at all:
 
   * a line is "the same fabric" when its "Mill Fabric Article #" equals the BOM
     row's `MILL FABRIC CODE/SUPPLIER ITEM CODE` (whitespace-normalised, case
@@ -22,10 +22,12 @@ line by colour:
     "<name> <number>" (both seen live 2026-11-23) -> renamed in place; otherwise
     the article's first BLANK-colour line is claimed in place; otherwise the
     article's first line is copied with the new label (append_rows);
+  * an article with no DTC line gets one NEW line per needed colour holding
+    only "Mill Name" (BOM `MILL/SUPPLIER NAME`), "Mill Fabric Article #" and
+    "Color / Wash" (owner spec override 2026-11-24);
   * a line whose colour no BeProduct colorway needs is left alone, never
     deleted;
-  * an article with no DTC line, or a style with no DEV request, is reported
-    as a gap for the data-gaps dashboard, never created.
+  * a style with no DEV request is reported as a gap, never created.
 
 Zero-diff-zero-write: when every label is already present, the plan is empty.
 
@@ -43,6 +45,8 @@ from sync.phase1 import color_wash, norm
 DEV_SUFFIX = " - DEV"
 COL_ARTICLE = "Mill Fabric Article #"
 COL_COLOR = "Color / Wash"
+COL_MILL = "Mill Name"
+BV_FIELD_MILL = "MILL/SUPPLIER NAME"  # live: {"value": partner name, "code": GUID, "text": code}
 FABRIC_GROUPS = frozenset({bom.SEGMENT_MAIN_FABRIC, bom.SEGMENT_FABRIC})
 
 # Never copied into a multiplexed line: DTC locators, DTC's own row key, and the
@@ -52,7 +56,6 @@ COPY_EXCLUDE_COLS = frozenset({"rowId", "rowIndex", "ITS_Key", "sysSource"})
 
 GAP_REQUEST_NOT_FOUND = "FABRIC_REQUEST_NOT_FOUND"
 GAP_REQUEST_AMBIGUOUS = "FABRIC_REQUEST_AMBIGUOUS"
-GAP_LINE_NOT_FOUND = "FABRIC_LINE_NOT_FOUND"
 GAP_NO_ARTICLE = "BOM_FABRIC_NO_ARTICLE"
 
 
@@ -87,6 +90,7 @@ class StyleFabrics:
     """One style's fabric needs: article -> ordered [(label, older notations)]."""
     needs: Dict[str, List[Tuple[str, Tuple[str, ...]]]] = field(default_factory=dict)
     no_article: List[Dict[str, Any]] = field(default_factory=list)  # BOM rows with a blank article
+    mills: Dict[str, str] = field(default_factory=dict)  # article -> first non-blank Mill Name
 
 
 def style_fabric_needs(colorways: Iterable[Dict[str, Any]],
@@ -122,6 +126,9 @@ def style_fabric_needs(colorways: Iterable[Dict[str, Any]],
                 out.no_article.append({"group": group, "variation": meta.get("variationName"),
                                        "material": row.get("materialNumber") or bom._bv_field(row, "Material Name")})
                 continue
+            mill = norm(bom._bv_field(row, BV_FIELD_MILL))
+            if mill:
+                out.mills.setdefault(article, mill)
             have = out.needs.setdefault(article, [])
             for c in colors:
                 if c not in have:
@@ -132,8 +139,8 @@ def style_fabric_needs(colorways: Iterable[Dict[str, Any]],
 @dataclass
 class FabricPlan:
     updates: List[Dict[str, Any]] = field(default_factory=list)   # {"rowId", COL_COLOR}
-    inserts: List[Dict[str, Any]] = field(default_factory=list)   # full copied rows
-    missing_articles: List[str] = field(default_factory=list)
+    inserts: List[Dict[str, Any]] = field(default_factory=list)   # copied rows + new 3-field lines
+    created_articles: List[str] = field(default_factory=list)     # articles with no line before
     noops: int = 0
 
     @property
@@ -142,15 +149,17 @@ class FabricPlan:
 
     def summary(self) -> Dict[str, int]:
         return {"updates": len(self.updates), "inserts": len(self.inserts),
-                "noops": self.noops, "missing_articles": len(self.missing_articles)}
+                "noops": self.noops, "created_articles": len(self.created_articles)}
 
 
 def plan_request(needs: Dict[str, List[Tuple[str, Tuple[str, ...]]]],
                  dtc_rows: List[Dict[str, Any]],
-                 exclude_cols: frozenset = COPY_EXCLUDE_COLS) -> FabricPlan:
+                 exclude_cols: frozenset = COPY_EXCLUDE_COLS,
+                 mills: Optional[Dict[str, str]] = None) -> FabricPlan:
     """
     `needs`: article -> [(label, older notations)] for every style mapped to this
     request (merged by the caller). `dtc_rows`: the request's live sheetData.
+    `mills`: article -> Mill Name, written only on a newly created line.
     """
     plan = FabricPlan()
     rows_by_article: Dict[str, List[Dict[str, Any]]] = {}
@@ -162,7 +171,13 @@ def plan_request(needs: Dict[str, List[Tuple[str, Tuple[str, ...]]]],
     for article in sorted(needs):
         rows = rows_by_article.get(article)
         if not rows:
-            plan.missing_articles.append(article)
+            plan.created_articles.append(article)
+            mill = (mills or {}).get(article)
+            for label, _ in needs[article]:
+                line = {COL_ARTICLE: article, COL_COLOR: label}
+                if mill:
+                    line[COL_MILL] = mill
+                plan.inserts.append(line)
             continue
         current = {r["rowId"]: _key(r.get(COL_COLOR)) for r in rows}
         blanks = [r for r in rows if current[r["rowId"]] is None]

@@ -372,6 +372,30 @@ this stays true by construction; verify it stays true after any change).
 
 ## Verified discoveries log (append-dated; do not delete)
 
+**Stage 65 now CREATES a missing fabric line (2026-11-24, owner override of
+spec 4.1; DEPLOYED to the v2 root 2026-11-24).** An article with no line in
+the DEV request gets one new line per needed colour holding ONLY `Mill Name`,
+`Mill Fabric Article #`, `Color / Wash` (was gap `FABRIC_LINE_NOT_FOUND`, now
+never emitted). Live read: DTC `Mill Name` (plain `string`) holds exactly the
+BOM row's `MILL/SUPPLIER NAME` **`value`** = partner name (`HUA JIN (HONG KONG)
+LIMITED`, `AKIJ TEXTILE MILLS LTD.`); its `text` is the partner code
+(`HUJIHO`), `code` the GUID. Expect the first live run to create lines for
+KTB-00074 `WV-0067` and KTB-00070 `100% COTTON CANVAS 12OZ` (a material NAME
+in the mill-code field, so a junk article until fixed in BeProduct).
+Scratch-root dry run (TEST KTB, 138 styles): 6 new lines planned in `KTB FW28
+Collaborations - DEV` (`100% COTTON CANVAS 12OZ`, `KEI-CANVAS-01`, `WV-0067`,
+2 colours each), 0 gaps. Every existing DEV line carries request-wide
+`Season`/`Brand`/`Season Brand`/`ListsActive=YES`/`flowAdd=YES`/
+`SUB-Lists`/`FabricGrid`; a new line deliberately leaves them blank -- the DTC
+admin asked for exactly 3 fields, their downstream workflow fills the rest.
+DTC's `AI Agent WIP` splits DEV lines into `<request>-<Mill Name>` requests, so
+`Mill Name` = `BEPRODUCT VENDOR` (placeholder partner) may spawn such a request.
+Before deploy, test variation `ABCD-20161104` (`44e2cf2a-...`) was DELETED from
+KTB-00070 (owner), removing the CANVAS Main Fabric + `KEI-CANVAS-01` rows;
+re-run dry plan: only `WV-0067` x 2 colours (RedGingham, Very Peri), mill
+`BEPRODUCT VENDOR`. CANVAS on default variation `abcde` is group Artwork, so
+excluded.
+
 **Stage 65 `fabric_dev` BUILT -- style BOM -> KTB FABRIC "<request> - DEV"
 colour lines (2026-11-23, owner spec; DEPLOYED + LIVE-VERIFIED same day).** PIPELINE.md Stage 65, SYNC_CONTRACT.md, TROUBLESHOOTING section 8.
 - Live DTC read: `KTB FABRIC` has 4689 active requests but only 13 distinct
