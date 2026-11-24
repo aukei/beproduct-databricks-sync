@@ -132,6 +132,9 @@ dbutils.widgets.text("material_fill_if_blank_columns", "Content",
 dbutils.widgets.text("run_status_ledger", "true", "Back up rows before a Product Status change")
 dbutils.widgets.text("status_ledger_document", wip_history.HISTORY_DOCUMENT, "Ledger document")
 dbutils.widgets.text("status_ledger_share_group", "Kontoor Project Team", "Ledger share group (blank = skip)")
+# Soft delete (owner spec 2026-11-24): flag rows whose colour / BOM material
+# line was removed. Already-flagged rows are ignored either way.
+dbutils.widgets.text("run_soft_delete", "true", "Soft-delete rows of removed colours / materials")
 dbutils.widgets.text("explain_limit", "40", "Rows per request in the stdout trace")
 dbutils.widgets.text("sample_limit", "12", "current-vs-new samples per request in the exit JSON")
 
@@ -149,6 +152,7 @@ bom_table = f"{catalog}.{schema}.{dbutils.widgets.get('bom_segments_table')}"
 enable_duty = (dbutils.widgets.get("run_duty_push") or "true").strip().lower() == "true"
 explain_limit = int(dbutils.widgets.get("explain_limit") or 40)
 run_status_ledger = (dbutils.widgets.get("run_status_ledger") or "true").strip().lower() == "true"
+run_soft_delete = (dbutils.widgets.get("run_soft_delete") or "true").strip().lower() == "true"
 ledger_document = (dbutils.widgets.get("status_ledger_document") or "").strip() or wip_history.HISTORY_DOCUMENT
 ledger_share_group = (dbutils.widgets.get("status_ledger_share_group") or "").strip()
 sample_limit = int(dbutils.widgets.get("sample_limit") or 12)
@@ -306,7 +310,10 @@ def log(name, request_id, operation, key, status, reason="", detail="", payload=
 api_key = dbutils.secrets.get(scope="beproduct", key=f"dtc_api_key_{environment}")
 connector = DTCConnector(api_key=api_key, environment=environment, workspace_name=workspace)
 
-FALLBACK_COLS = {c for c in phase1.FIELD_MAPPING.values() if c != phase1.STYLE_IMAGE_COL}
+# Soft Delete is blank on every row until the first removal, so a data scan
+# never sees it; live-verified in WIP_ITS_USE 2026-11-24.
+FALLBACK_COLS = ({c for c in phase1.FIELD_MAPPING.values() if c != phase1.STYLE_IMAGE_COL}
+                 | {phase1.SOFT_DELETE_COL})
 
 totals = {"requests": 0, "requests_written": 0, "requests_noop": 0,
           "updates": 0, "inserts": 0, "noops": 0, "exceptions": 0,
@@ -429,6 +436,7 @@ for name, m in mapping.items():
         material_exclude_cols=material_exclude,
         material_fill_if_blank_cols=material_fill_if_blank,
         request_name=name,
+        soft_delete=run_soft_delete,
     )
 
     print(plan.explain(limit=explain_limit))
@@ -467,8 +475,12 @@ for name, m in mapping.items():
     #
     # Reported only -- deciding whether a stranded row is deleted-in-BeProduct
     # or legitimately DTC-owned is a data-policy call, not one to make here.
+    # Soft-deleted rows, and rows this plan soft-deletes, are handled, not stranded.
+    _flagged = {u.row_id for u in plan.updates if phase1.SOFT_DELETE_COL in u.fields}
     stranded = {}
     for _r in dtc_rows:
+        if phase1.is_soft_deleted(_r) or _r.get("rowId") in _flagged:
+            continue
         _k = (phase1.norm(_r.get(phase1.MATCH_KEY_COLS[0])),
               phase1.norm(_r.get(phase1.MATCH_KEY_COLS[1])))
         if _k == (None, None) or _k[0] is None:

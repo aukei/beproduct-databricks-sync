@@ -810,6 +810,117 @@ check("[9f] settled Fit state (2nd already blank) => zero writes", p9s.is_empty(
 
 
 # ---------------------------------------------------------------------------
+print("\n[10] Soft delete: a removed colour / material line is flagged, never touched again (2026-11-24)")
+from sync import wip_history  # noqa: E402
+SD = phase1.SOFT_DELETE_COL
+MAIN_ROW = {FG: "Main Fabric", MA: "WV-0003", PL: "BODICE", CT: "Cotton 100%"}
+KEYS = {("KTB-1", "Blue")}
+
+
+def apply(plan, rows):
+    """The sheet after a plan lands: updates merged by rowId, inserts appended."""
+    out = {r["rowId"]: dict(r) for r in rows}
+    for u in plan.updates:
+        out[u.row_id].update(u.fields)
+    for i, ins in enumerate(plan.inserts):
+        out[f"new{i}"] = {"rowId": f"new{i}", **ins.fields}
+    return list(out.values())
+
+
+# a. a Fabric line left the BOM
+rows_a = [dtc_row("m", 1, **MAIN_ROW),
+          dtc_row("f", 2, **{FG: "Fabric", MA: "WV-0061", PL: "HEM", CT: "Poly 100%"})]
+pa = wip_plan.compute_request_plan(SCOPE, rows_a, [bp_row()], bom_by_style={"KTB-1": MAIN_ONLY},
+                                   bp_keys_this_request=KEYS, moved_elsewhere_keys=set(),
+                                   allowed_cols=ALLOWED)
+check("[10a] removed material row -> ONLY Soft Delete = Y",
+      pa.update_sheet_data() == [{SD: "Y", "rowId": "f"}] and not pa.inserts, pa.explain())
+check("[10a2] rerun over the result writes nothing",
+      wip_plan.compute_request_plan(SCOPE, apply(pa, rows_a), [bp_row()],
+                                    bom_by_style={"KTB-1": MAIN_ONLY}, bp_keys_this_request=KEYS,
+                                    moved_elsewhere_keys=set(), allowed_cols=ALLOWED).is_empty())
+
+# b. Main Fabric article changed: soft delete + insert, not an update
+rows_b = [dtc_row("m", 1, **{**MAIN_ROW, MA: "WV-OLD"})]
+pb = wip_plan.compute_request_plan(SCOPE, rows_b, [bp_row()], bom_by_style={"KTB-1": MAIN_ONLY},
+                                   bp_keys_this_request=KEYS, moved_elsewhere_keys=set(),
+                                   allowed_cols=ALLOWED)
+ins = pb.insert_sheet_data()
+check("[10b] old key soft-deleted", pb.update_sheet_data() == [{SD: "Y", "rowId": "m"}], pb.explain())
+check("[10b2] new key inserted with style identity, no Soft Delete",
+      len(ins) == 1 and ins[0].get(MA) == "WV-0003" and ins[0].get(FG) == "Main Fabric"
+      and ins[0].get(STYLE_COL) == "KTB-1" and ins[0].get(COLOR_COL) == "Blue" and SD not in ins[0],
+      str(ins))
+check("[10b3] rerun is a no-op",
+      wip_plan.compute_request_plan(SCOPE, apply(pb, rows_b), [bp_row()],
+                                    bom_by_style={"KTB-1": MAIN_ONLY}, bp_keys_this_request=KEYS,
+                                    moved_elsewhere_keys=set(), allowed_cols=ALLOWED).is_empty())
+
+# c. a colour left a style that is still staged -- and gets no fan-out insert
+rows_c = [dtc_row("b", 1, **MAIN_ROW), dtc_row("r", 2, color="Red", **MAIN_ROW)]
+pc = wip_plan.compute_request_plan(SCOPE, rows_c, [bp_row()], bom_by_style={"KTB-1": MAIN_PLUS_ONE},
+                                   bp_keys_this_request=KEYS, moved_elsewhere_keys=set(),
+                                   allowed_cols=ALLOWED)
+check("[10c] removed colour soft-deleted", {"rowId": "r", SD: "Y"} in pc.update_sheet_data(), pc.explain())
+check("[10c2] only the live colour gets the new Fabric line",
+      [i.get(COLOR_COL) for i in pc.insert_sheet_data()] == ["Blue"], str(pc.insert_sheet_data()))
+
+# d. a style absent from staging (Finalized, dup-colour skip, moved) is left alone
+pd = wip_plan.compute_request_plan(SCOPE, [dtc_row("x", 1, style="KTB-2", **MAIN_ROW)], [bp_row()],
+                                   bom_by_style={"KTB-1": MAIN_ONLY}, bp_keys_this_request=KEYS,
+                                   moved_elsewhere_keys=set(), allowed_cols=ALLOWED)
+check("[10d] unstaged style untouched", not any(SD in u for u in pd.update_sheet_data()), pd.explain())
+
+# e. an already soft-deleted row is invisible; a re-added line gets a NEW row
+rows_e = [dtc_row("m", 1, **MAIN_ROW),
+          dtc_row("dead", 2, **{FG: "Fabric", MA: "WV-0061", PL: "HEM", CT: "Poly 100%", SD: "Y"})]
+pe = wip_plan.compute_request_plan(SCOPE, rows_e, [bp_row(product_status="Proto")],
+                                   bom_by_style={"KTB-1": MAIN_PLUS_ONE}, bp_keys_this_request=KEYS,
+                                   moved_elsewhere_keys=set(), allowed_cols=ALLOWED)
+check("[10e] soft-deleted row gets no write (not even a status change)",
+      all(u["rowId"] != "dead" for u in pe.update_sheet_data()), pe.explain())
+check("[10e2] re-added material is a fresh insert",
+      [i.get(MA) for i in pe.insert_sheet_data()] == ["WV-0061"], str(pe.insert_sheet_data()))
+check("[10e3] counted", pe.summary()["diagnostics"].get("soft_deleted_ignored") == 1, str(pe.summary()))
+
+# f. no Main Fabric this run (BOM missing/partial) -> never a soft delete
+pf = wip_plan.compute_request_plan(SCOPE, rows_a, [bp_row()],
+                                   bom_by_style={"KTB-1": bom_json([("Fabric", "WV-9", "HEM", "x")])},
+                                   bp_keys_this_request=KEYS, moved_elsewhere_keys=set(),
+                                   allowed_cols=ALLOWED)
+check("[10f] no Main Fabric -> no soft delete", pf.is_empty(), pf.explain())
+
+# g. the row being soft-deleted is frozen: its status change never reaches the ledger
+pg = wip_plan.compute_request_plan(SCOPE, rows_a, [bp_row(product_status="Proto")],
+                                   bom_by_style={"KTB-1": MAIN_ONLY}, bp_keys_this_request=KEYS,
+                                   moved_elsewhere_keys=set(), allowed_cols=ALLOWED)
+body_g = {u["rowId"]: u for u in pg.update_sheet_data()}
+check("[10g] soft-deleted row carries only the flag",
+      body_g.get("f") == {SD: "Y", "rowId": "f"}, str(body_g))
+check("[10g2] ledger backs up only the surviving row",
+      [o.row_id for o in wip_history.status_change_updates(pg.updates)] == ["m"])
+
+# g3. a Dropped style whose other colour already left staging: old behaviour
+pg3 = wip_plan.compute_request_plan(SCOPE, rows_c, [bp_row(product_status="Drop")],
+                                    bom_by_style={"KTB-1": MAIN_ONLY}, bp_keys_this_request=KEYS,
+                                    moved_elsewhere_keys=set(), allowed_cols=ALLOWED)
+check("[10g3] Finalized/Drop style -> no colour soft delete",
+      not any(SD in u for u in pg3.update_sheet_data()), pg3.explain())
+
+# h. the kill switch, and a view without the column
+ph = wip_plan.compute_request_plan(SCOPE, rows_a, [bp_row()], bom_by_style={"KTB-1": MAIN_ONLY},
+                                   bp_keys_this_request=KEYS, moved_elsewhere_keys=set(),
+                                   allowed_cols=ALLOWED, soft_delete=False)
+check("[10h] soft_delete=False -> old behaviour (row left alone)", ph.is_empty(), ph.explain())
+pi = wip_plan.compute_request_plan(SCOPE, rows_a, [bp_row(product_status="Proto")],
+                                   bom_by_style={"KTB-1": MAIN_ONLY}, bp_keys_this_request=KEYS,
+                                   moved_elsewhere_keys=set(), allowed_cols=ALLOWED - {SD})
+check("[10i] view without the column -> row keeps its normal update, no flag",
+      {u["rowId"]: u.get("Product Status") for u in pi.update_sheet_data()} == {"m": "Proto", "f": "Proto"},
+      pi.explain())
+
+
+# ---------------------------------------------------------------------------
 print("\n" + "=" * 70)
 total = _passed + len(_failed)
 if _failed:

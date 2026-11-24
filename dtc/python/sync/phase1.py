@@ -140,6 +140,16 @@ MATCH_KEY_COLS: Tuple[str, str] = ("BP Style#", "Color / Wash")
 # FIELD_MAPPING/DEFAULT_FILL_COLS below) since it has no BOM data itself.
 DUMMY_COLOR = "NO BP COLORWAY"
 
+# Soft delete (owner spec 2026-11-24, "Post customer meeting update 2"). wip_push
+# writes "Y" on a WIP row whose colour or BOM material line was removed from
+# BeProduct; from then on every stage ignores the row. Live: plain `string`.
+SOFT_DELETE_COL = "Soft Delete"
+SOFT_DELETE_VALUE = "Y"
+
+
+def is_soft_deleted(row: Dict[str, Any]) -> bool:
+    return str(row.get(SOFT_DELETE_COL) or "").strip().upper() in ("Y", "YES")
+
 # BeProduct staging column -> DTC WIP_ITS_USE column display name.
 # Only columns that actually exist in the view are mapped; anything else would
 # make the PATCH fail with "'<col>' is not found in the mapping."

@@ -277,7 +277,12 @@ for r in eligible:
         continue
 
     rows = fetch_results[r.request_id]
-    print(f"  ✅ {name}: {len(rows)} row(s)")
+    # Soft-deleted rows (Soft Delete = Y) are dead to every downstream stage --
+    # costing, Phase 2, data gaps, lifecycle, Stage 55 -- so they never land here.
+    _n_all = len(rows)
+    rows = [x for x in rows if not phase1.is_soft_deleted(x)]
+    print(f"  ✅ {name}: {len(rows)} row(s)"
+          + (f" (+{_n_all - len(rows)} soft-deleted, skipped)" if _n_all != len(rows) else ""))
 
     control_updates.append((r.request_id, len(rows),
                             "extracted" if rows else "extracted (empty request)"))

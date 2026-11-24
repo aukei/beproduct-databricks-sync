@@ -81,7 +81,7 @@ import traceback
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import bom, duty, phase1
+from . import bom, duty, lifecycle, phase1
 
 # ---------------------------------------------------------------------------
 # Contribution names (used as provenance labels throughout)
@@ -93,8 +93,12 @@ SOURCE_DUTY = "duty"
 # A stale row left behind when a BeProduct key field moved the style to a
 # DIFFERENT request. Marked, never deleted -- see phase1.compute_orphan_marks.
 SOURCE_ORPHAN = "orphan"
+# A row whose colour or BOM material line was removed from BeProduct
+# (owner spec 2026-11-24). It gets "Soft Delete" = "Y" and nothing else.
+SOURCE_SOFT_DELETE = "soft_delete"
 
-ALL_SOURCES = (SOURCE_STYLE, SOURCE_MATERIAL, SOURCE_DUTY, SOURCE_ORPHAN)
+ALL_SOURCES = (SOURCE_STYLE, SOURCE_MATERIAL, SOURCE_DUTY, SOURCE_ORPHAN,
+               SOURCE_SOFT_DELETE)
 
 # Columns the MATERIAL contribution owns outright. When the style contribution
 # also produced one of these (its INSERT-time default-fill), material wins.
@@ -143,6 +147,7 @@ def allowed_patch_columns() -> frozenset:
     cols = {c for c in phase1.FIELD_MAPPING.values() if c != phase1.STYLE_IMAGE_COL}
     cols.update(MATERIAL_OWNED_COLS)
     cols.update(duty_columns())
+    cols.add(phase1.SOFT_DELETE_COL)
     cols.discard(phase1.STYLE_IMAGE_COL)
     return frozenset(cols)
 
@@ -473,6 +478,7 @@ def compute_request_plan(
     material_exclude_cols: Optional[frozenset] = None,
     material_fill_if_blank_cols: Optional[frozenset] = None,
     request_name: Optional[str] = None,
+    soft_delete: bool = True,
 ) -> RequestPlan:
     """
     Compose ONE request's complete write plan from all three contributions.
@@ -514,11 +520,21 @@ def compute_request_plan(
                         which at a 2-hourly cadence means a permanent write
                         window. Excluding the column is the safe holding
                         position until one notation is declared canonical.
+        soft_delete:    `run_soft_delete`. Marks a row "Soft Delete" = "Y" when
+                        its colour left a style still staged for this request,
+                        or its BOM material line left the style's BOM. Rows that
+                        are ALREADY soft-deleted are ignored whatever this says.
 
     Returns:
         RequestPlan. Check `is_empty()` BEFORE issuing any call.
     """
     plan = RequestPlan(request_name=request_name)
+    # A soft-deleted row is dead to the pipeline: never matched, updated,
+    # enriched, costed or backed up again. A line that comes back gets a new row.
+    live = [r for r in dtc_rows if not phase1.is_soft_deleted(r)]
+    if len(live) != len(dtc_rows):
+        plan.counts["soft_deleted_ignored"] = len(dtc_rows) - len(live)
+    dtc_rows = live
     exclude_cols = bom.INSERT_EXCLUDE_COLS | (non_writable_cols or frozenset())
 
     # ── 1. Style contribution ───────────────────────────────────────────────
@@ -548,11 +564,24 @@ def compute_request_plan(
             match_key=key, row_id=rid, current=dict(row),
         ))
 
+    # ── 1b. Colour removals (before material, so a removed colour gets no
+    #        fan-out insert) ─────────────────────────────────────────────────
+    if soft_delete and bp_keys_this_request is not None:
+        # A Finalized/Drop style is a style-level drop: old behaviour, never a
+        # soft delete. Its colours leave staging one by one as each catches up,
+        # so without this a still-staged colour would make the others look removed.
+        terminal = {phase1.norm(r.get("bp_style_number")) for r in bp_rows
+                    if (phase1.norm(r.get("product_status")) or "").lower()
+                    in {x.lower() for x in lifecycle.EXCLUDED_STATUSES}}
+        _apply_colour_soft_deletes(plan, updates, bp_keys_this_request,
+                                   moved_elsewhere_keys or set(), terminal)
+
     # ── 2. Material contribution ────────────────────────────────────────────
     if enable_material and bom_by_style:
         _apply_material(plan, updates, inserts, bom_by_style, exclude_cols, dtc_rows,
                         material_exclude_cols or frozenset(),
-                        material_fill_if_blank_cols or frozenset())
+                        material_fill_if_blank_cols or frozenset(),
+                        soft_delete)
 
     # ── 3. Duty contribution ────────────────────────────────────────────────
     if enable_duty and duty_rows:
@@ -566,6 +595,43 @@ def compute_request_plan(
     # ── 5. Finalize ─────────────────────────────────────────────────────────
     _finalize(plan, updates, inserts, allowed_cols, exclude_cols)
     return plan
+
+
+def _soft_delete(pr: PlannedRow) -> None:
+    pr.set_field(phase1.SOFT_DELETE_COL, phase1.SOFT_DELETE_VALUE, SOURCE_SOFT_DELETE)
+
+
+def _is_being_soft_deleted(pr: PlannedRow) -> bool:
+    return pr.sources.get(phase1.SOFT_DELETE_COL) == SOURCE_SOFT_DELETE
+
+
+def _apply_colour_soft_deletes(
+    plan: RequestPlan,
+    updates: List[PlannedRow],
+    bp_keys_this_request: set,
+    moved_elsewhere_keys: set,
+    terminal_styles: set = frozenset(),
+) -> None:
+    """
+    Soft-delete a row whose colour was removed from a style that is STILL staged
+    for this request. Style-level drops keep the old behaviour (owner,
+    2026-11-24): a style absent from staging altogether -- deleted,
+    Finalized/Drop, the duplicate-colour skip, a move to another request -- and
+    a staged style whose Product Status is Finalized/Drop are left alone.
+    """
+    staged_styles = {k[0] for k in bp_keys_this_request} - set(terminal_styles)
+    n = 0
+    for pr in updates:
+        if pr.row_id is None:
+            continue
+        colour = pr.fields.get(phase1.MATCH_KEY_COLS[1],
+                               pr.current.get(phase1.MATCH_KEY_COLS[1]))
+        key = (pr.match_key[0], phase1.norm(colour))
+        if (key[0] in staged_styles and key not in bp_keys_this_request
+                and key not in moved_elsewhere_keys):
+            _soft_delete(pr)
+            n += 1
+    plan.counts["soft_deleted_colour_rows"] = n
 
 
 def _apply_orphan_marks(
@@ -618,6 +684,7 @@ def _apply_material(
     dtc_rows: List[Dict[str, Any]],
     material_exclude_cols: frozenset = frozenset(),
     material_fill_if_blank_cols: frozenset = frozenset(),
+    soft_delete: bool = False,
 ) -> None:
     """
     Run `bom.plan_style_enrichment()` per style against the PROJECTED rows
@@ -628,11 +695,13 @@ def _apply_material(
     field on this style, still goes out.
     """
     by_handle = {r.handle: r for r in updates + inserts}
-    style_copy_cols = allowed_patch_columns() - MATERIAL_OWNED_COLS - duty_columns()
+    style_copy_cols = (allowed_patch_columns() - MATERIAL_OWNED_COLS - duty_columns()
+                       - {phase1.SOFT_DELETE_COL})
 
     projected_by_style: Dict[Optional[str], List[PlannedRow]] = {}
     for pr in updates + inserts:
-        projected_by_style.setdefault(pr.match_key[0], []).append(pr)
+        if not _is_being_soft_deleted(pr):   # a removed colour gets no material work
+            projected_by_style.setdefault(pr.match_key[0], []).append(pr)
 
     # No rowIndex arithmetic: append_rows() has the server assign it. Only the
     # internal handle sequence remains, and that never leaves this process.
@@ -659,6 +728,7 @@ def _apply_material(
                 row_id_key="_handle",
                 color_key="_color",
                 target_segments=_segments,
+                soft_delete_removed=soft_delete,
             )
         except Exception as e:  # noqa: BLE001
             plan.degraded.append(
@@ -667,7 +737,13 @@ def _apply_material(
             continue
 
         for act in actions:
-            if act.kind == "update":
+            if act.kind == "soft_delete":
+                target = by_handle.get(act.row_id)
+                if target is not None:
+                    _soft_delete(target)
+                    plan.counts["soft_deleted_material_rows"] = (
+                        plan.counts.get("soft_deleted_material_rows", 0) + 1)
+            elif act.kind == "update":
                 target = by_handle.get(act.row_id)
                 if target is None:
                     plan.degraded.append(
@@ -824,6 +900,17 @@ def _finalize(
                 continue
             if pr.kind == "update" and values_equal(pr.current.get(col), pr.fields[col]):
                 pr.dropped[col] = "unchanged (lean PATCH)"
+                del pr.fields[col]
+                pr.sources.pop(col, None)
+
+    # A row soft-deleted this run is frozen: the flag is its ONLY write, so no
+    # status change reaches the ledger and no duty/style value lands on it.
+    # Done after the view check, so a view without the column keeps the
+    # row's normal updates instead of silently freezing it.
+    for pr in updates:
+        if phase1.SOFT_DELETE_COL in pr.fields:
+            for col in [c for c in pr.fields if c != phase1.SOFT_DELETE_COL]:
+                pr.dropped[col] = "row soft-deleted this run; frozen"
                 del pr.fields[col]
                 pr.sources.pop(col, None)
 

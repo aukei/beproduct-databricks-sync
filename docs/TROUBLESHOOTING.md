@@ -234,10 +234,17 @@ DTC-owned values the user had typed (vendor, factory, LinePlan ref#) do
 
 ### 1.7 The opposite: DTC has a row BeProduct does not
 
-This is a **stranded row**, e.g. a colourway deleted in BeProduct or typed
-straight into DTC. It is reported in `wip_push`'s exit value as
-`stranded_rows`, and as `operation = STRANDED_ROWS` in the log. It is never
-written or deleted. Keeping or removing it is a data-owner decision.
+If the style is still in BeProduct (and staged), the row's colour or material
+line was removed, so `wip_push` sets **`Soft Delete = Y`** on it
+(`columns_changed` shows `Soft Delete`; exit `diagnostics` counts
+`soft_deleted_colour_rows` / `soft_deleted_material_rows`). From then on every
+stage ignores it. Wrongly flagged? Clear the cell in DTC; the next run treats
+the row as live again (and re-flags it if BeProduct still lacks the line).
+
+If the whole style is absent from staging (Finalized/Drop, duplicate colour
+names, typed straight into DTC), it is a **stranded row**: reported in
+`wip_push`'s exit value as `stranded_rows` and as `operation = STRANDED_ROWS`
+in the log, never written.
 
 ### 1.8 Style × colour is there, a material row is missing
 
@@ -257,7 +264,7 @@ FROM lft.beproduct.bom_segments WHERE bp_style_number = 'KTB-00029';
 | No row | The techpack BOM is not in Lakebase for this style. The join is `style_no` + `"<season> - <year>"` | The extraction has not landed yet. Wait, or ask the techpack team |
 | `main_fabric_count = 0` | **No "Main Fabric" segment, so zero actions for the whole style** (material gate 2). DTC keeps `Fabric Group = "NO TPM BOM"` | Fix the BOM so exactly one segment has `**MaterialCategory = Main Fabric` |
 | `parse_error` set | Malformed payload | Fix the techpack data |
-| Counts look right, rows still missing | Check the `wip_push` log for this style: `degraded` or `violations` in its exit value | See material gates 3–5. A row carrying some **other** real article # is deliberately left alone, so a changed article can look like a "missing" new row |
+| Counts look right, rows still missing | Check the `wip_push` log for this style: `degraded` or `violations` in its exit value | See material gates 3–6. A changed article soft-deletes the old row and inserts a new one; filter `Soft Delete` in DTC to see both |
 
 `pull_bom` disabled (`run_bom=false`) freezes the BOM at the last value it
 read.
@@ -486,7 +493,7 @@ Things that look like "outdated" but are not:
 | BeProduct `500` … `NullReferenceException` … `PublicHeaderHelper.ParseStyle` on `Style/Header/{id}` | The style was deleted in BeProduct but is still in a snapshot. Before 2026-10-12 an emptied folder left `ktb_styles` stale and `phase2_push` failed on it | `phase2_push` now logs `style_unreadable` and skips it. If it recurs on another stage, check `ktb_styles` was refreshed (PIPELINE.md → Stage 10, "An empty source empties the snapshot") |
 | `NO_RESOLVED_REQUESTS` (wip_push exit value) | No staging request resolved to an active, in-scope DTC request | Runbook 1.2 |
 | DTC `400 Duplicate rowId found` | Two sheetData objects share a rowId in one call. Either DTC's own sheet GET returned that rowId twice (seen 2026-09-29 on a LinePlan sheet), or a regression in the duty merge | **Check first**: does a live `GET /v1/sheets/{s}/views/{v}` list the rowId twice? If so, report it to DTC; we deliberately do not merge on our side. Otherwise it is the duty merge (PIPELINE.md → Stage 40, duty gate 4) |
-| DTC `400 … is an image field` / `… is a formula field` | An INSERT copied a non-writable column | A regression in `bom.build_insert_row_payload` (Stage 40, material gate 7) |
+| DTC `400 … is an image field` / `… is a formula field` | An INSERT copied a non-writable column | A regression in `bom.build_insert_row_payload` (Stage 40, material gate 8) |
 | Image upload `Row cannot be found by rowid` | The row was deleted between the read and the upload | The next run retries |
 | Image skipped `unsupported_postscript_ai` / `unsupported_vector_image` / `unsupported_image_type` | The BeProduct front image is a format DTC cannot store and Phase 3 cannot convert (PostScript-only `.ai`, SVG, …). A PDF-compatible `.ai` IS converted | Replace the front image in BeProduct with jpg/png (or re-save the `.ai` with "Create PDF Compatible File") |
 | Image skipped `pdf_renderer_unavailable` | pypdfium2 failed to pip-install on the task | Check the `phase3_images` task's install cell; other images are unaffected |

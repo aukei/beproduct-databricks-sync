@@ -293,7 +293,8 @@ for name, m in mapping.items():
     # 1. Reload sheet live -> freshest rowIndex + Style Image state.
     try:
         sheet = connector.get_sheet(sheet_id, view_id)
-        dtc_rows = sheet.get("sheetData", [])
+        # A soft-deleted row is never given an image (or used as a copy source).
+        dtc_rows = [r for r in sheet.get("sheetData", []) if not phase1.is_soft_deleted(r)]
     except Exception as e:
         print(f"  ❌ Failed to read DTC sheet: {e}")
         log(log_rows, name, request_id, "ERROR", None, "error", "sheet_read_failed", str(e)[:300])

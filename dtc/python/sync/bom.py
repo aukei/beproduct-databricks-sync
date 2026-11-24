@@ -773,7 +773,7 @@ def build_target_segments(custom_fields: Any) -> Optional[List[Dict[str, Optiona
 @dataclass
 class RowAction:
     """One concrete action for the notebook to execute against DTC/Delta."""
-    kind: str                       # "update" | "insert"
+    kind: str                       # "update" | "insert" | "soft_delete"
     row_id: Optional[str] = None    # for "update": the existing WIP row_id
     base_row: Optional[Dict[str, Any]] = None  # for "insert": the row to copy from
     wip_fields: Dict[str, Optional[str]] = field(default_factory=dict)  # raw DTC field names -> values
@@ -790,6 +790,7 @@ def plan_style_enrichment(
     color_key: str = "color",
     target_segments: Optional[List[Dict[str, Optional[str]]]] = None,
     lf_material_key: str = "lf_material_id",
+    soft_delete_removed: bool = False,
 ) -> List[RowAction]:
     """
     Plan every action needed to upsert ONE style's existing WIP rows from
@@ -867,6 +868,14 @@ def plan_style_enrichment(
     fall into a single implicit group — identical to the pre-fix behavior,
     so this is backward compatible for single-color styles/callers that
     don't track color.
+
+    **Soft delete (`soft_delete_removed=True`, v2 only, owner spec
+    2026-11-24).** A row whose real (Fabric Group, Mill Fabric Article #) is no
+    longer in the BOM gets `RowAction(kind="soft_delete")` instead of being left
+    untouched, and a colour with no live row for the Main Fabric key gets one
+    inserted. Together that makes a key change "soft delete + insert". Still
+    never acted on: a style with no Main Fabric this run (returns []), and a
+    blank-article row whose Fabric Group matches a target but ambiguously.
 
     Args:
         existing_rows: the style's current WIP rows (one dict per colorway
@@ -1058,12 +1067,25 @@ def plan_style_enrichment(
                     row_id=row.get(row_id_key),
                     wip_fields=_wip_fields,
                 ))
+                claimed_target_keys.add(segment_key(main_target))
+            elif soft_delete_removed and not (
+                    _blank(row.get(mill_fabric_article_key))
+                    and any(_norm_key_part(t.get("fabric_group"))
+                            == _norm_key_part(row.get(fabric_group_key))
+                            for t in target_segments)):
+                # Its material line is gone from the BOM (removed, or its key
+                # changed). The ambiguous blank-article backfill case is kept.
+                actions.append(RowAction(kind="soft_delete", row_id=row.get(row_id_key)))
             # else: row carries some OTHER real, unrecognized (Fabric Group,
             # Mill Fabric Article #) combination -- e.g. a "Fabric" segment
             # that's since disappeared, or hand-edited DTC data. NEVER
             # revert or overwrite it; leave completely untouched.
 
-        for target in fabric_targets:
+        # With soft delete on, a colour whose Main Fabric key changed has just
+        # lost its Main row, so the new key is inserted like any other segment.
+        insert_targets = (([main_target] if soft_delete_removed else [])
+                          + fabric_targets)
+        for target in insert_targets:
             if segment_key(target) in claimed_target_keys:
                 continue  # already represented within THIS color -- no insert needed
             # EXACTLY ONE insert per unclaimed segment. This used to loop over

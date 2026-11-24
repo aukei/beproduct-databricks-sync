@@ -226,7 +226,8 @@ applications (Proto / PreLine / SMS / Fit / PP / TOP).
 
 **`pull_master_dtc`** — in-scope DTC WIP requests → `dtc_wip_<customer>`. This is
 the **only** WIP read that feeds planning; v1's `repull_dtc` and `repull_dtc_bom`
-are gone.
+are gone. Rows with `Soft Delete = Y` are skipped, so no snapshot reader
+(costing, Phase 2, lifecycle, Stage 55, data gaps) ever sees them.
 
 **An empty source empties the snapshot** (since 2026-10-12). A FULL
 `bp_style_sync` whose folder returns zero styles empties `ktb_styles`, and a
@@ -305,9 +306,8 @@ material: the material fan-out depends on which segments a colourway is
    (fieldId `hide_colorway`, read as top-level `hideColorway`) is dropped at
    extraction (Stage 10), so it never reaches `ktb_styles.colorways_json`,
    staging, the duplicate-name check or the data-gaps view. A colorway hidden
-   AFTER it reached DTC keeps its rows frozen (never deleted) and shows as
-   `ROW_NOT_IN_BEPRODUCT`. A style whose colorways are ALL hidden falls under
-   gate 2.
+   AFTER it reached DTC counts as removed: Stage 40 soft-deletes its rows.
+   A style whose colorways are ALL hidden falls under gate 2.
 2. **Colorway presence is not a gate.** A style with zero colorways gets one row
    with `color = DUMMY_COLOR` ("NO BP COLORWAY") rather than being dropped.
    Stage 40 upgrades that row in place the first time a real colorway appears.
@@ -533,6 +533,7 @@ Per request, in order:
      *planned* row set rather than a re-pulled one
    - **duty fields** — `duty.build_wip_patch_fields`, joined on
      `(bp_style_number, color_wash, Mill Fabric Article #)`
+   - **soft deletes** — see "Soft delete" below
 4. If the combined plan is empty → **send nothing at all.** No GET-to-PATCH path,
    zero calls, zero user disruption. Design rule 2.
 5. **Product Status ledger** (owner spec 2026-11-11). Every planned update that
@@ -552,7 +553,9 @@ Per request, in order:
    - If the backup fails, those rows' updates are **held** this run
      (`ledger_held`, log `LEDGER` / `ledger_failed_update_held`) and retried
      next run, so a status never changes without its backup.
-   - Not backed up: a first status (blank before) and inserts.
+   - Not backed up: a first status (blank before), inserts, and soft-deleted
+     rows (already flagged, or flagged this run — those write only the flag).
+     The history view has no `Soft Delete` column, so it is never copied.
    - Flag `run_status_ledger` (default `true`).
 6. Otherwise: updates as a `patch_rows` PATCH keyed by `rowId`, then inserts as
    an `append_rows` POST to `.../rows` — the server assigns `rowId`/`rowIndex`
@@ -612,16 +615,36 @@ limit, so it has to be re-established explicitly in the composition layer.
   that signals the DTC user. Never deleted. Only rows whose key now lives under a
   different request are marked. These marks are part of the *old* request's own
   single write window.
+- **Soft delete** (owner spec 2026-11-24, "Post customer meeting update 2";
+  reverses "BeProduct → DTC is upsert only"). The WIP column `Soft Delete`
+  (plain `string`) gets `"Y"`, and nothing else is written to that row:
+  - **Colour removed**: the style is still staged for this request but the
+    row's `(BP Style#, Color / Wash)` is not (deleted, hidden or renamed
+    colorway). **Style-level drop / delete keeps the old behaviour** (owner,
+    2026-11-24): a style absent from staging altogether (deleted, Finalized/
+    Drop, duplicate-colour skip, moved to another request) and a staged style
+    whose `Product Status` is Finalized/Drop are never soft-deleted — they stay
+    as they are and show as stranded. The second check matters because a
+    terminal style's colours leave staging one by one as each catches up.
+  - **Material removed**: material gate 3 below.
+  - A key change is therefore **soft delete + insert**, never an in-place
+    update. Placeholders are not keys and are still filled in place: the
+    `NO BP COLORWAY` dummy, `NO TPM BOM`, a blank article, the legacy bare
+    colour name.
+  - A row with `Soft Delete = Y` (case-insensitive, `YES` too) is ignored by
+    every stage from then on: never matched, updated, enriched, costed, imaged
+    or backed up. A removed line that comes back gets a NEW row. To undo a
+    soft delete, clear the cell in DTC.
+  - The new row copies only style columns, so DTC-owned values typed on the old
+    row (vendor, factory, LinePlan ref#) must be re-entered.
+  - Flag `run_soft_delete` (default `true`) stops new flags; already-flagged
+    rows stay ignored.
 - **Stranded rows** (reported, never written): a row whose `(BP Style#,
-  Color / Wash)` key exists **nowhere** in BeProduct — e.g. a colorway deleted
-  from BeProduct, or one created directly in DTC. No stage touches these:
-  `compute_orphan_marks` only handles keys that moved to a *different* request,
-  and the "exists nowhere" case shares a branch with genuinely user-entered
-  rows, which must be protected. They are **not inert** — they still feed
-  Stage 30, so a stranded colorway can consume NT Orbit lookups and carry duty
-  values. `wip_push` surfaces them as `stranded_rows` in its exit JSON and as a
-  `STRANDED_ROWS` row in the sync log; deciding what to do with one is a
-  data-policy call.
+  Color / Wash)` key exists **nowhere** in staging and was not soft-deleted —
+  in practice a style absent from staging (Finalized/Drop, duplicate-colour
+  skip), or a row typed straight into DTC. They are **not inert** — they still
+  feed Stage 30. `wip_push` surfaces them as `stranded_rows` in its exit JSON
+  and as a `STRANDED_ROWS` row in the sync log.
 
 **Gates — material fields** (`sync/bom.py`, `plan_style_enrichment()`):
 
@@ -654,8 +677,10 @@ limit, so it has to be re-established explicitly in the composition layer.
      blank could never satisfy the exact-match key once the source filled in.
    - **Un-enriched** (blank, or the `DUMMY_FABRIC_GROUP` sentinel `"NO TPM BOM"`)
      → full first-time enrichment from the Main Fabric segment.
-   - **Any other real value** → left completely untouched. Never reverted, never
-     blanked, whatever this run's BOM snapshot says.
+   - **Any other real value** → its material line left the BOM: **soft-deleted**
+     (since 2026-11-24; before that it was left untouched). Exception: a
+     blank-article row whose Fabric Group matches a target ambiguously is left
+     alone, as above. Never reverted or blanked either way.
    - **`LF Fabric ID`** (added 2026-09-22) is proposed on an exact key match as
      well as at first-time enrichment — a row enriched before the column existed
      only ever reaches the matched branch again, so it would otherwise stay blank
@@ -664,7 +689,10 @@ limit, so it has to be re-established explicitly in the composition layer.
      DTC, so it arrives late and progressively, and a corrected
      `LF_Material_ID` must be able to propagate. Safe because this pipeline is
      its only writer — unlike `Content`, which DTC's own trigger contests.
-4. **Fan-out**: every BOM group except `Main Fabric`, `Packaging` and `Label`
+4. **Main Fabric re-insert** (with soft delete): a colour left with no live row
+   for the Main Fabric key — its old one was soft-deleted because the key
+   changed — gets one inserted, like a fan-out segment.
+5. **Fan-out**: every BOM group except `Main Fabric`, `Packaging` and `Label`
    (`bom.is_fanout_group()`: "Fabric", "Trim", "Artwork", ...; a blank group is
    skipped) is a fan-out segment (owner spec 2026-11-20; until then only "Fabric").
    A (group, article) repeated in the techpack — one line per colourway group —
@@ -672,22 +700,22 @@ limit, so it has to be re-established explicitly in the composition layer.
    match or blank-article backfill — insert ONE row for that colorway. It copies
    only STYLE columns from an existing row of the colour: never DTC-owned values
    (vendor, LinePlan ref#, fabric lookups), duty, or that row's own material key.
-5. **Coverage is scoped per colorway, not per style.** `KTB-00029` had 2 colors ×
+6. **Coverage is scoped per colorway, not per style.** `KTB-00029` had 2 colors ×
    3 segments = 6 expected rows but only 4, because one color's rows had claimed
    both Fabric segments globally and permanently starved the other. Rows with no
    colorway value collapse into one implicit group.
-6. **Blank-vs-blank is never a diff** — DTC's `None` and the source's `""` are
+7. **Blank-vs-blank is never a diff** — DTC's `None` and the source's `""` are
    equivalent when diffing Placement/Content, avoiding a spurious `{"Placement": ""}`
    PATCH on every already-blank matched row.
-7. **INSERT payload exclusions** (`build_insert_row_payload()` +
+8. **INSERT payload exclusions** (`build_insert_row_payload()` +
    `compute_non_writable_cols()`): never copies `rowId`/`rowIndex`, never
    `"Style Image"`, never a column the live view marks `type=="contact"` or
    carrying a truthy `formula`.
 
 > **Known hazard, carried over from v1.** Any change to which BOM segments or keys
-> count as "current" can leave already-enriched rows whose old key no longer
-> matches — correctly left untouched — while the unmatched segments are still
-> treated as genuinely new and fan out N×M inserts. This multiplies fast for
+> count as "current" makes every already-enriched row whose old key no longer
+> matches look removed — since 2026-11-24 it is **soft-deleted** — while the
+> unmatched segments are treated as genuinely new and fan out N×M inserts. This multiplies fast for
 > styles with many pre-existing rows. Re-read this before changing the BOM source
 > or field mapping again; see AGENTS.md 2026-09-09 for the live case study.
 
@@ -742,7 +770,7 @@ per run, and it sees `wip_push`'s newly inserted rows in the same run. In steady
 state it uploads nothing and opens no window.
 
 Reads `dtc_request_mapping` / `beproduct_to_dtc_staging`, and does its own live
-`get_sheet()` immediately before writing (that read also supplies the current
+`get_sheet()` immediately before writing (rows with `Soft Delete = Y` dropped) (that read also supplies the current
 blank-vs-populated Style Image state). Logs to `beproduct_to_dtc_sync_log` with
 `stage='images'`.
 

@@ -1020,3 +1020,9 @@ according to beproduct setup, possibile values of "Group" are ["Main Fabric",'Fa
         ---override--- 4.1 fabric line does not exist on DTC
         4.1 Create fabric line in Dev request if material not exist. Fill only 3 fields: "Mill Name","Mill Fabric Article #","Color / Wash"
         4.2 Fabric Request does not exist in DTC
+
+# 15 Post customer meeting update 2
+- previously we assume BP -> DTC are upsert only, explicitly rule out delete.
+- DTC "KTB WIP" now has a "Soft Delete" field. Whenever a BOMvariation line, i.e. a material or a color is removed, their corresponding WIP master chart line should be marked "soft deleted = Y"
+- In this case, whenever there is a (material#, color#) key change, it is not an update but a soft delete + insert action. 
+- During "KTB WIP HISTORY" backup, copy only "Soft Delete <> Y" rows. "WIP HISTORY" document does not contain the "soft delete" field.

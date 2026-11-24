@@ -342,7 +342,8 @@ this stays true by construction; verify it stays true after any change).
    `Brand`, `Color / Wash`, `Garment Finish`, `Tech Pack Stage`, `BP Style#`,
    `LF Style#`, `Legacy Code`, `Gender`, `Supplier` (hardcoded prefill
    default-fill value, not sourced from BeProduct), `Fabric Group`,
-   `Placement`, `Mill Fabric Article #` (Phase 10 sources this from BOM
+   `Placement`, `Soft Delete` (only ever `"Y"`, and alone -- since
+   2026-11-24), `Mill Fabric Article #` (Phase 10 sources this from BOM
    `**SupplierRefNo` via `customer_teckpack_style_log.custom_fields` —
    corrected 2026-09-09 "2nd revision", was `bom_unified.material_name`
    before that and `material_no` before that), `Proto Sample - Sample
@@ -371,6 +372,42 @@ this stays true by construction; verify it stays true after any change).
    `"Factory 3 - Tariff"` (no `rate` suffix; ` - ` for numbered slots).
 
 ## Verified discoveries log (append-dated; do not delete)
+
+**Soft delete in KTB WIP -- BeProduct -> DTC is no longer upsert-only
+(2026-11-24, owner spec "Post customer meeting update 2"; DEPLOYED to the v2
+root 2026-11-24, job definition unchanged).** PIPELINE.md Stage 40 "Soft
+delete"; SYNC_CONTRACT invariant 6.
+- Live: `WIP_ITS_USE` has `Soft Delete` (plain `string`, field id
+  `6b053bd997087d7cb05e3007`), blank on every row so far. History view `Full`
+  (212 columns) has NO such column, so `snapshot_row()` never copies it.
+- `wip_push` writes `"Y"` (and nothing else) on a row whose colour left a style
+  still staged for the request, or whose (Fabric Group, Mill Fabric Article #)
+  left the BOM. Key change = soft delete + insert, incl. Main Fabric (the new
+  main key used to be never inserted). Placeholders (`NO BP COLORWAY`,
+  `NO TPM BOM`, blank article, bare colour name) still fill in place.
+- `Soft Delete = Y` rows are invisible from then on: dropped in
+  `compute_request_plan`, in `pull_master_dtc` (so costing / Phase 2 /
+  lifecycle / Stage 55 / data gaps never see them) and in `phase3_images`.
+- **Owner: soft delete concerns BOM-variation changes only (material line or
+  colour). Style-level drop / delete keeps the old behaviour.** So a style
+  absent from staging, or staged with `Product Status` Finalized/Drop, is never
+  soft-deleted (the second guard: a terminal style's colours leave staging one
+  at a time, which would otherwise make the rest look removed).
+- Guards: no Main Fabric this run -> nothing; style absent from staging ->
+  nothing (live check: the 6 still-stranded styles KTB-00093/109/127/145/164/203
+  are all `Finalized`); `Soft Delete` missing from the view -> row keeps its
+  normal update. Kill switch widget `run_soft_delete`.
+- **`FALLBACK_COLS` trap**: the column is blank everywhere, so a data-scan
+  `allowed` set would never contain it and soft delete would silently never
+  fire. Added to `v2_wip_push.FALLBACK_COLS`.
+- Scratch-root dry run on live data: 28 soft deletes, 0 inserts, nothing else,
+  2 write windows. `KTB FW28 Collaborations` 26 = KTB-00073 hidden colours
+  (Blac, CAD-1234, Honeyed Apricot, Corn Confection) + bare-name leftovers
+  (Black, Very Peri) x 3 rows, KTB-00072 test colours `Flushing Pink E` /
+  `Flushing Pink-E` x 2, and KTB-00073 Fabric `WG24-01706` on its 4 visible
+  colours (dropped from the techpack extracted 2026-11-24 07:12 UTC; Main
+  Fabric + Trim remain). `KTB SS27 Blue Bell` 2 = KTB-00079 `Black Onyx` /
+  KTB-00090 `Black 19-4003TCX`, whose colours swapped styles in BeProduct.
 
 **Stage 65 now CREATES a missing fabric line (2026-11-24, owner override of
 spec 4.1; DEPLOYED to the v2 root 2026-11-24).** An article with no line in

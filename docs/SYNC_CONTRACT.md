@@ -64,6 +64,12 @@ Then update the tests: `test_phase1.py`, `test_phase2.py`, `test_phase3.py`,
    style, material and duty changes for the same `rowId` merge into a single
    object before the call.
 5. **A run that changes nothing writes nothing.** See PIPELINE.md design rule 2.
+6. **Removal is a soft delete, never a row delete** (since 2026-11-24). A WIP row
+   whose colour or BOM material line left BeProduct gets `Soft Delete = "Y"`;
+   a key change is soft delete + insert. A row with `Soft Delete = Y` is
+   ignored by every stage. It concerns BOM lines and colours only: a style
+   that is dropped (Finalized/Drop) or deleted keeps the old behaviour.
+   PIPELINE.md → Stage 40, "Soft delete".
 
 ---
 
@@ -138,7 +144,9 @@ columns of the `Type == "BOM"` table.
 
 Write rules shared by all five: a blank source value is **never** written over a
 real one; a row holding some other real (Fabric Group, Mill Fabric Article #)
-pair is left alone; nothing is ever reverted. Full per-row decision tree:
+pair — its line left the BOM — is **soft-deleted** (since 2026-11-24), unless
+the style has no Main Fabric this run (then nothing happens); nothing is ever
+reverted. Full per-row decision tree:
 PIPELINE.md → Stage 40, "Gates — material fields".
 
 **`Content` is write-once** (`material_fill_if_blank_columns="Content"`). DTC's
@@ -352,7 +360,7 @@ Color / Wash            Garment Finish          Tech Pack Stage
 BP Style#               LF Style#               Legacy Code
 Gender                  Supplier                Fabric Group
 Placement               Mill Fabric Article #   Content
-LF Fabric ID
+LF Fabric ID            Soft Delete (only "Y"; the flagged row gets nothing else)
 Proto Sample - Sample Status                    Pre-line Sample - Status
 SMS - Sample Status                             1st Fit Sample Approval Status
 2nd Fit Sample Approval Status
@@ -373,7 +381,8 @@ from any one contribution a whole-push problem.
 **This table is documentation; the executable definition is
 `wip_plan.allowed_patch_columns()`**, which derives the set from the payload
 builders themselves (`phase1.FIELD_MAPPING`, the material column constants, and
-`duty.WIP_HTS_COL` / `WIP_DUTY_COL` / `WIP_TARIFF_COL`) rather than restating
+`duty.WIP_HTS_COL` / `WIP_DUTY_COL` / `WIP_TARIFF_COL`, plus
+`phase1.SOFT_DELETE_COL`) rather than restating
 it. Add a field to a mapping and it is allowed automatically — the two cannot
 drift. Every plan is checked against it, and a field outside it is dropped and
 recorded in `RequestPlan.violations` rather than reaching a PATCH body.
