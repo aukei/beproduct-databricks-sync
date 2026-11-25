@@ -3,8 +3,9 @@ LinePlan join-key column names -- the ONE place they are spelled.
 
 The WIP <-> LinePlan join (Phase 9a / Stage 30) reads the ref BY DTC DISPLAY
 NAME from both sheets, and DTC column names are edited by humans. A rename does
-not fail anything: `get_json_object` / `dict.get` just return NULL, the INNER
-JOIN drops every row, and `costing_chart` comes out EMPTY on a green run.
+not fail anything: `get_json_object` / `dict.get` just return NULL. While the
+join was INNER that emptied `costing_chart` on a green run; since 2026-11-25
+(ref optional, LEFT join) it silently blanks every row's LinePlan values.
 
 That happened on 2026-09-28: DTC renamed ``"Lineplan Ref #"`` to
 ``"LinePlan ref#"`` on BOTH the WIP and the LinePlan sheets (41/45 WIP rows and
@@ -17,16 +18,22 @@ renamed yet (or a Delta snapshot taken before the rename) still joins. Add a
 new name at the FRONT when DTC renames again; never "tidy" the spelling -- a
 name absent from the sheet silently reads as NULL.
 
+On 2026-11-25 the LinePlan sheet (only) renamed it again, to ``"LINEPLAN #"``,
+and ``"PROJECTED VOLUME (season)"`` to ``"PROJECTED VOLUME (SEASON)"``; KTB WIP
+keeps ``"LinePlan ref#"``. One list serves both sheets: each sheet carries only
+its own name, so first non-blank still picks the right one.
+
 `dashboards/data_gaps/v_data_gaps.sql` (`names` CTE) must list the same names.
 """
-from typing import Any, Mapping, Optional
+from typing import Any, Iterable, Mapping, Optional
 
-LINEPLAN_REF_COLS = ("LinePlan ref#", "Lineplan Ref #")
+LINEPLAN_REF_COLS = ("LINEPLAN #", "LinePlan ref#", "Lineplan Ref #")
+PROJECTED_VOLUME_COLS = ("PROJECTED VOLUME (SEASON)", "PROJECTED VOLUME (season)")
 
 
-def lineplan_ref(row: Mapping[str, Any]) -> Optional[str]:
-    """First non-blank ref across `LINEPLAN_REF_COLS`, stripped; else None."""
-    for col in LINEPLAN_REF_COLS:
+def first_value(row: Mapping[str, Any], cols: Iterable[str]) -> Optional[str]:
+    """First non-blank value across `cols`, as a stripped string; else None."""
+    for col in cols:
         v = row.get(col)
         if v is None:
             continue
@@ -34,3 +41,8 @@ def lineplan_ref(row: Mapping[str, Any]) -> Optional[str]:
         if s:
             return s
     return None
+
+
+def lineplan_ref(row: Mapping[str, Any]) -> Optional[str]:
+    """First non-blank ref across `LINEPLAN_REF_COLS`, stripped; else None."""
+    return first_value(row, LINEPLAN_REF_COLS)

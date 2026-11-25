@@ -32,8 +32,8 @@ View selection (preferred → fallback):
   If neither exists for a request, it is skipped and logged.
 
 Key staging columns (LinePlan "Full" view, 30 fields, confirmed 2026-07-17):
-  lineplan_ref       ← "LinePlan ref#" (was "Lineplan Ref #"; see sync/lineplan.py)  (join key to WIP)
-  projected_volume   ← "PROJECTED VOLUME (season)"     (→ Costing Order Qty)
+  lineplan_ref       ← "LINEPLAN #" (was "LinePlan ref#" / "Lineplan Ref #"; see sync/lineplan.py)  (join key to WIP)
+  projected_volume   ← "PROJECTED VOLUME (SEASON)" (was "(season)", renamed 2026-11-25)  (→ Costing Order Qty)
   target_ldp         ← "TARGET SAP w/ Tariff impact"   (→ Costing Target LDP)
   target_fob         ← "TARGET FOB"                    (→ Costing Target FOB)
   gender             ← "Gender"
@@ -89,7 +89,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 from connectors.dtc import DTCConnector
-from sync.lineplan import lineplan_ref
+from sync.lineplan import PROJECTED_VOLUME_COLS, first_value, lineplan_ref
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
     StructType, StructField, StringType, LongType, TimestampType,
@@ -106,8 +106,8 @@ FIXED_FIELDS = [
     StructField("row_id",             StringType()),
     StructField("row_index",          LongType()),
     # Key fields for Phase 9a Costing Chart join
-    StructField("lineplan_ref",       StringType()),   # "Lineplan Ref #"
-    StructField("projected_volume",   StringType()),   # "PROJECTED VOLUME (season)"
+    StructField("lineplan_ref",       StringType()),   # "LINEPLAN #" (sync/lineplan.py)
+    StructField("projected_volume",   StringType()),   # "PROJECTED VOLUME (SEASON)"
     StructField("target_ldp",         StringType()),   # "TARGET SAP w/ Tariff impact"
     StructField("target_fob",         StringType()),   # "TARGET FOB"
     # Supplementary fields
@@ -305,11 +305,11 @@ def _build_lp_records(ref, req_id, view_name, rows):
             "row_index":         (int(row["rowIndex"])
                                   if row.get("rowIndex") is not None else None),
             # Key Phase 9a fields (exact DTC column names in "Full" view)
-            # Read via sync.lineplan: DTC renamed this column on 2026-09-28
-            # ("Lineplan Ref #" -> "LinePlan ref#") and a plain .get() of the
-            # old name silently emptied costing_chart.
+            # Read via sync.lineplan: DTC renamed these columns (2026-09-28,
+            # 2026-11-25) and a plain .get() of an old name silently emptied
+            # costing_chart.
             "lineplan_ref":      lineplan_ref(row),
-            "projected_volume":  row.get("PROJECTED VOLUME (season)"),
+            "projected_volume":  first_value(row, PROJECTED_VOLUME_COLS),
             "target_ldp":        row.get("TARGET SAP w/ Tariff impact"),
             "target_fob":        row.get("TARGET FOB"),
             "gender":            row.get("Gender"),
@@ -370,7 +370,7 @@ else:
 
 if total_rows == 0:
     print("   ⚠️  0 rows — table created with empty schema (LinePlan sheets may have "
-          "no data yet or no 'Lineplan Ref #' values).")
+          "no data yet or no 'LINEPLAN #' values).")
 
 # COMMAND ----------
 

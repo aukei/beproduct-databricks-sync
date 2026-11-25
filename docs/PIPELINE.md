@@ -279,7 +279,7 @@ request here removes its rows from every stage below.
 **Exception:** `pull_lineplan_dtc` has its own independent, *unfiltered* discovery
 loop and never calls `is_in_scope()` — the project team has not settled a LinePlan
 naming convention and explicitly wants backup-named LinePlan requests included
-(2026-09-01). Uniqueness of `LinePlan ref#` across LinePlan requests is therefore
+(2026-09-01). Uniqueness of `LINEPLAN #` across LinePlan requests is therefore
 a human-enforced invariant; Stage 30 only warns on conflict, never blocks.
 
 ---
@@ -448,7 +448,8 @@ or key.
 
 Fully overwritten every run, no incremental — recovery for a bad build is
 `RESTORE TABLE … VERSION AS OF n`. The exit value reports every gate's drop
-count (`gates.dropped_*`, `joined_to_lineplan`, `rows_by_vendor_slot`,
+count (`gates.dropped_*`, plus `no_lineplan_ref` / `lineplan_ref_not_found` /
+`joined_to_lineplan` for rows kept without LinePlan values, `rows_by_vendor_slot`,
 `duty_fields_non_blank`); serverless returns no stdout, so that JSON is the
 diagnostic.
 
@@ -464,8 +465,8 @@ multiple physical rows that would otherwise collide.
 > in SQL and `.eqNullSafe()` in PySpark. This bit both call sites simultaneously
 > in v1 (fixed 2026-09-10).
 
-**Gates.** A WIP row must clear three independent gates to produce any
-`costing_chart` row, and failing any one produces zero rows with no distinguishing
+**Gates.** A WIP row must clear two independent gates (completeness, vendor
+slot) to produce any `costing_chart` row, and failing any one produces zero rows with no distinguishing
 error — this is the most common source of "why isn't my style in `costing_chart`"
 (see the `KTB-00030` case in AGENTS.md, 2026-09-10).
 
@@ -478,10 +479,13 @@ error — this is the most common source of "why isn't my style in `costing_char
    rows are excluded from costing by design, so duty is only ever computed for
    Main Fabric.
 
-*LinePlan INNER JOIN:*
-5. `lineplan_ref` non-blank on the row itself — dropped before the join if blank.
-6. That ref must actually match a `dtc_lineplan_<customer>` row; an unmatched ref
-   is dropped, not carried through with nulls.
+*LinePlan LEFT JOIN — the ref is OPTIONAL since 2026-11-25 (owner spec; INNER,
+i.e. a drop, from 2026-09-01 until then). Neither 5 nor 6 drops a row:*
+5. `lineplan_ref` blank → the row goes on with `order_quantity` / `target_ldp` /
+   `target_fob` NULL (counter `no_lineplan_ref`).
+6. Ref not in any `dtc_lineplan_<customer>` row → same, NULL LinePlan values
+   (counter `lineplan_ref_not_found`). `lp` is one row per ref, so the join never
+   multiplies rows.
 
 *Per vendor slot (Main/1/2/3), independently:*
 7. The slot's vendor must be non-blank. Zero populated slots → zero rows; two of

@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "python"))
 
-from sync.lineplan import LINEPLAN_REF_COLS, lineplan_ref
+from sync.lineplan import LINEPLAN_REF_COLS, PROJECTED_VOLUME_COLS, first_value, lineplan_ref
 
 _failures = []
 
@@ -26,7 +26,8 @@ print("LinePlan ref tests")
 print("=" * 60)
 
 print("\n[1] names")
-check(LINEPLAN_REF_COLS[0] == "LinePlan ref#", "current DTC name first (renamed 2026-09-28)")
+check(LINEPLAN_REF_COLS[0] == "LINEPLAN #", "current LinePlan name first (renamed 2026-11-25)")
+check("LinePlan ref#" in LINEPLAN_REF_COLS, "WIP's current name kept")
 check("Lineplan Ref #" in LINEPLAN_REF_COLS, "pre-rename name kept as fallback")
 
 print("\n[2] lineplan_ref()")
@@ -38,6 +39,13 @@ check(lineplan_ref({"LinePlan ref#": "  ", "Lineplan Ref #": "OLD"}) == "OLD",
       "blank current name falls through")
 check(lineplan_ref({}) is None, "absent -> None")
 check(lineplan_ref({"LinePlan ref#": ""}) is None, "blank -> None, never ''")
+check(lineplan_ref({"LINEPLAN #": "WC-S8001"}) == "WC-S8001", "LinePlan sheet name (2026-11-25)")
+
+print("\n[3] projected volume")
+check(first_value({"PROJECTED VOLUME (SEASON)": 1500}, PROJECTED_VOLUME_COLS) == "1500", "new name")
+check(first_value({"PROJECTED VOLUME (season)": "4000"}, PROJECTED_VOLUME_COLS) == "4000", "old name still read")
+check(first_value({"PROJECTED VOLUME (SEASON)": 0}, PROJECTED_VOLUME_COLS) == "0", "zero is a value, not blank")
+check(first_value({"PROJECTED VOLUME (ANNUAL)": 9}, PROJECTED_VOLUME_COLS) is None, "ANNUAL is not SEASON")
 
 print()
 if _failures:

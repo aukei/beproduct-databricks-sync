@@ -43,18 +43,20 @@ Input tables (v2 "intent" mode)
 
 Join key
 --------
-  WIP  "LinePlan ref#"  =  LinePlan  "LinePlan ref#"
-  RENAMED 2026-09-28 in DTC on BOTH sheets (was "Lineplan Ref #"). Read via
+  WIP  "LinePlan ref#"  =  LinePlan  "LINEPLAN #"
+  RENAMED 2026-09-28 in DTC on BOTH sheets (was "Lineplan Ref #"), and again
+  2026-11-25 on the LinePlan sheet ONLY (-> "LINEPLAN #"). Read via
   sync/lineplan.py LINEPLAN_REF_COLS (new name first, old as fallback) --
-  a name missing from the sheet reads as NULL and empties costing_chart
-  silently. Add any future rename there, at the front.
+  a name missing from the sheet reads as NULL and silently blanks every
+  row's LinePlan values (it emptied costing_chart while the join was INNER). Add any future rename there, at the front.
   NOTE: the WIP column has no "(GC)" suffix (old or new name) — the spec
   annotation "(GC)" is not the literal DTC column name).
-  INNER JOIN (changed from LEFT 2026-09-01, owner decision): a WIP row with
-  a blank/unmatched "LinePlan ref#" is dropped entirely, not surfaced with
-  null LinePlan fields. The per-slot vendor-presence filter (below) still
-  applies independently — a WIP row can match LinePlan and still produce
-  zero costing rows if no vendor is assigned yet.
+  LEFT JOIN (owner spec 2026-11-25, "LinePlan ref# is OPTIONAL"; INNER
+  from 2026-09-01 until then): a WIP row with a blank/unmatched ref still
+  forms its costing rows, with order_quantity / target_ldp / target_fob
+  NULL. The per-slot vendor-presence filter (below) is the only gate after
+  the completeness filter: a Main Fabric row reaches costing_chart as soon
+  as a vendor (and so its looked-up factory) is filled.
 
 Vendor / Factory slot structure
 --------------------------------
@@ -142,7 +144,7 @@ production_country     | WIP JSON     | "Factory Production Country for [Main Fa
                        |              | tariff either. This pipeline never writes these columns -- they are
                        |              | absent from allowed_patch_columns() -- so a NULL here is always
                        |              | upstream, never ours.
-order_quantity         | LinePlan     | "PROJECTED VOLUME (season)"   (aggregated first per ref)
+order_quantity         | LinePlan     | "PROJECTED VOLUME (SEASON)"   (aggregated first per ref; "(season)" before 2026-11-25)
 target_ldp             | LinePlan     | "TARGET SAP w/ Tariff impact" (lowercase 'i')
 target_fob             | LinePlan     | "TARGET FOB"
 hts_code               | WIP JSON     | "Main Factory HTS Code" / "Factory [1-3] - HTS code"
@@ -183,8 +185,10 @@ docs/SYNC_CONTRACT.md (executable: wip_plan.allowed_patch_columns()) --
 
 LinePlan field names (exact DTC column names — all UPPERCASE, confirmed 2026-07-17)
 -------------------------------------------------------------------------------------
-  "LinePlan ref#"                 join key to WIP (was "Lineplan Ref #" until 2026-09-28)
-  "PROJECTED VOLUME (season)"     → order_quantity
+  "LINEPLAN #"                    join key to WIP (was "LinePlan ref#" until 2026-11-25,
+                                  "Lineplan Ref #" until 2026-09-28)
+  "PROJECTED VOLUME (SEASON)"     → order_quantity (was "(season)" until 2026-11-25;
+                                  NOT "PROJECTED VOLUME (ANNUAL)", a different column)
   "TARGET SAP w/ Tariff impact"   → target_ldp     (lowercase 'i' in "impact")
   "TARGET FOB"                    → target_fob
   "INTERNAL/ SOURCED"             pulled into dtc_lineplan_ktb.internal_sourced but

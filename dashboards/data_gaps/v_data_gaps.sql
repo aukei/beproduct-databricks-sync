@@ -20,7 +20,7 @@ WITH
 -- ── DTC column names the PIPELINE reads: sync/lineplan.py LINEPLAN_REF_COLS,
 --    current first. Keep in step -- a name missing here reads as NULL. ──────
 names AS (
-  SELECT array('LinePlan ref#', 'Lineplan Ref #') AS lineplan_ref_cols
+  SELECT array('LINEPLAN #', 'LinePlan ref#', 'Lineplan Ref #') AS lineplan_ref_cols
 ),
 wip AS (
   SELECT
@@ -33,7 +33,8 @@ wip AS (
     get_json_object(w.data_json, "$['Mill Fabric Article #']") AS article,
     get_json_object(w.data_json, "$['Content']")               AS content,
     coalesce(nullif(trim(get_json_object(w.data_json, concat("$['", n.lineplan_ref_cols[0], "']"))), ''),
-             nullif(trim(get_json_object(w.data_json, concat("$['", n.lineplan_ref_cols[1], "']"))), '')) AS lineplan_ref,
+             nullif(trim(get_json_object(w.data_json, concat("$['", n.lineplan_ref_cols[1], "']"))), ''),
+             nullif(trim(get_json_object(w.data_json, concat("$['", n.lineplan_ref_cols[2], "']"))), '')) AS lineplan_ref,
     get_json_object(w.data_json, "$['Main Vendor (Sampling)']")  AS v_main,
     get_json_object(w.data_json, "$['Main Factory (Sampling)']") AS f_main,
     get_json_object(w.data_json, "$['Factory Production Country for Main Factory']") AS c_main,
@@ -152,7 +153,7 @@ gaps AS (
   SELECT 'System' AS area, 'LINEPLAN_COLUMN_RENAMED' AS gap_code, 'blocker' AS severity,
          'IT' AS owner, NULL AS request, NULL AS bp_style, NULL AS color, NULL AS article,
          concat('No DTC row has any of ', concat_ws(' / ', n.lineplan_ref_cols), ', but ', r.cnt,
-                ' rows have ', r.keys, '. The pipeline cannot see any Lineplan Ref, so NO costing line can form.') AS detail,
+                ' rows have ', r.keys, '. The pipeline cannot see any LinePlan ref, so NO costing line gets Order Qty / Target LDP / Target FOB.') AS detail,
          'IT: add the new name to sync/lineplan.py LINEPLAN_REF_COLS and to the names CTE of this view.' AS action,
          '3' AS runbook
   FROM names n CROSS JOIN lp_renamed r
@@ -160,8 +161,8 @@ gaps AS (
 
   UNION ALL
   SELECT 'System', 'LINEPLAN_SHEET_HAS_NO_REFS', 'blocker', 'IT', NULL, NULL, NULL, NULL,
-         'The LinePlan pull holds rows but none with a LinePlan ref#. Either the LinePlan column was renamed or nobody has filled it in.',
-         'IT: check the LinePlan column name first; otherwise the LinePlan owner fills LinePlan ref#.',
+         'The LinePlan pull holds rows but none with a LinePlan ref (LINEPLAN #). Either the LinePlan column was renamed or nobody has filled it in. Costing lines still form, without Order Qty / Target LDP / Target FOB.',
+         'IT: check the LinePlan column name first (sync/lineplan.py); otherwise the LinePlan owner fills LINEPLAN #.',
          '3'
   WHERE EXISTS (SELECT 1 FROM lft.beproduct.dtc_lineplan_ktb)
     AND NOT EXISTS (SELECT 1 FROM lp_refs)
@@ -283,16 +284,16 @@ gaps AS (
   FROM rep WHERE trim(fabric_group) = 'Main Fabric' AND nullif(trim(content), '') IS NULL
 
   UNION ALL
-  SELECT 'Costing', 'LINEPLAN_REF_MISSING', 'blocker', 'DTC user', request, bp_style, color, article,
-         'LinePlan ref# is blank on the Main Fabric row, so no costing line can form.',
+  SELECT 'Costing', 'LINEPLAN_REF_MISSING', 'warning', 'DTC user', request, bp_style, color, article,
+         'LinePlan ref# is blank on the Main Fabric row. The costing line still forms (it is optional since 2026-11-25), but without Order Qty / Target LDP / Target FOB.',
          'DTC user: enter LinePlan ref# on the Main Fabric row (not on the Fabric rows).',
          '3'
   FROM rep WHERE trim(fabric_group) = 'Main Fabric' AND nullif(trim(lineplan_ref), '') IS NULL
     AND NOT (SELECT renamed FROM lp_renamed)
 
   UNION ALL
-  SELECT 'Costing', 'LINEPLAN_REF_NOT_IN_LINEPLAN', 'blocker', 'DTC user', rep.request, rep.bp_style, rep.color, rep.article,
-         concat('LinePlan ref# "', trim(rep.lineplan_ref), '" does not exist in any active LinePlan request.'),
+  SELECT 'Costing', 'LINEPLAN_REF_NOT_IN_LINEPLAN', 'warning', 'DTC user', rep.request, rep.bp_style, rep.color, rep.article,
+         concat('LinePlan ref# "', trim(rep.lineplan_ref), '" does not exist in any active LinePlan request. The costing line forms without Order Qty / Target LDP / Target FOB.'),
          'DTC user: check the ref for typos, or ask the LinePlan owner to add it.',
          '3'
   FROM rep LEFT ANTI JOIN lp_refs ON lp_refs.ref = trim(rep.lineplan_ref)

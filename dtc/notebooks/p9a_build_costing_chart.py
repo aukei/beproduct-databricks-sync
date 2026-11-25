@@ -17,27 +17,26 @@ Join key
   (note: WIP column is plain "Lineplan Ref #"; spec said "(GC)" but actual
    DTC column name has no suffix — confirmed live 2026-07-17)
 
-  INNER JOIN (changed from LEFT 2026-09-01, owner decision): a WIP row with
-  a blank "Lineplan Ref #", or one that doesn't match any LinePlan row, is
-  DROPPED entirely rather than surfacing in costing_chart with null
-  order_quantity/target_ldp/target_fob. costing_chart should only ever
-  contain rows with real, matched LinePlan data.
+  LEFT JOIN (owner spec 2026-11-25, "LinePlan ref# is OPTIONAL"; it was an
+  INNER JOIN from 2026-09-01): a Main Fabric row with a blank or unmatched
+  ref still reaches costing_chart, with order_quantity/target_ldp/target_fob
+  NULL. The LinePlan only ever ADDS those three values.
 
 Transpose
 ---------
-  Each WIP row (style × color) that survives the INNER JOIN above is
-  expanded into up to 4 costing rows by exploding the four vendor/factory
-  pairs:
+  Each WIP row (style × color) is expanded into up to 4 costing rows by
+  exploding the four vendor/factory pairs:
     slot  vendor_col                factory_col
     ────  ──────────────────────    ──────────────────────────
     Main  "Main Vendor (Sampling)"  "Main Factory (Sampling)"
     1     "Vendor 1"                "Factory 1"
     2     "Vendor 2"                "Factory 2"
     3     "Vendor 3"                "Factory 3"
-  Slots where vendor is blank are STILL dropped independently of the join
-  above (a style can have a matched Lineplan Ref# but zero vendors assigned
-  yet, producing zero costing rows for that style — this is expected, not a
-  join bug). A style may produce 0–4 rows.
+  A slot becomes a row as soon as its VENDOR is filled (the factory is a
+  lookup on the vendor in the master chart, so the two go together; owner
+  2026-11-25). The vendor is also part of the Lakebase synced table's
+  primary key, so it must never be NULL on a costing row. A style may
+  produce 0–4 rows.
 
 HTS / Duty / Tariff
 -------------------
@@ -80,7 +79,7 @@ Costing chart schema (field → source):
   supplier            vendor column for the slot
   factory             factory column for the slot
   production_country  from WIP per-slot production country field
-  order_quantity      from LinePlan "PROJECTED VOLUME (season)"
+  order_quantity      from LinePlan "PROJECTED VOLUME (SEASON)"
   target_ldp          from LinePlan "TARGET SAP w/ Tariff impact"
   target_fob          from LinePlan "TARGET FOB"
   hts_code            from WIP per-slot HTS field  (Phase 9b: NT Orbit fallback)
@@ -355,7 +354,8 @@ wip = wip_raw.select(
     jcol("data_json", "Class",             "class_"),           # avoid Python keyword
     jcol("data_json", "Sub Class",         "sub_class"),
     # First non-blank of the accepted names (sync/lineplan.py). DTC renamed
-    # "Lineplan Ref #" -> "LinePlan ref#" on 2026-09-28; reading only the old
+    # "Lineplan Ref #" -> "LinePlan ref#" on 2026-09-28 (LinePlan sheet:
+    # "LINEPLAN #" since 2026-11-25); reading only the old
     # name returned NULL on every row and emptied costing_chart on a green run.
     F.coalesce(*[F.when(F.trim(F.get_json_object(F.col("data_json"), f"$['{_c}']")) != "",
                         F.trim(F.get_json_object(F.col("data_json"), f"$['{_c}']")))
@@ -633,8 +633,8 @@ print(f"  LinePlan rows: {lp_raw.count()}")
 # winner on a conflict, detect and loudly warn on any ref whose plan values
 # actually disagree across rows/requests, so a human can catch and fix it.
 conflict_check = (lp_raw
-    # Blank refs are EXCLUDED (2026-09-23). They are dropped by the INNER
-    # JOIN below anyway, but they all collapse into one `lineplan_ref=NULL`
+    # Blank refs are EXCLUDED (2026-09-23). They never match in the join
+    # below anyway, but they all collapse into one `lineplan_ref=NULL`
     # group -- live: 1188 of 1224 rows are blank, showing 56 distinct
     # quantities -- so the warning fired on every run and BURIED the real
     # conflicts underneath it.
@@ -686,24 +686,23 @@ print(f"  LinePlan distinct refs: {lp.count()}")
 
 # COMMAND ----------
 
-# ── Step 3: Join WIP + LinePlan on Lineplan Ref # ─────────────────────────────
-# INNER JOIN (changed from LEFT 2026-09-01, owner decision): costing_chart
-# should ONLY contain WIP rows that actually have a matching LinePlan row --
-# a WIP row with a blank/unmatched "Lineplan Ref #" is dropped entirely
-# rather than surfacing with null order_quantity/target_ldp/target_fob.
-print("\nStep 3: Joining WIP + LinePlan on 'Lineplan Ref #' (INNER) …")
-wip_with_ref = wip.filter(F.col("lineplan_ref").isNotNull() & (F.trim(F.col("lineplan_ref")) != ""))
-dropped_no_ref = wip.count() - wip_with_ref.count()
-joined = wip_with_ref.join(lp, on="lineplan_ref", how="inner")
+# ── Step 3: Join WIP + LinePlan on the LinePlan ref ───────────────────────────
+# LEFT JOIN (owner spec 2026-11-25: the ref is OPTIONAL; INNER from 2026-09-01
+# until then). A row with a blank or unmatched ref keeps going, with NULL
+# order_quantity / target_ldp / target_fob. `lp` has one row per ref, so the
+# join never multiplies rows, and a NULL ref never matches.
+print("\nStep 3: Joining WIP + LinePlan on the LinePlan ref (LEFT, optional) …")
+no_ref = wip.filter(F.col("lineplan_ref").isNull() | (F.trim(F.col("lineplan_ref")) == "")).count()
+joined = wip.join(lp, on="lineplan_ref", how="left")
 joined_count = joined.count()
-print(f"  WIP rows dropped (blank Lineplan Ref #): {dropped_no_ref}")
-print(f"  WIP rows with a Lineplan Ref #          : {wip_with_ref.count()}")
-print(f"  Joined rows (matched to LinePlan)        : {joined_count}")
-unmatched_ref = wip_with_ref.count() - joined_count
+matched_ref = (joined.join(lp.select("lineplan_ref"), on="lineplan_ref", how="left_semi").count())
+unmatched_ref = joined_count - no_ref - matched_ref
+print(f"  WIP rows with no LinePlan ref (kept)     : {no_ref}")
+print(f"  WIP rows matched to LinePlan             : {matched_ref}")
 if unmatched_ref:
-    print(f"  ⚠️  {unmatched_ref} WIP row(s) have a Lineplan Ref # that does NOT "
-          f"exist in {lineplan_table} — dropped by the inner join. Check for typos "
-          f"or a ref# not yet entered in the LinePlan sheet.")
+    print(f"  ⚠️  {unmatched_ref} WIP row(s) have a LinePlan ref that does NOT "
+          f"exist in {lineplan_table} — kept without LinePlan values. Check for "
+          f"typos or a ref not yet entered in the LinePlan sheet.")
 
 # COMMAND ----------
 
@@ -749,7 +748,8 @@ def _slot_df(
         # All four slot columns are live now, so it behaves like the others.
         .withColumn("tariff_rate",       F.col(tf_col))
         .withColumn("updated_at",        F.lit(now.isoformat()).cast("timestamp"))
-        # Drop rows where vendor is blank — no vendor = no costing row
+        # No vendor = no costing row. Also keeps `supplier` non-NULL: it is part
+        # of the Lakebase synced table's primary key.
         .filter(F.col("supplier").isNotNull() & (F.trim(F.col("supplier")) != ""))
         .select(
             *COMMON_COLS,
@@ -791,11 +791,11 @@ costing_chart = costing_chart.withColumnRenamed("class_", "class_name")
 
 total_costing = costing_chart.count()
 
-# Step 4's own gate: a joined row with NO non-blank vendor slot produces ZERO
-# costing rows and vanishes without any error. It is the third of the three
-# independent gates (completeness / LinePlan join / vendor slot) and the one
-# with no message of its own -- so count it explicitly rather than leaving the
-# reader to infer it from "16 joined -> 7 rows".
+# Step 4's own gate: a row with NO non-blank vendor slot produces ZERO
+# costing rows and vanishes without any error. It is the last gate after
+# Step 1b's completeness checks, and the one with no message of its own -- so
+# count it explicitly rather than leaving the reader to infer it from
+# "16 joined -> 7 rows".
 rows_with_no_slot = joined.filter(
     ~reduce(lambda _a, _b: _a | _b,
             [F.col(c).isNotNull() & (F.trim(F.col(c)) != "")
@@ -805,7 +805,7 @@ slot_counts = {r["supplier_type"]: int(r["count"]) for r in
                costing_chart.groupBy("supplier_type").count().collect()}
 
 print(f"  Costing chart rows after transpose: {total_costing}")
-print(f"  Joined rows with NO vendor slot at all (dropped here): {rows_with_no_slot}")
+print(f"  Rows with NO vendor slot at all (dropped here): {rows_with_no_slot}")
 
 # Duty fields as READ BACK FROM WIP, before Step 4c touches anything. Reported
 # separately because Step 4c refills a blank one from the NT Orbit cache, which
@@ -973,8 +973,8 @@ print(f"{'='*72}")
 print(f"  WIP input rows        : {wip_raw.count()}")
 print(f"  LinePlan input rows   : {lp_raw.count()}")
 print(f"  WIP rows dropped (no material_no/bp_style_no, or fabric_content blank/'Main Fabric') : {dropped_incomplete_fabric}")
-print(f"  WIP rows w/o Lineplan Ref # (dropped) : {dropped_no_ref}")
-print(f"  WIP rows matched to LinePlan (INNER)  : {joined_count}")
+print(f"  WIP rows w/o LinePlan ref (kept)      : {no_ref}")
+print(f"  WIP rows matched to LinePlan          : {matched_ref}")
 print(f"  Costing chart rows    : {total_costing}")
 print(f"  Output table          : {output_table}")
 print()
@@ -1012,10 +1012,12 @@ _summary = {
         "dropped_no_bp_style_no": int(dropped_no_bp_style_no),
         "dropped_blank_content": int(dropped_no_content),
         "dropped_not_main_fabric": int(dropped_not_main_fabric),
-        # Step 3 -- the LinePlan INNER join.
-        "dropped_no_lineplan_ref": int(dropped_no_ref),
-        "joined_to_lineplan": int(joined_count),
-        # Step 4 -- the third gate, which otherwise vanishes silently.
+        # Step 3 -- the LinePlan LEFT join drops nothing; these only count
+        # rows that reach costing without LinePlan values.
+        "no_lineplan_ref": int(no_ref),
+        "joined_to_lineplan": int(matched_ref),
+        "lineplan_ref_not_found": int(unmatched_ref),
+        # Step 4 -- the last gate, which otherwise vanishes silently.
         "dropped_no_vendor_slot": int(rows_with_no_slot),
     },
     "rows_by_vendor_slot": slot_counts,

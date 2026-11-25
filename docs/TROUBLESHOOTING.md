@@ -356,7 +356,8 @@ SELECT request_reference, bp_style_number, color_wash,
 FROM lft.beproduct.dtc_wip_ktb WHERE bp_style_number = 'KTB-00030';
 ```
 
-Walk the gates **in order**. The first one that fails is your answer:
+Walk the gates **in order**. The first one that fails is your answer. (A line
+that exists but has blank Order Qty / Target LDP / Target FOB: see 5–6.)
 
 | # | Gate | Exit-value counter | Usual cause → fix |
 |---|---|---|---|
@@ -365,8 +366,8 @@ Walk the gates **in order**. The first one that fails is your answer:
 | 2 | BP Style# non-blank | `dropped_no_bp_style_no` | Row typed by hand in DTC |
 | 3 | `Content` non-blank and not `"Main Fabric"` | `dropped_blank_content` | `**MaterialContent` blank in the techpack. Fill it at the source, or type it in DTC (Content is write-once, so a hand value is kept) |
 | 4 | `Fabric Group` is exactly `Main Fabric` | `dropped_not_main_fabric` | **By design.** "Fabric" segment rows never get a costing line. Only the Main Fabric row does |
-| 5 | `LinePlan ref#` non-blank | `dropped_no_lineplan_ref` | Users must enter it **on the Main Fabric row**. It is DTC-owned, and the pipeline never fills it. **If it drops EVERY row**, check the column was not renamed in DTC again: the names the pipeline accepts are in `sync/lineplan.py`, and the dashboard flags `LINEPLAN_COLUMN_RENAMED` |
-| 6 | Ref matches a LinePlan row | `joined_to_lineplan` too low | Typo, or the LinePlan request is not active. Check `dtc_lineplan_ktb` |
+| 5 | *Not a gate since 2026-11-25*: blank `LinePlan ref#` | `no_lineplan_ref` | The line forms without Order Qty / Target LDP / Target FOB. To get them, enter the ref **on the Main Fabric row** (DTC-owned; the pipeline never fills it). If EVERY row lacks one, check the WIP column was not renamed: names in `sync/lineplan.py`, dashboard `LINEPLAN_COLUMN_RENAMED` |
+| 6 | *Not a gate since 2026-11-25*: ref not in LinePlan | `lineplan_ref_not_found` | Same: line forms, LinePlan values blank. Typo, or the LinePlan request is not active. Check `dtc_lineplan_ktb`. **If `lineplan_ref` is NULL on every row there**, the LinePlan sheet renamed its column (`LINEPLAN #` since 2026-11-25; dashboard `LINEPLAN_SHEET_HAS_NO_REFS`): add the name at the front of `sync/lineplan.py` |
 | 7 | At least one vendor slot filled | `dropped_no_vendor_slot` | Enter `Main Vendor (Sampling)` or `Vendor 1–3` on the Main Fabric row |
 
 Rules of thumb:
@@ -374,7 +375,8 @@ Rules of thumb:
   **Main Fabric** row. Costing reads one representative row per style ×
   colour, and prefers Main Fabric.
 - If a request was emptied or rebuilt, **these DTC-owned values are gone** and
-  nothing upstream restores them. The whole request then drops at gate 5.
+  nothing upstream restores them. The whole request then drops at gate 7
+  (no vendor), and loses its LinePlan values.
   Recover the values from `dtc_wip_ktb VERSION AS OF <n>` and re-enter them.
 - A LinePlan ref that exists twice with different plan values is a warning in
   the task output (`CONFLICTING`). It does not block, but the chosen values are

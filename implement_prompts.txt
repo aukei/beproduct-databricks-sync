@@ -1026,3 +1026,11 @@ according to beproduct setup, possibile values of "Group" are ["Main Fabric",'Fa
 - DTC "KTB WIP" now has a "Soft Delete" field. Whenever a BOMvariation line, i.e. a material or a color is removed, their corresponding WIP master chart line should be marked "soft deleted = Y"
 - In this case, whenever there is a (material#, color#) key change, it is not an update but a soft delete + insert action. 
 - During "KTB WIP HISTORY" backup, copy only "Soft Delete <> Y" rows. "WIP HISTORY" document does not contain the "soft delete" field.
+
+- BOM
+    - when reading BOMVariation, if there is only Dev BOM then read it, if there are Dev BOM and Prod BOM, then read only Prod BOM.
+    - This concerns Fabric Dev Chart scan only, DTC master chart sync based on PDF extraction and hide this BOM difference.
+
+- DTC LinePlan documents: col "LinePlan ref#' renamed to 'LINEPLAN #',"PROJECTED VOLUME (season)" to "PROJECTED VOLUME (SEASON)".
+- LinePlan ref# is also made OPTIONAL - so a master chart style - main material line ALWAYS goes to costing chart as soon as Vendor is filled.
+    - the gate changed from having 'LINEPLAN #' matching a LINEPLAN line to having Vendor filled on master chart.

@@ -375,6 +375,35 @@ this stays true by construction; verify it stays true after any change).
 
 ## Verified discoveries log (append-dated; do not delete)
 
+**DTC LinePlan sheet renamed its join key AGAIN (2026-11-25, owner spec
+"Post customer meeting update 2").** Live view `Full`
+(`69f0788555010bb745140ac4`, now 41 fields): `LINEPLAN #` (was `LinePlan ref#`)
+and `PROJECTED VOLUME (SEASON)` (was `(season)`; a separate `PROJECTED VOLUME
+(ANNUAL)` also exists and is NOT ours). Every other column the pull reads is
+unchanged. **KTB WIP keeps `LinePlan ref#`** (checked on `WIP_ITS_USE`), so the
+two sides of the join now have different names. One list,
+`sync/lineplan.LINEPLAN_REF_COLS` = (`LINEPLAN #`, `LinePlan ref#`,
+`Lineplan Ref #`), still serves both: each sheet carries only its own name.
+`PROJECTED_VOLUME_COLS` + `first_value()` added for the volume. Until the pull
+picks this up, `dtc_lineplan_ktb.lineplan_ref` is NULL on every row and
+`costing_chart` builds EMPTY on a green run (dashboard
+`LINEPLAN_SHEET_HAS_NO_REFS`) -- the same silent shape as 2026-09-28.
+Live 2026-11-25: `dtc_lineplan_ktb` 10 rows, 0 with a ref; `costing_chart` 0 rows.
+
+**LinePlan ref# is OPTIONAL in costing (2026-11-25, owner spec, same update).**
+`p9a_build_costing_chart` Step 3 is a LEFT join again (INNER since 2026-09-01):
+a Main Fabric row with a blank or unmatched ref forms its costing lines with
+NULL `order_quantity` / `target_ldp` / `target_fob`. Exit counters
+`no_lineplan_ref` / `lineplan_ref_not_found` replace `dropped_no_lineplan_ref`.
+**The slot gate stays on the VENDOR** (owner: the factory is a lookup on the
+vendor in the master chart, so "factory filled" = "vendor filled"). Hard
+constraint found while checking: both Lakebase synced tables
+`alb_tpm_{uat,prd}.public.ref_beproduct_ktb_costing_chart` have primary key
+`(customer, season_code, brand, bp_style_no, color_name, supplier, factory)`
+(SNAPSHOT), so a costing row must never carry a NULL `supplier`.
+`lineplan_ref` is not in that key, so a NULL ref is safe. Data-gaps view:
+`LINEPLAN_REF_MISSING` / `LINEPLAN_REF_NOT_IN_LINEPLAN` blocker -> warning.
+
 **Soft delete in KTB WIP -- BeProduct -> DTC is no longer upsert-only
 (2026-11-24, owner spec "Post customer meeting update 2"; DEPLOYED to the v2
 root 2026-11-24, job definition unchanged).** PIPELINE.md Stage 40 "Soft

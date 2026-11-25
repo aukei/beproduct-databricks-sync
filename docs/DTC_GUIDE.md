@@ -87,7 +87,7 @@ Connector methods: `search_requests`, `get_request`, `get_views`,
 | `p1_pull_masters_to_delta.py` | 10 | Refresh WIP registry; pull each in-scope active request's `WIP_ITS_USE` view | `dtc_wip_<customer>`, `dtc_request_registry` |
 | `p9a_pull_lineplan_to_delta.py` | 10 | Pull every active KTB LinePlan request (no name filter; `Full` view) | `dtc_lineplan_<customer>`, `dtc_lineplan_registry` |
 | `v2_pull_bom_segments.py` | 20b | Lakebase techpack BOM (serverless-only source) | `bom_segments` |
-| `p9a_build_costing_chart.py` | 30 | Intent overlay + LinePlan INNER join + 4-slot transpose + cache fill | `costing_chart` (full overwrite) |
+| `p9a_build_costing_chart.py` | 30 | Intent overlay + LinePlan LEFT join (ref optional) + 4-slot transpose + cache fill | `costing_chart` (full overwrite) |
 | `v2_wip_push.py` | 40 | **The single DTC write window** (style + material + duty) | DTC WIP, `beproduct_to_dtc_sync_log` |
 | `p2_push_dtc_to_beproduct.py` | 50 | DTC-owned fields → BeProduct (Vendor, Factory, Customer Factory ID, COO, Lot#) | BeProduct, `dtc_to_beproduct_sync_log` |
 | `v2_push_customer_code.py` | 55 | DTC customer code → BeProduct material master (**disabled**) | BeProduct |
@@ -163,15 +163,16 @@ locator; `row_index` is kept for deterministic tie-breaks only. Keys:
 
 `lineplan_ref`, `projected_volume`, `target_ldp`, `target_fob`, `internal_sourced`,
 `gender`, `category`, `product_line`, `region`, `season_launched`, `data_json`.
-View: "Full" (id `69f0788555010bb745140ac4`, 30 fields). Exact DTC field names
-(all UPPERCASE): `"PROJECTED VOLUME (season)"`, `"TARGET SAP w/ Tariff impact"`.
+View: "Full" (id `69f0788555010bb745140ac4`, 41 fields on 2026-11-25). Exact DTC
+field names: `"LINEPLAN #"` (join key), `"PROJECTED VOLUME (SEASON)"`,
+`"TARGET SAP w/ Tariff impact"`. Both name lists live in `sync/lineplan.py`.
 
 ### `costing_chart` — Stage 30
 
 Style × colour × material × vendor slot, Main Fabric rows only. Columns, key and
 gates: [PIPELINE.md](PIPELINE.md) → Stage 30 and
-[ARCHITECTURE.md](ARCHITECTURE.md) § 5. A WIP row with no matching
-`LinePlan ref#` is dropped (INNER join), not surfaced with nulls.
+[ARCHITECTURE.md](ARCHITECTURE.md) § 5. The LinePlan ref is optional (since
+2026-11-25): a row with none, or an unmatched one, gets NULL LinePlan values.
 
 ### `dtc_request_mapping` — resolved requests (overwritten each run)
 
